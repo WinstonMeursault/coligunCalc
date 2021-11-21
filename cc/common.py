@@ -5,8 +5,8 @@ from scipy.integrate import quad
 from scipy.special import ellipk, ellipe, j0, j1, struve
 from functools import lru_cache
 
-pi = 3.141592653589793
-e  = 2.718281828459045
+pi = np.pi
+e  = np.e
 Mu0 = 4 * pi * np.float_power(10, -7)
 
 parameterSets = {
@@ -21,6 +21,9 @@ p = parameterSets
 
 
 def Rd():
+    '''
+    计算驱动线圈电阻
+    '''
     V = pi * (p["r2"] * p["r2"] - p["r1"] * p["r1"]) * p["ld"]
     l = p["k"] * V / p["Sw"]
     Rd = p["RhoD"] * l / p["SW"]
@@ -30,6 +33,9 @@ def Rd():
 
 @lru_cache(maxsize=1)
 def Ra(j):
+    '''
+    计算电枢电流丝电阻
+    '''
     if j == 1:
         rj = p["r3"] + j * (p["r4"] - p["r3"]) / p["n"]
         r = rj - (p["r4"] - p["r3"]) / (2 * p["n"])
@@ -42,10 +48,14 @@ def Ra(j):
         return Ra(j - 1) + p["m"] / p["la"]
 
 
-def T(q, p):
-    def integrand(x):
-x = np.linspace(-10, 10, 1000)
-    return quad(integrand, 0, np.inf)
+def U(p,x):
+    pass
+
+def T_integration():
+    pass
+
+def T(p, q):
+    return quad(T_integration, 0, float("inf"))
 
 
 def L(nc, rci, rco, lc):
