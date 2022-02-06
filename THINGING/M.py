@@ -16,7 +16,7 @@ def cK(Ra, Rd, d):
 def cM(Ra, Rd, d):
     k = cK(Ra, Rd, d)
 
-    return μ0 * sqrt(Ra * Rd) * ((2 / k - k) * E(k) - (2 / k) * E(k))
+    return μ0 * sqrt(Ra * Rd) * ((2 / k - k) * K(k) - (2 / k) * E(k))
 
 
 def cdM(Ra, Rd, d):
@@ -26,16 +26,16 @@ def cdM(Ra, Rd, d):
 
 
 if __name__ == "__main__":
-    Ra = 0.1
-    Rd = 0.12
+    Ra = 1
+    Rd = 1.05
     d = linspace(-1 , 1, 11000)   
 
-    plt.xlabel("M")
-    plt.ylabel("d")
+    plt.xlabel("d")
+    plt.ylabel("M")
     plt.plot(d, [ cM(Ra, Rd, t) for t in d])
     plt.show()
 
-    plt.xlabel("M")
+    plt.xlabel("d")
     plt.ylabel("dM")
     plt.plot(d, [cdM(Ra ,Rd, t) for t in d])
     plt.show()
