@@ -3,5 +3,3 @@
 ## 概述
 
 计算SICEML相关内容(包括单级SICEML与多级SICEML)
-
-Compute SICEML related content(both single stage and multistage)
