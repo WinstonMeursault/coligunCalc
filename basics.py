@@ -13,75 +13,57 @@ from scipy.special import ellipk as eK
 μ0 = 4 * pi * pow(10, -7)
 
 
-class coil():
-    def __init__(self, x0, nc, rci, rco, l):
-        self.x = x0
-        self.nc = nc
-        self.rci = rci
-        self.rco = rco
-        self.l = l
+def L(coilA, limit = 125):
+    p = coilA.re / coilA.ri
+    q = coilA.l / coilA.ri
         
-        self.Ra = (rci + rco) / 2
+    # U = lambda x: quad(lambda x: x * j1(x), x, p * x)[0] / pow(x, 3)
+    U = lambda x: pi * (-j1(x) * struve(0, x)  +  p * j1(p * x) * struve(0, p * x)  + j0(x) * struve(1, x)  -  p * j0(p * x) * struve(1, p * x)) / (2 * pow(x,2))
         
-        self.R = self.R()
-        self.L = self.L()
-
-    def calcK(self, others, d):
-        return sqrt((4 * self.Ra * others.Ra) / (pow((self.Ra + others.Ra), 2) + pow(d, 2)))
-
-    def updatePosition(self, delta):
-        self.x += delta
-
-    def R(self):
-        pass
-
-    def L(self):
-        p = self.rco / self.rci
-        q = self.l / self.rci
+    integrationT = lambda x: pow(U(x), 2) * (q * x  +  pow(e,(-1 * q * x))  -  1)
+    T = quad(integrationT, 0, np.inf, limit = limit)[0]
         
-        # U = lambda x: quad(lambda x: x * j1(x), x, p * x)[0] / pow(x, 3)
-        U = lambda x: pi * (-j1(x) * struve(0, x)  +  p * j1(p * x) * struve(0, p * x)  + j0(x) * struve(1, x)  -  p * j0(p * x) * struve(1, p * x)) / (2 * pow(x,2))
-        
-        integrationT = lambda x: pow(U(x), 2) * (q * x  +  pow(e,(-1 * q * x))  -  1)
-        T = quad(integrationT, 0, np.inf, limit=100)
-        
-        return 2 * pi * μ0 * np.power(self.nc, 2) * np.power(self.rci, 5) * T()
+    return 2 * pi * μ0 * np.power(coilA.nc, 2) * np.power(coilA.ri, 5) * T
 
-    def M(self, others):
-        d = abs(self.x - others.x)
-        k = self.calcK(others, d)
+def calcK(coilA, coilB, d):
+    return sqrt((4 * coilA.Ra * coilB.Ra) / (pow((coilA.Ra + coilB.Ra), 2) + pow(d, 2)))
 
-        return μ0 * sqrt(self.Ra * others.Ra) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+def M(coilA, coilB):
+    d = abs(coilA.x - coilB.x)
+    k = calcK(coilA, coilB, d)
 
-    def dM(self, others):
-        d = abs(self.x - others.x)
-        k = self.calcK(others, d)
+    return μ0 * sqrt(coilA.Ra * coilB.Ra) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
-        return (μ0 * k * d * (2 * (1 - pow(k, 2)) * eK(k) - (2 - pow(k, 2)) * eE(k))) / (4 * (1 - pow(k, 2)) * sqrt(self.Ra * others.Ra))
+def dM(coilA, coilB):
+    d = abs(coilA.x - coilB.x)
+    k = calcK(coilA, coilB, d)
+
+    return (μ0 * k * d * (2 * (1 - pow(k, 2)) * eK(k) - (2 - pow(k, 2)) * eE(k))) / (4 * (1 - pow(k, 2)) * sqrt(coilA.Ra * coilB.Ra))
 
 
-class drivingCoil(coil):
-    def __init__(self,rdi, rde, ld, n):
-        self.rdi = rdi
-        self.rde = rde
-        self.ld = ld
+class drivingCoil():
+    def __init__(self,rdi, rde, ld, n, x0):
+        self.ri = rdi
+        self.re = rde
+        self.l = ld
         self.n = n
+        self.x0 = x0
         
-        Sd = 0.5 * (self.rde - self.rdi) * self.ld
-        nc = self.n / Sd
+        self.Ra = (self.ri + self.re) / 2
         
-        #TODO 将Sd/nc移入Class coil
+        Sd = (self.re - self.ri) * self.l
+        self.nc = self.n / Sd
         
-        coil.__init__(self, 0, nc, rdi, rde, ld)
-    
+        self.L = L(self)
+
     def R(self):
         # TODO
 
         pass
 
-class armature(coil):
+class armature():
     def __init__(self, x0, nc, rci, rco, l):
-        coil.__init__(self, x0, nc, rci, rco, l)
+        pass
     
     def R(self):
         # TODO
