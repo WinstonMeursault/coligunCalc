@@ -26,46 +26,69 @@ def L(coilA, limit = 125):
     return 2 * pi * μ0 * np.power(coilA.nc, 2) * np.power(coilA.ri, 5) * T
 
 def calcK(coilA, coilB, d):
-    return sqrt((4 * coilA.Ra * coilB.Ra) / (pow((coilA.Ra + coilB.Ra), 2) + pow(d, 2)))
+    return sqrt((4 * coilA.r * coilB.r) / (pow((coilA.r + coilB.r), 2) + pow(d, 2)))
 
-def M(coilA, coilB):
-    d = abs(coilA.x - coilB.x)
+def M(coilA, coilB, d = None):
+    if d == None:
+        d = abs(coilA.x - coilB.x)
     k = calcK(coilA, coilB, d)
 
-    return μ0 * sqrt(coilA.Ra * coilB.Ra) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+    return μ0 * sqrt(coilA.r * coilB.r) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
-def dM(coilA, coilB):
-    d = abs(coilA.x - coilB.x)
+def dM(coilA, coilB, d = None):
+    if d == None:
+        d = abs(coilA.x - coilB.x)
     k = calcK(coilA, coilB, d)
 
-    return (μ0 * k * d * (2 * (1 - pow(k, 2)) * eK(k) - (2 - pow(k, 2)) * eE(k))) / (4 * (1 - pow(k, 2)) * sqrt(coilA.Ra * coilB.Ra))
+    return (μ0 * k * d * (2 * (1 - pow(k, 2)) * eK(k) - (2 - pow(k, 2)) * eE(k))) / (4 * (1 - pow(k, 2)) * sqrt(coilA.r * coilB.r))
 
 
 class drivingCoil():
-    def __init__(self,rdi, rde, ld, n, x0):
+    def __init__(self,rdi, rde, ld, n, x0, resistivity, s, k):
         self.ri = rdi
         self.re = rde
         self.l = ld
-        self.n = n
-        self.x0 = x0
+        self.n = n                      # 线圈匝数
+        self.x = x0
+        self.SR = resistivity           # 电阻率
+        self.s = s                      # 单根导线的截面积
+        self.k = k                      # 驱动线圈填充率
         
-        self.Ra = (self.ri + self.re) / 2
-        
+        self.r = (self.ri + self.re) / 2
         Sd = (self.re - self.ri) * self.l
+        
         self.nc = self.n / Sd
         
+        self.R = self.R()
         self.L = L(self)
 
     def R(self):
-        # TODO
-
-        pass
+        return (self.SR * self.k * pi * (pow(self.re, 2) - pow(self.ri, 2)) * self.l) / pow(self.s, 2)
 
 class armature():
-    def __init__(self, x0, nc, rci, rco, l):
-        pass
+    def __init__(self,rai, rae, la, x0, resistivity, m, n):
+        self.ri = rai
+        self.re = rae
+        self.l = la
+        self.x = x0
+        self.SR = resistivity
+        self.m = m
+        self.n = n
+        
+        self.currentFilaments = {}
+        for i in range(1, self.m + 1):
+            for j in range(1, self.n + 1):
+                self.currentFilaments[i][j] = {
+                    "r": None,
+                    "R":None,
+                    "L":None
+                }
     
     def R(self):
-        # TODO
-
-        pass
+        deltaR = 2 * pi * self.SR * self.m / self.l
+        for k in self.currentFilaments:
+            for l in range(1, self.m + 1):
+                pass    # TODO
+    
+    def updatePosition(self, delta):
+        self.x += delta
