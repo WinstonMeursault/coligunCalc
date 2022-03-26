@@ -70,14 +70,19 @@ class drivingCoil():
     def R(self):
         return (self.SR * self.k * pi * (pow(self.re, 2) - pow(self.ri, 2)) * self.l) / pow(self.s, 2)
 
+
 class currentFilament():
-    def __init__(self, ri, re, R, L):
+    def __init__(self, ri, re, l, R, L):
         self.ri = ri
         self.re = re
+        self.l = l
         self.R = R
         self.L = L
-        
+
         self.r = (self.ri + self.re) / 2
+        
+        Sc = l * (self.re - self.ri)
+        self.nc = 1 / Sc
 
 
 class armature():
@@ -91,17 +96,21 @@ class armature():
         self.n = n
 
         self.currentFilaments = {}
-        
+
         for i in range(1, self.m + 1):
             for j in range(1, self.n + 1):
-                self.currentFilaments[i][j] = currentFilament(ri = self.currentFilamentR(j - 1), re = self.currentFilamentR(j), R = None, L = None)
-        
+                self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1), 
+                                                              re=self.currentFilamentR(j), 
+                                                              l=self.l / self.m, 
+                                                              R=None, 
+                                                              L=None)
+
         self.R()
         self.L()
 
-    def currentFilamentR(self,j):
+    def currentFilamentR(self, j):
         return self.ri + (self.re - self.ri) * j / self.n
-    
+
     def updatePosition(self, delta):
         self.x += delta
 
@@ -117,6 +126,8 @@ class armature():
         for k in self.currentFilaments:
             for l in range(1, self.n + 1):
                 k[l].R = R[l]
-    
+
     def L(self):
-        pass                        # TODO
+        for i in range(1, self.m + 1):
+            for j in range(1, self.n + 1):
+                self.currentFilaments[i][j].L = L(self.currentFilaments[i][j])
