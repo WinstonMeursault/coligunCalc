@@ -31,31 +31,29 @@ def calcK(coilA, coilB, d):
     return np.sqrt((4 * coilA.r * coilB.r) / (np.power((coilA.r + coilB.r), 2) + np.power(d, 2)))
 
 
-def M(coilA, coilB, d=None):
-    if d == None:
-        d = abs(coilA.x - coilB.x)
+def M(coilA, coilB):
+    d = abs(coilA.x - coilB.x)
     k = calcK(coilA, coilB, d)
 
     return μ0 * np.sqrt(coilA.r * coilB.r) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
 
 def dM(coilA, coilB, d=None):
-    if d == None:
-        d = abs(coilA.x - coilB.x)
+    d = abs(coilA.x - coilB.x)
     k = calcK(coilA, coilB, d)
 
     return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(coilA.r * coilB.r))
 
 
 class drivingCoil():
-    def __init__(self, rdi, rde, ld, n, x0, resistivity, s, k):
+    def __init__(self, rdi, rde, ld, n, resistivity, Swire, k, s):
         self.ri = rdi
         self.re = rde
         self.l = ld
         self.n = n                      # 线圈匝数
-        self.x = x0
+        self.x = s
         self.SR = resistivity           # 电阻率
-        self.s = s                      # 单根导线的截面积
+        self.Swire = Swire              # 单根导线的截面积
         self.k = k                      # 驱动线圈填充率
 
         self.r = (self.ri + self.re) / 2
@@ -67,32 +65,37 @@ class drivingCoil():
         self.L = L(self)
 
     def R(self):
-        return (self.SR * self.k * np.pi * (np.power(self.re, 2) - np.power(self.ri, 2)) * self.l) / np.power(self.s, 2)
+        return (self.SR * self.k * np.pi * (np.power(self.re, 2) - np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
 
 
 class currentFilament():
-    def __init__(self, ri, re, l, R, L):
+    def __init__(self, ri, re, l, R, L, x0):
         self.ri = ri
         self.re = re
         self.l = l
         self.R = R
         self.L = L
+        self.x = x0
 
         self.r = (self.ri + self.re) / 2
 
         Sc = l * (self.re - self.ri)
         self.nc = 1 / Sc
 
+    def updatePosition(self, delta):
+        self.x += delta
+
 
 class armature():
-    def __init__(self, rai, rae, la, x0, resistivity, m, n):
+    def __init__(self, rai, rae, la, resistivity, m, n):
         self.ri = rai
         self.re = rae
         self.l = la
-        self.x = x0
         self.SR = resistivity
         self.m = m
         self.n = n
+        
+        self.x = 0
 
         self.currentFilaments = {}
 
@@ -102,7 +105,8 @@ class armature():
                                                               re=self.currentFilamentR(j),
                                                               l=self.l / self.m,
                                                               R=None,
-                                                              L=None)
+                                                              L=None,
+                                                              x0 = self.l * (i - 0.5) / self.m - 0.5 * self.l)
 
         self.R()
         self.L()
@@ -111,7 +115,9 @@ class armature():
         return self.ri + (self.re - self.ri) * j / self.n
 
     def updatePosition(self, delta):
-        self.x += delta
+        for i in range(1, self.m + 1):
+            for j in range(1, self.n + 1):
+                self.currentFilaments[i][j].updatePosition(delta)
 
     def R(self):
         deltaR = 2 * np.pi * self.SR * self.m / self.l
