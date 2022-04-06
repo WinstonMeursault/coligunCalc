@@ -5,92 +5,108 @@ import numpy as np
 from basics import *
 
 
-class drivingCoil():
-    def __init__(self, rdi, rde, ld, n, resistivity, Swire, k, s):
-        self.ri = rdi
-        self.re = rde
-        self.l = ld
-        self.n = n                      # 线圈匝数
-        self.x = s
-        self.SR = resistivity           # 电阻率
-        self.Swire = Swire              # 单根导线的截面积
-        self.k = k                      # 驱动线圈填充率
-
-        self.r = (self.ri + self.re) / 2
-        Sd = (self.re - self.ri) * self.l
-
-        self.nc = self.n / Sd
-
-        self.R = self.R()
-        self.L = L(self)
-
-    def R(self):
-        return (self.SR * self.k * np.pi * (np.power(self.re, 2) - np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
-
-
-class armature():
-    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n):
-        self.ri = rai
-        self.re = rae
-        self.l = la
-        self.SR = resistivity
-        self.v0 = v0
-        self.ma = ma
-        self.m = m
-        self.n = n
-
-        self.x = 0
-
-        self.currentFilaments = {}
-
-        for i in range(1, self.m + 1):
-            for j in range(1, self.n + 1):
-                self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1),
-                                                              re=self.currentFilamentR(
-                                                                  j),
-                                                              l=self.l / self.m,
-                                                              R=None,
-                                                              L=None,
-                                                              x0=self.l * (i - 0.5) / self.m - 0.5 * self.l)
-
-        self.R()
-        self.L()
-
-    def currentFilamentR(self, j):
-        return self.ri + (self.re - self.ri) * j / self.n
-
-    def updatePosition(self, delta):
-        for i in range(1, self.m + 1):
-            for j in range(1, self.n + 1):
-                self.currentFilaments[i][j].updatePosition(delta)
-
-    def R(self):
-        deltaR = 2 * np.pi * self.SR * self.m / self.l
-        R = {
-            1: 2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))
-        }
-
-        for a in range(2, self.n + 1):
-            R[a] = R[a - 1] + deltaR
-
-        for k in self.currentFilaments:
-            for l in range(1, self.n + 1):
-                k[l].R = R[l]
-
-    def L(self):
-        for i in range(1, self.m + 1):
-            for j in range(1, self.n + 1):
-                self.currentFilaments[i][j].L = L(self.currentFilaments[i][j])
-
-
 class singleStageCoilgun():
-    def __init__(self, drivingCoil, armature, U, V):
+    def __init__(self, drivingCoil, armature, U, C, deltaT):
         self.drivingCoil = drivingCoil
         self.armature = armature
-        self.U = U
-        self.V = V
+        self.C = C
+        self.dt = deltaT
+
+        self.beforeRegister = {"Uc": None, "Id": None}
+        self.nowRegister = {"Uc": None, "Id": None}
+
+        self.R = np.diag([self.drivingCoil.R] + self.armature.R)
+
+        self.L = np.diag([self.drivingCoil.L] + self.armature.L)
+
+        self.M = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        for i in range(1, self.armature.m + 1):
+            for j in range(1, self.armature.n + 1):
+                for k in range(1, self.armature.m + 1):
+                    for l in range(1, self.armature.n + 1):
+                        self.M[(i - 1) * self.armature.n + j][(k - 1) * self.armature.n + l] = calcM(self.drivingCoil.r, self.armature.currentFilaments[k][l],
+                                                                                                     abs(self.armature.currentFilaments[k][l].x - self.drivingCoil.x))
+        for x in range(1, self.armature.m + 1):
+            for y in range(1, self.armature.n + 1):
+                if x == y:
+                    self.M[x][y] = 0
+
+        self.__updatedM()
+        self.__updatedM1()
+
+        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
+
+        self.I = np.matlib.zeros((self.armature.m * self.armature.n + 1, 1))
+        self.Id = self.U / (self.L - self.M1)
+
+    def __delattr__(self, __name):
+        calcM.cache_clear()
+        calcdM.cache_clear()
+
+        super().__delattr__(__name)
+
+    def __updatedM(self):
+        self.M1 = np.zeros(
+            (self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        for i in range(1, self.armature.m + 1):
+            for j in range(1, self.armature.n + 1):
+                self.M1[0][(i - 1) * self.armature.n + j] = calcM(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
+                                                                  abs(self.armature.currentFilaments[i][j].x - self.drivingCoil.x))
+        self.M1 = self.M1 + self.M1.T
+
+    def __updatedM1(self):
+        self.dM = np.zeros(
+            (self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        for i in range(1, self.armature.m + 1):
+            for j in range(1, self.armature.n + 1):
+                self.M1[0][(i - 1) * self.armature.n + j] = calcdM(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
+                                                                   abs(self.armature.currentFilaments[i][j].x - self.drivingCoil.x))
+        self.dM = self.dM + self.dM.T
+
+    def __update(self):
+        self.__updatedM()
+
+        self.__updatedM()
+
+        # Update [U]
+        Uc = self.beforeRegister["Uc"] - self.dt * self.beforeRegister["Id"]
+
+        self.nowRegister["Uc"] = Uc
+        self.U = np.matrix([Uc] + [0] * self.armature.m * self.armature.n).T
+
+        self.beforeRegister = self.nowRegister
+
+    def __runT(self):
+        pass
+
+    def run(self, x):
+        pass
 
 
 class multiStageCoilgun():
     def __init__(self):
         pass
+
+# ----------------------------------------------------------------TESTS ----------------------------------------------------------------
+
+
+if __name__ == "__main__":
+    import time
+    tic = time.perf_counter()
+
+    print("[INFO]READY...")
+
+    dc = drivingCoil(0.015125, 0.029125, 0.063, 63, 0.0000000175, 0.000028, 0.7)
+    print("[OK]dc initialized")
+
+    a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70000, 3000, 0.075)
+    print("[OK]a initialized")
+
+    sscg = singleStageCoilgun(dc, a, 8200, 0.001, 0.001)
+    print("[OK]sscg initialized")
+    
+    print("[INFO]OVER")
+
+    toc = time.perf_counter()
+    t = toc - tic
+    print("[DEBUG]TIME: " + str(t))
