@@ -89,6 +89,21 @@ class singleStageCoilgun():
         self.armature = armature
         self.U = U
         self.V = V
+        
+        self.armatureR = []
+        for i in range(1, self.m + 1):
+            for j in range(1, self.n + 1):
+                self.armatureR.append(self.armature.currentFilaments[i][j].R)
+        self.R = np.diag([self.drivingCoil.R] + self.armatureR)
+        
+        self.armatureL = []
+        for i in range(1, self.m + 1):
+            for j in range(1, self.n + 1):
+                self.armatureL.append(self.armature.currentFilaments[i][j].L)
+        self.L = np.diag([self.drivingCoil.L] + self.armatureL)
+        
+        del self.armatureR
+        del self.armatureL
 
 
 class multiStageCoilgun():
