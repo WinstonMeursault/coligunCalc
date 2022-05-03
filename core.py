@@ -84,26 +84,48 @@ class armature():
 
 
 class singleStageCoilgun():
-    def __init__(self, drivingCoil, armature, U, V):
+    def __init__(self, drivingCoil, armature, U, C, deltaT):
         self.drivingCoil = drivingCoil
         self.armature = armature
-        self.U = U
-        self.V = V
+        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
+        self.C = C
+        self.deltaT = deltaT
+        
+        self.beforeRegister = {"Uc" = None, "Id" = None}
+        self.nowRegister    = {"Uc" = None, "Id" = None}
         
         self.armatureR = []
         for i in range(1, self.m + 1):
             for j in range(1, self.n + 1):
                 self.armatureR.append(self.armature.currentFilaments[i][j].R)
+                
         self.R = np.diag([self.drivingCoil.R] + self.armatureR)
+        del self.armatureR
         
         self.armatureL = []
         for i in range(1, self.m + 1):
             for j in range(1, self.n + 1):
                 self.armatureL.append(self.armature.currentFilaments[i][j].L)
+                
         self.L = np.diag([self.drivingCoil.L] + self.armatureL)
-        
-        del self.armatureR
         del self.armatureL
+    
+    def __updateU(self):
+        Uc = self.beforeRegister["Uc"] - self.deltaT * self.beforeRegister["Id"]
+        
+        self.nowRegister["Uc"] = Uc
+        self.U = np.matrix([Uc] + [0] * self.armature.m * self.armature.n).T
+    
+    def __update(self):
+        self.__updateU()
+        
+        self.beforeRegister = self.nowRegister
+        
+    def __runT(self):
+        pass
+    
+    def run(self):
+        pass
 
 
 class multiStageCoilgun():
