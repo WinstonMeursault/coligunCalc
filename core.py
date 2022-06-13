@@ -1,5 +1,6 @@
 # singleStage.py
 
+import numpy.matlib 
 import numpy as np
 
 from basics import *
@@ -45,13 +46,8 @@ class armature():
 
         for i in range(1, self.m + 1):
             for j in range(1, self.n + 1):
-                self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1),
-                                                              re=self.currentFilamentR(
-                                                                  j),
-                                                              l=self.l / self.m,
-                                                              R=None,
-                                                              L=None,
-                                                              x0=self.l * (i - 0.5) / self.m - 0.5 * self.l)
+                self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1), re=self.currentFilamentR(j),
+                                                              l=self.l / self.m, R=None, L=None, x0=self.l * (i - 0.5) / self.m - 0.5 * self.l)
 
         self.R()
         self.L()
@@ -73,9 +69,9 @@ class armature():
         for a in range(2, self.n + 1):
             R[a] = R[a - 1] + deltaR
 
-        for k in self.currentFilaments:
-            for l in range(1, self.n + 1):
-                k[l].R = R[l]
+        for i in range(1, self.m + 1):
+            for j in range(1, self.n + 1):
+                self.currentFilaments[i][j].R = R[j]
 
     def L(self):
         for i in range(1, self.m + 1):
@@ -87,43 +83,61 @@ class singleStageCoilgun():
     def __init__(self, drivingCoil, armature, U, C, deltaT):
         self.drivingCoil = drivingCoil
         self.armature = armature
-        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
         self.C = C
         self.deltaT = deltaT
-        
-        self.beforeRegister = {"Uc" = None, "Id" = None}
-        self.nowRegister    = {"Uc" = None, "Id" = None}
-        
+
+        self.beforeRegister = {"Uc": None, "Id": None}
+        self.nowRegister = {"Uc": None, "Id": None}
+
+        # 计算常数矩阵[R]       电阻
         self.armatureR = []
-        for i in range(1, self.m + 1):
+        for i in range(1, self.armature.m + 1):
             for j in range(1, self.n + 1):
                 self.armatureR.append(self.armature.currentFilaments[i][j].R)
-                
+
         self.R = np.diag([self.drivingCoil.R] + self.armatureR)
         del self.armatureR
-        
+
+        # 计算常数矩阵[L]       电感
         self.armatureL = []
-        for i in range(1, self.m + 1):
+        for i in range(1, self.armature.m + 1):
             for j in range(1, self.n + 1):
                 self.armatureL.append(self.armature.currentFilaments[i][j].L)
-                
+
         self.L = np.diag([self.drivingCoil.L] + self.armatureL)
         del self.armatureL
-    
+
+        # 计算常数矩阵[M]       各电阻丝之间的互感
+        # TODO
+
+        # 初始化时变矩阵[M1]    驱动线圈与各电阻丝之间的互感
+        # TODO
+
+        # 初始化时变矩阵[dM1/dx]    驱动线圈与各电阻丝之间的互感梯度
+        # TODO
+
+        # 初始化时变矩阵[U]     电容电压
+        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
+
+        # 初始化待求矩阵[I] / [dI]     驱动回路电流及其导
+        self.I  = np.matlib.zeros((self.armature.m * self.armature.n + 1, 1))
+        self.Id = self.U / (self.L - self.M1)           # TODO : M1
+
     def __updateU(self):
-        Uc = self.beforeRegister["Uc"] - self.deltaT * self.beforeRegister["Id"]
-        
+        Uc = self.beforeRegister["Uc"] - \
+            self.deltaT * self.beforeRegister["Id"]
+
         self.nowRegister["Uc"] = Uc
         self.U = np.matrix([Uc] + [0] * self.armature.m * self.armature.n).T
-    
+
     def __update(self):
         self.__updateU()
-        
+
         self.beforeRegister = self.nowRegister
-        
+
     def __runT(self):
         pass
-    
+
     def run(self):
         pass
 

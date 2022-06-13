@@ -38,7 +38,7 @@ def M(coilA, coilB):
     return μ0 * np.sqrt(coilA.r * coilB.r) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
 
-def dM(coilA, coilB, d=None):
+def dM(coilA, coilB):
     d = abs(coilA.x - coilB.x)
     k = calcK(coilA, coilB, d)
 
