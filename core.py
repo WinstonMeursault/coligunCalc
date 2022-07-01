@@ -122,16 +122,23 @@ class singleStageCoilgun():
         # 初始化待求矩阵[I] / [dI]     驱动回路电流及其导
         self.I  = np.matlib.zeros((self.armature.m * self.armature.n + 1, 1))
         self.Id = self.U / (self.L - self.M1)           # TODO : M1
+    
+    def __delattr__(self, __name):
+        M.cache_clear()
 
-    def __updateU(self):
+        super().__delattr__(__name)
+
+    def __update(self):
+        # Update [M1]
+
+        # Update [dM1/dx]
+
+        # Update [U]
         Uc = self.beforeRegister["Uc"] - \
             self.deltaT * self.beforeRegister["Id"]
 
         self.nowRegister["Uc"] = Uc
         self.U = np.matrix([Uc] + [0] * self.armature.m * self.armature.n).T
-
-    def __update(self):
-        self.__updateU()
 
         self.beforeRegister = self.nowRegister
 

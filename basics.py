@@ -8,6 +8,8 @@ from scipy.special import j0, j1, struve
 from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 
+from functools import lru_cache
+
 
 μ0 = 4 * np.pi * np.power(10, -7)
 
@@ -27,22 +29,21 @@ def L(coilA, limit=125):
     return 2 * np.pi * μ0 * np.power(coilA.nc, 2) * np.power(coilA.ri, 5) * T
 
 
-def calcK(coilA, coilB, d):
-    return np.sqrt((4 * coilA.r * coilB.r) / (np.power((coilA.r + coilB.r), 2) + np.power(d, 2)))
+def calcK(Ra, Rb, d):
+    return np.sqrt((4 * Ra * Rb) / (np.power((Ra + Rb), 2) + np.power(d, 2)))
 
 
-def M(coilA, coilB):
-    d = abs(coilA.x - coilB.x)
-    k = calcK(coilA, coilB, d)
+@lru_cache()
+def M(Ra, Rb, d):
+    k = calcK(Ra, Rb, d)
 
-    return μ0 * np.sqrt(coilA.r * coilB.r) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+    return μ0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
 
-def dM(coilA, coilB):
-    d = abs(coilA.x - coilB.x)
-    k = calcK(coilA, coilB, d)
+def dM(Ra, Rb, d):
+    k = calcK(Ra, Rb, d)
 
-    return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(coilA.r * coilB.r))
+    return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(Ra * Rb))
 
 
 class currentFilament():
