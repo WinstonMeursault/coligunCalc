@@ -125,6 +125,7 @@ class singleStageCoilgun():
     
     def __delattr__(self, __name):
         M.cache_clear()
+        dM.cache_clear()
 
         super().__delattr__(__name)
 

@@ -40,6 +40,7 @@ def M(Ra, Rb, d):
     return μ0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
 
+@lru_cache()
 def dM(Ra, Rb, d):
     k = calcK(Ra, Rb, d)
 
