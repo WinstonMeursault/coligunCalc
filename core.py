@@ -1,5 +1,6 @@
 # singleStage.py
 
+import pstats
 import numpy as np
 import numpy.matlib
 
@@ -11,7 +12,7 @@ class singleStageCoilgun():
         self.drivingCoil = drivingCoil
         self.armature = armature
         self.C = C
-        self.deltaT = deltaT
+        self.deltaT = deltaT    
 
         self.beforeRegister = {"Uc": None, "Id": None}
         self.nowRegister = {"Uc": None, "Id": None}
@@ -35,8 +36,12 @@ class singleStageCoilgun():
         del self.armatureL
 
         # 计算常数矩阵[M]       各电阻丝之间的互感
-        # TODO
         self.M = np.zeros((self.armature.m * self.armature.n + 1,self.armature.m * self.armature.n + 1))
+        for i in range(1, self.armature.m + 1):
+            for j in range(1, self.armature.n + 1):
+                for k in range(1, self.armature.m + 1):
+                    for l in range(1 ,self.armature.n + 1):
+                        pass
 
         # 初始化时变矩阵[M1]    驱动线圈与各电阻丝之间的互感
         self.M1 = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
@@ -44,7 +49,6 @@ class singleStageCoilgun():
             for j in range(1, self.armature.n + 1):
                 self.M1[0][(i - 1) * self.armature.n + j] = M(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
                                                               abs(self.armature.currentFilaments[i][j].r - self.drivingCoil.x))
-
         self.M1 = self.M1 + self.M1.T
 
         # 初始化时变矩阵[dM1/dx]    驱动线圈与各电阻丝之间的互感梯度
@@ -53,7 +57,6 @@ class singleStageCoilgun():
             for j in range(1, self.armature.n + 1):
                 self.M1[0][(i - 1) * self.armature.n + j] = dM(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
                                                                abs(self.armature.currentFilaments[i][j].r - self.drivingCoil.x))
-
         self.dM = self.dM + self.dM.T
 
         # 初始化时变矩阵[U]     电容电压

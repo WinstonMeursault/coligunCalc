@@ -74,9 +74,8 @@ class drivingCoil():
         self.k = k                      # 驱动线圈填充率
 
         self.r = (self.ri + self.re) / 2
-        Sd = (self.re - self.ri) * self.l
-
-        self.nc = self.n / Sd
+        
+        self.nc = self.n / ((self.re - self.ri) * self.l)
 
         self.R = self.R()
         self.L = L(self)
