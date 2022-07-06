@@ -59,7 +59,7 @@ class currentFilament():
         self.r = (self.ri + self.re) / 2
 
         Sc = l * (self.re - self.ri)
-        self.nc = 1 / Sc
+        self.nc = 1 / Sc    
 
     def updatePosition(self, delta):
         self.x += delta

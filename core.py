@@ -7,12 +7,12 @@ from basics import *
 
 
 class drivingCoil():
-    def __init__(self, rdi, rde, ld, n, resistivity, Swire, k, s):
+    def __init__(self, rdi, rde, ld, n, resistivity, Swire, k):
         self.ri = rdi
         self.re = rde
         self.l = ld
         self.n = n                      # 线圈匝数
-        self.x = s
+        self.x = 0.5 * self.l
         self.SR = resistivity           # 电阻率
         self.Swire = Swire              # 单根导线的截面积
         self.k = k                      # 驱动线圈填充率
@@ -30,7 +30,7 @@ class drivingCoil():
 
 
 class armature():
-    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n):
+    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n, x0):
         self.ri = rai
         self.re = rae
         self.l = la
@@ -40,14 +40,14 @@ class armature():
         self.m = m
         self.n = n
 
-        self.x = 0
+        self.x = x0
 
         self.currentFilaments = {}
 
         for i in range(1, self.m + 1):
             for j in range(1, self.n + 1):
                 self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1), re=self.currentFilamentR(j),
-                                                              l=self.l / self.m, R=None, L=None, x0=self.l * (i - 0.5) / self.m - 0.5 * self.l)
+                                                              l=self.l / self.m, R=None, L=None, x0=self.l * (i - 0.5) / self.m)
 
         self.R()
         self.L()
@@ -109,19 +109,28 @@ class singleStageCoilgun():
 
         # 计算常数矩阵[M]       各电阻丝之间的互感
         # TODO
+        self.M = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
 
         # 初始化时变矩阵[M1]    驱动线圈与各电阻丝之间的互感
-        # TODO
+        self.M1 = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        for i in range(1, self.armature.m + 1):
+            for j in range(1, self.armature.n + 1):
+                self.M1[0][(i - 1) * self.armature.n + j] = M(self.drivingCoil.r, self.armature.currentFilaments[i][j].r, 
+                                                                abs(self.armature.currentFilaments[i][j].r - self.drivingCoil.x))
 
         # 初始化时变矩阵[dM1/dx]    驱动线圈与各电阻丝之间的互感梯度
-        # TODO
+        self.dM = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        for i in range(1, self.armature.m + 1):
+            for j in range(1, self.armature.n + 1):
+                self.M1[0][(i - 1) * self.armature.n + j] = dM(self.drivingCoil.r, self.armature.currentFilaments[i][j].r, 
+                                                                abs(self.armature.currentFilaments[i][j].r - self.drivingCoil.x))
 
         # 初始化时变矩阵[U]     电容电压
-        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
+        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T 
 
         # 初始化待求矩阵[I] / [dI]     驱动回路电流及其导
         self.I  = np.matlib.zeros((self.armature.m * self.armature.n + 1, 1))
-        self.Id = self.U / (self.L - self.M1)           # TODO : M1
+        self.Id = self.U / (self.L - self.M1)
     
     def __delattr__(self, __name):
         M.cache_clear()
@@ -146,7 +155,7 @@ class singleStageCoilgun():
     def __runT(self):
         pass
 
-    def run(self):
+    def run(self,x):    
         pass
 
 

@@ -50,6 +50,7 @@ import coilgunCalc-L as cgl
     ```
 
     可以通过缓存加速计算(观察矩阵, 由于圆环线圈之间互感只取决于它们的半径与相对位置, 不难得出事实上很多数据是重复的)
+
     传入两线圈半径(Ra, Rb)与相对位置(d)
 
 - 线圈互感梯度计算, 定义为:
@@ -61,6 +62,7 @@ import coilgunCalc-L as cgl
     ```
 
     可以通过缓存加速计算(原理与互感计算是相同的)
+
     传入两线圈半径(Ra, Rb)与相对位置(d)
 
 ### cgl.core API
@@ -78,14 +80,15 @@ import coilgunCalc-L as cgl
     ```
 
     `drivingCoil`是驱动线圈的抽象类
+
     在创建线圈炮抽象类`singleStageCoilgun`与`multiStageCoilgun`均需要传入一个或多个
+
     下面叙述初始化对象时需要的参数:
         - rdi, rde, ld      驱动线圈的内径/外径/长度
         - n                 驱动线圈匝数
         - resistivity       构成驱动线圈主体的导线材质的电阻率
         - Swire             构成驱动线圈主体的**单根导线**的截面积
         - k                 驱动线圈填充率(定义为截面内导线所占面积与截面总面积之比)
-        - s                 初始时刻是驱动线圈中心面与电枢中心面的距离
 
 ## 参考文献
 
