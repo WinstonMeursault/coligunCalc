@@ -8,7 +8,7 @@ from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 from scipy.special import j0, j1, struve
 
-μ0 = 4 * np.pi * np.power(10, -7)
+μ0 = 4 * np.pi * np.float_power(10, -7)
 
 
 def L(coilA, limit=125):
@@ -73,9 +73,9 @@ class drivingCoil():
         self.Swire = Swire              # 单根导线的截面积
         self.k = k                      # 驱动线圈填充率
 
-        self.r = (self.ri + self.re) / 2
+        self.r = (self.ri + self.re) / 2    
         
-        self.nc = self.n / ((self.re - self.ri) * self.l)
+        self.nc = self.n / ((self.re - self.ri) * self.l)   
 
         self.R = self.R()
         self.L = L(self)
@@ -88,7 +88,7 @@ class armature():
     def __init__(self, rai, rae, la, resistivity, v0, ma, m, n, x0):
         self.ri = rai
         self.re = rae
-        self.l = la
+        self.l = la 
         self.SR = resistivity
         self.v0 = v0
         self.ma = ma
