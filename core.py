@@ -1,6 +1,7 @@
 # singleStage.py
 
 import pstats
+from time import time
 import numpy as np
 import numpy.matlib
 
@@ -12,7 +13,7 @@ class singleStageCoilgun():
         self.drivingCoil = drivingCoil
         self.armature = armature
         self.C = C
-        self.deltaT = deltaT    
+        self.dt = deltaT    
 
         self.beforeRegister = {"Uc": None, "Id": None}  
         self.nowRegister = {"Uc": None, "Id": None}
@@ -83,8 +84,7 @@ class singleStageCoilgun():
         self.__updatedM()
 
         # Update [U]
-        Uc = self.beforeRegister["Uc"] - \
-            self.deltaT * self.beforeRegister["Id"]
+        Uc = self.beforeRegister["Uc"] - self.dt * self.beforeRegister["Id"]
 
         self.nowRegister["Uc"] = Uc
         self.U = np.matrix([Uc] + [0] * self.armature.m * self.armature.n).T
@@ -101,3 +101,22 @@ class singleStageCoilgun():
 class multiStageCoilgun():
     def __init__(self):
         pass
+
+# ----------------------------------------------------------------TESTS ----------------------------------------------------------------
+
+if __name__ == "__main__":
+    import time
+    tic = time.perf_counter()
+
+    print("[INFO]READY...")
+    dc = drivingCoil(0.015125, 0.029125, 0.063, 63, 0.0000000175, 0.000028, 0.7)
+    print("[OK]dc initialized")
+    a  = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70000, 3000, 0.075)
+    print("[OK]a initialized")
+    sscg = singleStageCoilgun(dc, a, 8200, 0.001, 0.001)
+    print("[OK]sscg initialized")
+    print("[INFO]OVER")
+
+    toc = time.perf_counter()
+    t = toc - tic
+    print("[DEBUG]TIME: " +  str(t))

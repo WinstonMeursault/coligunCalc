@@ -29,7 +29,7 @@ import coilgunCalc-L as cgl
 - 线圈自感计算, 定义为:
 
     ``` python
-    def L(coilA, limit=125):
+    def L(coilA, limit=200):
         pass
     ```
 

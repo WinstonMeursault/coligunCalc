@@ -11,7 +11,7 @@ from scipy.special import j0, j1, struve
 μ0 = 4 * np.pi * np.float_power(10, -7)
 
 
-def L(coilA, limit=125):
+def L(coilA, limit=200):
     p = coilA.re / coilA.ri
     q = coilA.l / coilA.ri
 
@@ -99,10 +99,13 @@ class armature():
 
         self.currentFilaments = {}
 
-        for i in range(1, self.m + 1):
-            for j in range(1, self.n + 1):
-                self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1), re=self.currentFilamentR(j),
-                                                              l=self.l / self.m, R=None, L=None, x0=self.l * (i - 0.5) / self.m)
+        for k in range(0, self.m + 1):
+            self.currentFilaments[k] = {}
+
+        for i in range(0, self.m + 1):
+            for j in range(0, self.n + 1):
+                self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1), re=self.currentFilamentR(j), 
+                                                            l=self.l / self.m, R=None, L=None, x0=self.l * (i - 0.5) / self.m)
 
         self.R()
         self.L()
