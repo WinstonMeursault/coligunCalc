@@ -1,7 +1,5 @@
 # singleStage.py
 
-import pstats
-from time import time
 import numpy as np
 import numpy.matlib
 
@@ -39,8 +37,8 @@ class singleStageCoilgun():
             for j in range(1, self.armature.n + 1):
                 for k in range(1, self.armature.m + 1):
                     for l in range(1 ,self.armature.n + 1):
-                        self.M[(i - 1) * self.armature.n + j][(k - 1) * self.armature.n + l] = M(self.drivingCoil.r, 
-                                        self.armature.currentFilaments[k][L], 
+                        self.M[(i - 1) * self.armature.n + j][(k - 1) * self.armature.n + l] = calcM(self.drivingCoil.r, 
+                                        self.armature.currentFilaments[k][l], 
                                         abs(self.armature.currentFilaments[k][l].x - self.drivingCoil.x))
         for x in range(1, self.armature.m + 1):
             for y in range(1, self.armature.n + 1):
@@ -57,8 +55,8 @@ class singleStageCoilgun():
         self.Id = self.U / (self.L - self.M1)
 
     def __delattr__(self, __name):
-        M.cache_clear()
-        dM.cache_clear()
+        calcM.cache_clear()
+        calcdM.cache_clear()
 
         super().__delattr__(__name)
 
@@ -66,7 +64,7 @@ class singleStageCoilgun():
         self.M1 = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
-                self.M1[0][(i - 1) * self.armature.n + j] = M(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
+                self.M1[0][(i - 1) * self.armature.n + j] = calcM(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
                                                               abs(self.armature.currentFilaments[i][j].x - self.drivingCoil.x))
         self.M1 = self.M1 + self.M1.T
 
@@ -74,7 +72,7 @@ class singleStageCoilgun():
         self.dM = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
-                self.M1[0][(i - 1) * self.armature.n + j] = dM(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
+                self.M1[0][(i - 1) * self.armature.n + j] = calcdM(self.drivingCoil.r, self.armature.currentFilaments[i][j].r,
                                                                abs(self.armature.currentFilaments[i][j].x - self.drivingCoil.x))
         self.dM = self.dM + self.dM.T
 
