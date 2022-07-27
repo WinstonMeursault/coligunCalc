@@ -45,23 +45,6 @@ def calcdM(Ra, Rb, d):
     return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(Ra * Rb))
 
 
-class currentFilament():
-    def __init__(self, ri, re, l, R, L, x0):
-        self.ri = ri
-        self.re = re
-        self.l = l
-        self.R = R
-        self.L = L
-        self.x = x0
-
-        self.r = (self.ri + self.re) / 2
-
-        self.nc = 1 / (l * (self.re - self.ri))
-
-    def updatePosition(self, delta):
-        self.x += delta
-
-
 class drivingCoil():
     def __init__(self, rdi, rde, ld, n, resistivity, Swire, k):
         self.ri = rdi
@@ -98,11 +81,6 @@ class armature():
 
         self.currentFilamentL = self.l / self.m
 
-        for i in range(0, self.m + 1):
-            for j in range(0, self.n + 1):
-                self.currentFilaments[i][j] = currentFilament(ri=self.currentFilamentR(j - 1), re=self.currentFilamentR(j),
-                                                              l=self.l / self.m, R=None, L=None, x0=self.l * (i - 0.5) / self.m)
-
         self.R = self.R()
         self.L = self.L()
 
@@ -115,16 +93,14 @@ class armature():
     def currentFilamentAR(self, j):
         return (self.currentFilamentRi(j) - self.currentFilamentRi(j)) / 2
 
-    def currentFilamentNC(self, j):
-        self.nc = 1 / (self.currentFilamentL *
-                       (self.currentFilamentRe(j) - self.currentFilamentRi(j)))
+    def currentFilamentNc(self, j):
+        self.nc = 1 / (self.currentFilamentL * (self.currentFilamentRe(j) - self.currentFilamentRi(j)))
 
     def currentFilamentX(self, i, j):
-        # TODO
-        pass
+        return self.x - 0.5*self.l + (i - 0.5) * self.currentFilamentL
 
     def updatePosition(self, delta):
-        self.x += self.x + delta
+        self.x += delta
 
     def R(self):
         deltaR = 2 * np.pi * self.SR * self.m / self.l
@@ -142,6 +118,6 @@ class armature():
 
         for j in range(1, self.n + 1):
             L.append(calcL(self.currentFilamentR(j - 1), self.currentFilamentR(j),
-                     self.currentFilamentL, self.currentFilamentNC(j), limit))
+                     self.currentFilamentL, self.currentFilamentNc(j), limit))
 
         return L * self.m
