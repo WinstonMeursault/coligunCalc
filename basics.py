@@ -60,15 +60,13 @@ class drivingCoil():
 
         self.nc = self.n / ((self.re - self.ri) * self.l)
 
-        self.R = self.R()
-        self.L = calcL(self)
-
-    def R(self):
-        return (self.SR * self.k * np.pi * (np.power(self.re, 2) - np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
+        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) -
+                  np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
+        self.L = calcL(self.ri, self.re, self.l, self.nc)
 
 
 class armature():
-    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n, x0):
+    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n, x0, limit = 200):
         self.ri = rai
         self.re = rae
         self.l = la
@@ -79,45 +77,44 @@ class armature():
         self.n = n
         self.x = x0
 
-        self.currentFilamentL = self.l / self.m
+        self.__currentFilamentL = self.l / self.m
+        self.__currentFilamentNc = 1 / (self.__currentFilamentL * (self.__currentFilamentRe(1) - self.__currentFilamentRi(1)))
 
-        self.R = self.R()
-        self.L = self.L()
+        self.R = self.__R()
+        self.L = self.__L(limit)
 
-    def currentFilamentRi(self, j):
+    def __currentFilamentRi(self, j):
         return self.ri + (self.re - self.ri) * (j - 1) / self.n
 
-    def currentFilamentRe(self, j):
+    def __currentFilamentRe(self, j):
         return self.ri + (self.re - self.ri) * j / self.n
 
     def currentFilamentAR(self, j):
-        return (self.currentFilamentRi(j) - self.currentFilamentRi(j)) / 2
+        '''Average radius'''
+        return self.__currentFilamentRi(j) + 0.5 * self.__currentFilamentL
 
-    def currentFilamentNc(self, j):
-        self.nc = 1 / (self.currentFilamentL * (self.currentFilamentRe(j) - self.currentFilamentRi(j)))
-
-    def currentFilamentX(self, i, j):
-        return self.x - 0.5*self.l + (i - 0.5) * self.currentFilamentL
+    def currentFilamentX(self, i):
+        '''Calculate position of currentFilament'''
+        return self.x - 0.5*self.l + (i - 0.5) * self.__currentFilamentL
 
     def updatePosition(self, delta):
+        '''update position of armature'''
         self.x += delta
 
-    def R(self):
+    def __R(self):
         deltaR = 2 * np.pi * self.SR * self.m / self.l
-        R = {
-            1: 2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))
-        }
+        R = [2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
 
-        for a in range(2, self.n + 1):
-            R[a] = R[a - 1] + deltaR
+        for k in range(0, self.n - 1):
+            R.append(R[k] + deltaR)
 
         return R * self.m
 
-    def L(self, limit=200):
+    def __L(self, limit):
         L = []
 
-        for j in range(1, self.n + 1):
-            L.append(calcL(self.currentFilamentR(j - 1), self.currentFilamentR(j),
-                     self.currentFilamentL, self.currentFilamentNc(j), limit))
+        for l in range(1, self.n + 1):
+            L.append(calcL(self.__currentFilamentRi(l), self.__currentFilamentRe(l),
+                     self.__currentFilamentL, self.__currentFilamentNc, limit))
 
         return L * self.m
