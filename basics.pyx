@@ -6,7 +6,7 @@ from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 from scipy.special import j0, j1, struve
 
-μ0 = 4 * np.pi * np.float_power(10, -7)
+Mu0 = 4 * np.pi * np.float_power(10, -7)
 
 
 def calcL(ri, re, l, nc, limit=200):
@@ -22,7 +22,7 @@ def calcL(ri, re, l, nc, limit=200):
 
     T = quad(integrationT, 0, np.inf, limit=limit)[0]
 
-    return 2 * np.pi * μ0 * np.power(nc, 2) * np.power(ri, 5) * T
+    return 2 * np.pi * Mu0 * np.power(nc, 2) * np.power(ri, 5) * T
 
 
 def calcK(Ra, Rb, d):
@@ -33,14 +33,14 @@ def calcK(Ra, Rb, d):
 def calcM(Ra, Rb, d):
     k = calcK(Ra, Rb, d)
 
-    return μ0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+    return Mu0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
 
 @lru_cache()
 def calcdM(Ra, Rb, d):
     k = calcK(Ra, Rb, d)
 
-    return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(Ra * Rb))
+    return (Mu0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(Ra * Rb))
 
 
 class drivingCoil():
