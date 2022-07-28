@@ -1,54 +1,54 @@
 from functools import lru_cache
 
-import numpy as np
+from numpy import inf
 from scipy.integrate import quad
 from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 from scipy.special import j0, j1, struve
 
-Mu0 = 4 * np.pi * np.float_power(10, -7)
+cdef long double pi = 3.141592653589793
+cdef long double e = 2.71828182845678
+cdef long double Mu0 = 4 * pi * pow(10, -7)
 
 
-def calcL(ri, re, l, nc, limit=200):
-    p = re / ri
-    q = l / ri
+# U = lambda x: quad(lambda x: x * j1(x), x, p * x)[0] / pow(x, 3)
+cdef U(long double x, double p):
+    return pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * pow(x, 2))
 
-    # U = lambda x: quad(lambda x: x * j1(x), x, p * x)[0] / np.power(x, 3)
-    def U(x):
-        return np.pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * np.power(x, 2))
+cdef integrationT(long double x, double p, double q):
+    return pow(U(x, p), 2) * (q * x + pow(e, (-1 * q * x)) - 1)
 
-    def integrationT(x):
-        return np.power(U(x), 2) * (q * x + np.power(np.e, (-1 * q * x)) - 1)
+cdef calcL(double ri, double re, double l, double nc,int limit=200):
+    cdef double p = re / ri
+    cdef double q = l / ri
 
-    T = quad(integrationT, 0, np.inf, limit=limit)[0]
-
-    return 2 * np.pi * Mu0 * np.power(nc, 2) * np.power(ri, 5) * T
+    return 2 * pi * Mu0 * pow(nc, 2) * pow(ri, 5) * quad(integrationT, 0, inf, limit=limit, args = (p, q))[0]
 
 
-def calcK(Ra, Rb, d):
-    return np.sqrt((4 * Ra * Rb) / (np.power((Ra + Rb), 2) + np.power(d, 2)))
+cdef calcK(double Ra, double Rb, double d):
+    return pow((4 * Ra * Rb) / (pow((Ra + Rb), 2) + pow(d, 2)), 0.5)
 
 
-@lru_cache()
-def calcM(Ra, Rb, d):
-    k = calcK(Ra, Rb, d)
+#@lru_cache()
+cdef calcM(double Ra, double Rb, double d):
+    cdef double k = calcK(Ra, Rb, d)
 
-    return Mu0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+    return Mu0 * pow(Ra * Rb, 0.5) * ((2 / k - k) * eK(k) - (2 / k) * eE(k), 0.5)
 
 
-@lru_cache()
-def calcdM(Ra, Rb, d):
-    k = calcK(Ra, Rb, d)
+#@lru_cache()
+cdef calcdM(double Ra, double Rb, double d):
+    cdef double k = calcK(Ra, Rb, d)
 
-    return (Mu0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(Ra * Rb))
+    return (Mu0 * k * d * (2 * (1 - pow(k, 2)) * eK(k) - (2 - pow(k, 2)) * eE(k))) / (4 * (1 - pow(k, 2)) * pow(Ra * Rb, 0.5))
 
 
 class drivingCoil():
-    def __init__(self, rdi, rde, ld, n, resistivity, Swire, k):
+    def __init__(self, double rdi, double rde, double ld, int n, double resistivity, double Swire, float k):
         self.ri = rdi
         self.re = rde
         self.l = ld
-        self.n = n                      # 线圈匝数
+        self.n = n                         # 线圈匝数
         self.x = 0.5 * self.l
         self.SR = resistivity           # 电阻率
         self.Swire = Swire              # 单根导线的截面积
@@ -58,13 +58,12 @@ class drivingCoil():
 
         self.nc = self.n / ((self.re - self.ri) * self.l)
 
-        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) -
-                  np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
+        self.R = (self.SR * self.k * pi * (pow(self.re, 2) - pow(self.ri, 2)) * self.l) / pow(self.Swire, 2)
         self.L = calcL(self.ri, self.re, self.l, self.nc)
 
 
 class armature():
-    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n, x0, limit = 200):
+    def __init__(self, double rai, double rae, double la, double resistivity, double v0, double ma, int m, int n, double x0, unsigned short int	 limit = 200):
         self.ri = rai
         self.re = rae
         self.l = la
@@ -81,38 +80,37 @@ class armature():
         self.R = self.__R()
         self.L = self.__L(limit)
 
-    def __currentFilamentRi(self, j):
+    def __currentFilamentRi(self, int j):
         return self.ri + (self.re - self.ri) * (j - 1) / self.n
 
-    def __currentFilamentRe(self, j):
+    def __currentFilamentRe(self, int j):
         return self.ri + (self.re - self.ri) * j / self.n
 
-    def currentFilamentAR(self, j):
+    def currentFilamentAR(self, int j):
         '''Average radius'''
         return self.__currentFilamentRi(j) + 0.5 * self.__currentFilamentL
 
-    def currentFilamentX(self, i):
+    def currentFilamentX(self, int i):
         '''Calculate position of currentFilament'''
         return self.x - 0.5*self.l + (i - 0.5) * self.__currentFilamentL
 
-    def updatePosition(self, delta):
+    def updatePosition(self, double delta):
         '''update position of armature'''
         self.x += delta
 
     def __R(self):
-        deltaR = 2 * np.pi * self.SR * self.m / self.l
-        R = [2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
+        cdef long double deltaR = 2 * pi * self.SR * self.m / self.l
+        cdef list R = [2 * pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
 
         for k in range(0, self.n - 1):
             R.append(R[k] + deltaR)
 
         return R * self.m
 
-    def __L(self, limit):
-        L = []
+    def __L(self, unsigned short int limit):
+        cdef list L = []
 
         for l in range(1, self.n + 1):
-            L.append(calcL(self.__currentFilamentRi(l), self.__currentFilamentRe(l),
-                     self.__currentFilamentL, self.__currentFilamentNc, limit))
+            L.append(calcL(self.__currentFilamentRi(l), self.__currentFilamentRe(l), self.__currentFilamentL, self.__currentFilamentNc, limit))
 
         return L * self.m
