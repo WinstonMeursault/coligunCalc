@@ -1,5 +1,3 @@
-# common.py
-
 from functools import lru_cache
 
 import numpy as np

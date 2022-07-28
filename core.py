@@ -1,5 +1,3 @@
-# singleStage.py
-
 import numpy as np
 
 from basics import *
@@ -104,9 +102,9 @@ if __name__ == "__main__":
 
     sscg = singleStageCoilgun(dc, a, 8200, 0.001, 0.001)
     print("[OK]sscg initialized")
-    
+
     print("[INFO]OVER")
 
-    toc = time.perf_counter()
+    toc = time.perf_counter()   
     t = toc - tic
     print("[DEBUG]TIME: " + str(t))
