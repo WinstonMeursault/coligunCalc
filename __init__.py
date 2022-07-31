@@ -1,5 +1,1 @@
-import pyximport
-
-pyximport.install()
-
-import core
+from core import *
