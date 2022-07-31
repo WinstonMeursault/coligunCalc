@@ -93,7 +93,7 @@ class armature():
 
     def currentFilamentX(self, i):
         '''Calculate position of currentFilament'''
-        return self.x - 0.5*self.l + (i - 0.5) * self.__currentFilamentL
+        return self.x - 0.5 * self.l + (i - 0.5) * self.__currentFilamentL
 
     def updatePosition(self, delta):
         '''update position of armature'''
