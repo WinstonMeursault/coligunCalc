@@ -26,7 +26,7 @@ def calcL(ri, re, l, nc, limit=200):
 
 
 def calcK(Ra, Rb, d):
-    return np.sqrt((4 * Ra * Rb) / (np.power((Ra + Rb), 2) + np.power(d, 2)))
+    return np.sqrt((4 * Ra * Rb) / (np.power(Ra + Rb, 2) + np.power(d, 2)))
 
 
 @lru_cache()
@@ -75,8 +75,9 @@ class armature():
         self.n = n
         self.x = x0
 
+        self.__deltaRN = (self.re - self.ri) / self.n
         self.__currentFilamentL = self.l / self.m
-        self.__currentFilamentNc = 1 / (self.__currentFilamentL * (self.__currentFilamentRe(1) - self.__currentFilamentRi(1)))
+        self.__currentFilamentNc = 1 / (self.__currentFilamentL * self.__deltaRN)
 
         self.R = self.__R()
         self.L = self.__L(limit)
@@ -88,22 +89,19 @@ class armature():
         return self.ri + (self.re - self.ri) * j / self.n
 
     def currentFilamentAR(self, j):
-        '''Average radius'''
-        return self.__currentFilamentRi(j) + 0.5 * self.__currentFilamentL
+        return self.ri + self.__deltaRN * (j - 0.5)
 
     def currentFilamentX(self, i):
-        '''Calculate position of currentFilament'''
         return self.x - 0.5 * self.l + (i - 0.5) * self.__currentFilamentL
 
     def updatePosition(self, delta):
-        '''update position of armature'''
         self.x += delta
 
     def __R(self):
         deltaR = 2 * np.pi * self.SR * self.m / self.l
         R = [2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
 
-        for k in range(0, self.n - 1):
+        for k in range(0, self.n):
             R.append(R[k] + deltaR)
 
         return R * self.m
