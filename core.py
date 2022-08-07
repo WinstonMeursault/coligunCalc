@@ -11,8 +11,7 @@ class singleStageCoilgun():
         self.C = C
         self.dt = deltaT
 
-        self.beforeRegister = {"Uc": None, "Id": None}
-        self.nowRegister = {"Uc": None, "Id": None}
+        self.cache = {"Uc(n-1)" : None, "Id(n-1)" : None}
 
         self.R = np.diag([self.drivingCoil.R] + self.armature.R)
 
@@ -31,7 +30,7 @@ class singleStageCoilgun():
                     self.M[x][y] = 0
 
         self.__updatedM()
-        self.__updatedM1()
+        self.__updateM1()
 
         self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
 
@@ -52,7 +51,7 @@ class singleStageCoilgun():
                                                                   abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.M1 = self.M1 + self.M1.T
 
-    def __updatedM1(self):
+    def __updateM1(self):
         self.dM = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
@@ -60,18 +59,17 @@ class singleStageCoilgun():
                                                                    abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.dM = self.dM + self.dM.T
 
+    def cache(self):
+        self.cache["Uc(n-1)"] = self.U[0][0]
+        self.cache["Id(n-1)"] = self.Id[0][0]
+
     def __update(self):
         self.__updatedM()
-
-        self.__updatedM()
+        self.__updateM1()
 
         # Update [U]
-        Uc = self.beforeRegister["Uc"] - self.dt * self.beforeRegister["Id"]
-
-        self.nowRegister["Uc"] = Uc
-        self.U = np.matrix([Uc] + [0] * self.armature.m * self.armature.n).T
-
-        self.beforeRegister = self.nowRegister
+        Ucn = self.Register["Uc(n-1)"] - self.dt * self.cache["Id(n-1)"]
+        self.U = np.matrix([Ucn] + [0] * self.armature.m * self.armature.n).T
 
     def __runT(self):
         pass
