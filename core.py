@@ -10,8 +10,15 @@ class singleStageCoilgun():
         self.armature = armature
         self.C = C
         self.dt = deltaT
+        
+        self.t = 0
+        
+        self.U  = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
+        self.I  = np.zeros((self.armature.m * self.armature.n + 1, 1))
+        self.Id = np.zeros((self.armature.m * self.armature.n + 1, 1))
 
-        self.cache = {"Uc(n-1)" : None, "Id(n-1)" : None}
+        self.cache = {"U(n-1)" : None, "I(n-1)" : None, "Id(n-1)" : None}
+        self.__cache()
 
         self.R = np.diag([self.drivingCoil.R] + self.armature.R)
 
@@ -29,13 +36,9 @@ class singleStageCoilgun():
                 if x == y:
                     self.M[x][y] = 0
 
-        self.__updatedM()
-        self.__updateM1()
-
-        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
-
-        self.I = np.zeros((self.armature.m * self.armature.n + 1, 1))
-        self.Id = self.U / (self.L - self.M1)
+        self.F = 0
+        self.a = 0
+        self.Va = 0
 
     def __delattr__(self, __name):
         calcM.cache_clear()
@@ -43,7 +46,7 @@ class singleStageCoilgun():
 
         super().__delattr__(__name)
 
-    def __updatedM(self):
+    def __updateM1(self):
         self.M1 = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
@@ -51,31 +54,42 @@ class singleStageCoilgun():
                                                                   abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.M1 = self.M1 + self.M1.T
 
-    def __updateM1(self):
-        self.dM = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+    def __updatedM1(self):
+        self.dM1 = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
-                self.M1[0][(i - 1) * self.armature.n + j] = calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j),
+                self.dM1[0][(i - 1) * self.armature.n + j] = calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j),
                                                                    abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
-        self.dM = self.dM + self.dM.T
+        self.dM1 = self.dM1 + self.dM1.T
 
-    def cache(self):
-        self.cache["Uc(n-1)"] = self.U[0][0]
-        self.cache["Id(n-1)"] = self.Id[0][0]
+    def __cache(self):
+        self.cache["U(n-1)"] = self.U
+        self.cache["I(n-1)"] = self.I
+        self.cache["Id(n-1)"] = self.Id
 
     def __update(self):
-        self.__updatedM()
         self.__updateM1()
+        self.__updatedM1()
+        
+        self.U = np.matrix([self.Register["U(n-1)"][0][0] - self.dt * self.cache["Id(n-1)"][0][0]] + [0] * self.armature.m * self.armature.n).T
+        
+        self.Id = (self.U + self.Va * self.dM1 * self.I - self.R + self.I - self.M * self.I) / (self.L - self.M1)
+        self.I  = self.cache["I(n-1)"] + self.dt * self.cache["Id(n-1)"]
+        
+        self.F = 0
+        for i in range(1, self.armature.m * self.armature.n + 1):
+            self.F += self.dM1[0][i] * self.I[0][i]
+        self.F = -1 * self.I[0][0] * self.F
 
-        # Update [U]
-        Ucn = self.Register["Uc(n-1)"] - self.dt * self.cache["Id(n-1)"]
-        self.U = np.matrix([Ucn] + [0] * self.armature.m * self.armature.n).T
-
-    def __runT(self):
-        pass
-
-    def run(self, x = None):
-        pass
+        
+    def run(self, xn):
+        while self.armature.x < xn:
+            self.__cache()
+            self.__update()
+        
+        η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.U, 2))
+        
+        return (η, self.Va)
 
 
 class multiStageCoilgun():
@@ -84,8 +98,7 @@ class multiStageCoilgun():
 
 # ----------------------------------------------------------------TESTS ----------------------------------------------------------------
 
-
-if __name__ == "__main__":
+def TestA():
     import time
     tic = time.perf_counter()
 
@@ -101,11 +114,14 @@ if __name__ == "__main__":
     sscg = singleStageCoilgun(dc, a, 8200, 0.001, 0.001)
     print("[OK]sscg initialized")
 
-    # (Ita, v) = sscg.run()
-    # print("[RESULT]Ita = " + str(ita * 100) + "%, RIGHT = 8.71%")
-    # print("[RESULT]v = " + str(v) + "m/s, RIGHT = 66.07m/s")
+    (η, v) = sscg.run()
+    print("[RESULT]η = " + str(η * 100) + "%, RIGHT = 8.71%")
+    print("[RESULT]v = " + str(v) + "m/s, RIGHT = 66.07m/s")
     print("[INFO]OVER")
 
     toc = time.perf_counter()
     t = toc - tic
     print("[DEBUG]TIME: " + str(t) + "s, " + str(t / 60) + "min.")
+    
+if __name__ == "__main__":
+    TestA()
