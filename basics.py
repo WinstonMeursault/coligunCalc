@@ -58,8 +58,7 @@ class drivingCoil():
 
         self.nc = self.n / ((self.re - self.ri) * self.l)
 
-        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) -
-                  np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
+        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) - np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
         self.L = calcL(self.ri, self.re, self.l, self.nc)
 
 

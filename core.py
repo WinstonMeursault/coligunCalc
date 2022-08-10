@@ -71,9 +71,9 @@ class singleStageCoilgun():
         self.__updateM1()
         self.__updatedM1()
         
-        self.U = np.matrix([self.Register["U(n-1)"][0][0] - self.dt * self.cache["Id(n-1)"][0][0]] + [0] * self.armature.m * self.armature.n).T
+        self.U = np.matrix([self.cache["U(n-1)"][0][0] - self.dt * self.cache["Id(n-1)"][0][0]] + [0] * self.armature.m * self.armature.n).T
         
-        self.Id = (self.U + self.Va * self.dM1 * self.I - self.R + self.I - self.M * self.I) / (self.L - self.M1)
+        self.Id = (self.U + self.Va * self.dM1 * self.I - self.R * self.I - self.M * self.I) / (self.L - self.M1)       # BUG
         self.I  = self.cache["I(n-1)"] + self.dt * self.cache["Id(n-1)"]
         
         self.F = 0
@@ -108,13 +108,13 @@ def TestA():
     print("[OK]dc initialized")
 
     # a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70000, 3000, 0.075)
-    a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 50, 50, 0.0505)
+    a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 10, 10, 0.0505)
     print("[OK]a initialized")
 
     sscg = singleStageCoilgun(dc, a, 8200, 0.001, 0.001)
     print("[OK]sscg initialized")
 
-    (η, v) = sscg.run()
+    (η, v) = sscg.run(1.2)
     print("[RESULT]η = " + str(η * 100) + "%, RIGHT = 8.71%")
     print("[RESULT]v = " + str(v) + "m/s, RIGHT = 66.07m/s")
     print("[INFO]OVER")
