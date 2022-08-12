@@ -14,17 +14,17 @@ class singleStageCoilgun():
         self.t = 0
         
         self.U  = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
-        self.I  = np.zeros((self.armature.m * self.armature.n + 1, 1))
-        self.Id = np.zeros((self.armature.m * self.armature.n + 1, 1))
+        self.I  = np.mat(np.zeros((self.armature.m * self.armature.n + 1, 1)))
+        self.Id = np.mat(np.zeros((self.armature.m * self.armature.n + 1, 1)))
 
         self.cache = {"U(n-1)" : None, "I(n-1)" : None, "Id(n-1)" : None}
         self.__cache()
 
-        self.R = np.diag([self.drivingCoil.R] + self.armature.R)
+        self.R = np.mat(np.diag([self.drivingCoil.R] + self.armature.R))
 
-        self.L = np.diag([self.drivingCoil.L] + self.armature.L)
+        self.L = np.mat(np.diag([self.drivingCoil.L] + self.armature.L))
 
-        self.M = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        self.M = np.mat(np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1)))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
                 for k in range(1, self.armature.m + 1):
@@ -47,7 +47,7 @@ class singleStageCoilgun():
         super().__delattr__(__name)
 
     def __updateM1(self):
-        self.M1 = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        self.M1 = np.mat(np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1)))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
                 self.M1[0][(i - 1) * self.armature.n + j] = calcM(self.drivingCoil.r, self.armature.currentFilamentAR(j),
@@ -55,7 +55,7 @@ class singleStageCoilgun():
         self.M1 = self.M1 + self.M1.T
 
     def __updatedM1(self):
-        self.dM1 = np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1))
+        self.dM1 = np.mat(np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1)))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
                 self.dM1[0][(i - 1) * self.armature.n + j] = calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j),

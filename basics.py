@@ -6,7 +6,7 @@ from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 from scipy.special import j0, j1, struve
 
-μ0 = 4 * np.pi * np.float_power(10, -7)
+μ0 = 0.0000012566370614359173   
 
 
 def calcL(ri, re, l, nc, limit=200):
@@ -23,7 +23,7 @@ def calcL(ri, re, l, nc, limit=200):
     T = quad(integrationT, 0, np.inf, limit=limit)[0]
 
     return 2 * np.pi * μ0 * np.power(nc, 2) * np.power(ri, 5) * T
-
+    
 
 def calcK(Ra, Rb, d):
     return np.sqrt((4 * Ra * Rb) / (np.power(Ra + Rb, 2) + np.power(d, 2)))
