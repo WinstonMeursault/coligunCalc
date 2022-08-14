@@ -5,10 +5,9 @@
 #define Mu0 0.0000012566370614359172953850573533118
 
 #define N 3e4    // 积分区间数
-#define ESP 1e-6 // 第一类反常积分 IA与IB的被允许最大差值
-#define CMAX 1e7 // 第一类反常积分 最大循环次数
+#define ESP 1e-5 // 第一类反常积分 IA与IB的被允许最大差值
+#define CMAX 1000 // 第一类反常积分 最大循环次数
 
-/*
 struct DLinkedNode
 {
     int key, value;
@@ -107,7 +106,6 @@ public:
         return node;
     }
 };
-*/
 
 long double pow(long double x, long double n)
 {
@@ -158,6 +156,7 @@ long double gamma(long double x)
         {
             result += a[i] * pow((x - 2), 10 - i);
         }
+        return result;
     }
     else
     {
@@ -418,7 +417,7 @@ long double calcK(double Ra, double Rb, double d)
     return sqrt((4 * Ra * Rb) / ((Ra + Rb) * (Ra + Rb) + d * d));
 }
 
-// ??? :@lru_cache()
+// TODO :@lru_cache()
 long double calcM(double Ra, double Rb, double d)
 {
     long double k = calcK(Ra, Rb, d);
@@ -426,7 +425,7 @@ long double calcM(double Ra, double Rb, double d)
     return Mu0 * sqrt(Ra * Rb) * ((2 / k - k) * ellipK(k) - (2 / k) * ellipE(k));
 }
 
-// ??? :@lru_cache()
+// TODO :@lru_cache()
 long double calcdM(double Ra, double Rb, double d)
 {
     long double k = calcK(Ra, Rb, d);
@@ -434,7 +433,35 @@ long double calcdM(double Ra, double Rb, double d)
     return (Mu0 * k * d * (2 * (1 - k * k) * ellipK(k) - (2 - k * k) * ellipE(k))) / (4 * (1 - k * k) * sqrt(Ra * Rb));
 }
 
+class drivingCoil
+{
+public:
+    double ri, re, l, n, x, SR, Swire, k, r, nc, R, L;
+
+    drivingCoil(double rdi, double rde, double ld, double dn, double resistivity, double Swire, double dk)
+    {
+        double ri = rdi;
+        double re = rde;
+        double l = ld;
+        double n = dn;  
+        double x = 0.5 * l;
+        double SR = resistivity;
+        double sw = Swire;
+        double k = dk;
+        double r = (ri + re) / 2;
+        double nc = n / ((re - ri) * l);
+        double R = (SR * k * PI * (pow(re, 2) - pow(ri, 2)) * l) / pow(Swire, 2);
+        double L = calcL(ri, re, l, nc);
+    }
+};
+
+class armature
+{
+};
+
 int main()
 {
-    return 0;
+    printf("[INFO]OK");
+    drivingCoil dc(0.015125, 0.029125, 0.063, 63, 0.0000000175, 0.000028, 0.7);
+    printf("[TEST]ri = " + (char)dc.ri);
 }

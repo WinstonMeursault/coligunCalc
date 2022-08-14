@@ -6,7 +6,7 @@ from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 from scipy.special import j0, j1, struve
 
-μ0 = 0.0000012566370614359173   
+μ0 = 0.0000012566370614359173
 
 
 def calcL(ri, re, l, nc, limit=200):
@@ -23,7 +23,7 @@ def calcL(ri, re, l, nc, limit=200):
     T = quad(integrationT, 0, np.inf, limit=limit)[0]
 
     return 2 * np.pi * μ0 * np.power(nc, 2) * np.power(ri, 5) * T
-    
+
 
 def calcK(Ra, Rb, d):
     return np.sqrt((4 * Ra * Rb) / (np.power(Ra + Rb, 2) + np.power(d, 2)))
@@ -58,12 +58,13 @@ class drivingCoil():
 
         self.nc = self.n / ((self.re - self.ri) * self.l)
 
-        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) - np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
+        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) -
+                  np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
         self.L = calcL(self.ri, self.re, self.l, self.nc)
 
 
 class armature():
-    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n, x0, limit = 200):
+    def __init__(self, rai, rae, la, resistivity, v0, ma, m, n, x0, limit=200):
         self.ri = rai
         self.re = rae
         self.l = la
@@ -76,7 +77,8 @@ class armature():
 
         self.__deltaRN = (self.re - self.ri) / self.n
         self.__currentFilamentL = self.l / self.m
-        self.__currentFilamentNc = 1 / (self.__currentFilamentL * self.__deltaRN)
+        self.__currentFilamentNc = 1 / \
+            (self.__currentFilamentL * self.__deltaRN)
 
         self.R = self.__R()
         self.L = self.__L(limit)
@@ -98,7 +100,8 @@ class armature():
 
     def __R(self):
         deltaR = 2 * np.pi * self.SR * self.m / self.l
-        R = [2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
+        R = [2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (
+            self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
 
         for k in range(0, self.n):
             R.append(R[k] + deltaR)
