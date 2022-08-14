@@ -1,3 +1,5 @@
+#include <unordered_map>
+
 #define PI 3.1415926535897932384626433832795
 #define E 2.71828182845904523536028747135266245
 #define Mu0 0.0000012566370614359172953850573533118
@@ -5,6 +7,212 @@
 #define N 3e4    // 积分区间数
 #define ESP 1e-6 // 第一类反常积分 IA与IB的被允许最大差值
 #define CMAX 1e7 // 第一类反常积分 最大循环次数
+
+/*
+struct DLinkedNode
+{
+    int key, value;
+    DLinkedNode *prev;
+    DLinkedNode *next;
+    DLinkedNode() : key(0), value(0), prev(nullptr), next(nullptr) {}
+    DLinkedNode(int _key, int _value) : key(_key), value(_value), prev(nullptr), next(nullptr) {}
+};
+
+class LRUCache
+{
+private:
+    std::unordered_map<int, DLinkedNode *> cache;
+    DLinkedNode *head;
+    DLinkedNode *tail;
+    int size;
+    int capacity;
+
+public:
+    LRUCache(int _capacity) : capacity(_capacity), size(0)
+    {
+        // 使用伪头部和伪尾部节点
+        head = new DLinkedNode();
+        tail = new DLinkedNode();
+        head->next = tail;
+        tail->prev = head;
+    }
+
+    int get(int key)
+    {
+        if (!cache.count(key))
+        {
+            return -1;
+        }
+        // 如果 key 存在，先通过哈希表定位，再移到头部
+        DLinkedNode *node = cache[key];
+        moveToHead(node);
+        return node->value;
+    }
+
+    void put(int key, int value)
+    {
+        if (!cache.count(key))
+        {
+            // 如果 key 不存在，创建一个新的节点
+            DLinkedNode *node = new DLinkedNode(key, value);
+            // 添加进哈希表
+            cache[key] = node;
+            // 添加至双向链表的头部
+            addToHead(node);
+            ++size;
+            if (size > capacity)
+            {
+                // 如果超出容量，删除双向链表的尾部节点
+                DLinkedNode *removed = removeTail();
+                // 删除哈希表中对应的项
+                cache.erase(removed->key);
+                // 防止内存泄漏
+                delete removed;
+                --size;
+            }
+        }
+        else
+        {
+            // 如果 key 存在，先通过哈希表定位，再修改 value，并移到头部
+            DLinkedNode *node = cache[key];
+            node->value = value;
+            moveToHead(node);
+        }
+    }
+
+    void addToHead(DLinkedNode *node)
+    {
+        node->prev = head;
+        node->next = head->next;
+        head->next->prev = node;
+        head->next = node;
+    }
+
+    void removeNode(DLinkedNode *node)
+    {
+        node->prev->next = node->next;
+        node->next->prev = node->prev;
+    }
+
+    void moveToHead(DLinkedNode *node)
+    {
+        removeNode(node);
+        addToHead(node);
+    }
+
+    DLinkedNode *removeTail()
+    {
+        DLinkedNode *node = tail->prev;
+        removeNode(node);
+        return node;
+    }
+};
+*/
+
+long double pow(long double x, long double n)
+{
+    int base = x;
+    double result = 1;
+    int y;
+    if (n == 0)
+        return 1;
+    else if (n < 0)
+        y = -n;
+    else
+        y = n;
+
+    while (y != 0)
+    {
+        if (y & 1)
+            result *= base;
+        base *= base;
+        y >>= 1;
+    }
+    if (n > 0)
+        return result;
+    else
+        return double(1.0 / result);
+}
+
+long double gamma(long double x)
+{
+    double a[11] = {0.0000677106, -0.0003442342, 0.0015397681, -0.0024467480, 0.0109736958, -0.0002109075, 0.0742379071, 0.0815782188, 0.4118402518, 0.4227843370, 1.0};
+
+    if (x < 0)
+    {
+        // X must be greater than zero
+        return -1;
+    }
+    else if (x > 0 && x <= 1)
+    {
+        return gamma(x + 1) / x;
+    }
+    else if (x > 1 && x <= 2)
+    {
+        return gamma(x + 2) / (x * (x + 1));
+    }
+    else if (x > 2 && x <= 3)
+    {
+        long double result = 0;
+        for (int i = 0; i < 11; i++)
+        {
+            result += a[i] * pow((x - 2), 10 - i);
+        }
+    }
+    else
+    {
+        return x * gamma(x - 1);
+    }
+}
+
+long double sin(long double x)
+{
+    bool flag = true; // T减法，F加法
+    double result = x;
+    double a = 0, b = 0;
+    double oddnum = 0;
+    for (int i = 0; i < 12; i++)
+    { //精度
+        oddnum = 2 * (i + 1) + 1;
+        a = pow(x, oddnum);
+        b = (long double)gamma(oddnum);
+        if (flag)
+        {
+            result = result - (a / b);
+            flag = false;
+        }
+        else
+        {
+            result = result + (a / b);
+            flag = true;
+        }
+    }
+    return result;
+}
+
+long double cos(long double x)
+{
+    return sin((PI / 2) - x);
+}
+
+long double sqrt(long double x)
+{
+
+    float xhalf = 0.5f * x;
+    int i = *(int *)&x;
+    i = 0x5f375a86 - (i >> 1);
+    x = *(float *)&i;
+    x = x * (1.5f - xhalf * x * x);
+    x = x * (1.5f - xhalf * x * x);
+    x = x * (1.5f - xhalf * x * x);
+
+    return 1 / x;
+}
+
+long double abs(long double x)
+{
+    return ((x > 0) ? x : -x);
+}
 
 long double integration(long double (*func)(long double), double a, double b, int n)
 {
@@ -182,7 +390,7 @@ inline long double U(double p, double x)
     return PI * (-J1(x) * Struve0(x) + p * J1(p * x) * Struve0(p * x) + J0(x) * Struve1(x) - p * J0(p * x) * Struve1(p * x)) / (2 * x * x);
 }
 
-long double iT(double p, double q, double x)
+long double iT(double p, double q, long double x)
 {
     return U(p, x) * U(p, x) * (q * x + pow(E, (-1 * q * x)) - 1);
 }
@@ -210,20 +418,20 @@ long double calcK(double Ra, double Rb, double d)
     return sqrt((4 * Ra * Rb) / ((Ra + Rb) * (Ra + Rb) + d * d));
 }
 
+// ??? :@lru_cache()
 long double calcM(double Ra, double Rb, double d)
 {
-    // TODO :@lru_cache()
     long double k = calcK(Ra, Rb, d);
 
     return Mu0 * sqrt(Ra * Rb) * ((2 / k - k) * ellipK(k) - (2 / k) * ellipE(k));
 }
 
+// ??? :@lru_cache()
 long double calcdM(double Ra, double Rb, double d)
 {
-    // TODO :@lru_cache()
     long double k = calcK(Ra, Rb, d);
 
-    return (Mu0 * k * d * (2 * (1 -k * k) * ellipK(k) - (2 -k * k) * ellipE(k))) / (4 * (1 -k * k) * sqrt(Ra * Rb));
+    return (Mu0 * k * d * (2 * (1 - k * k) * ellipK(k) - (2 - k * k) * ellipE(k))) / (4 * (1 - k * k) * sqrt(Ra * Rb));
 }
 
 int main()
