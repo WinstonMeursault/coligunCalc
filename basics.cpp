@@ -1,3 +1,4 @@
+#include <cfloat>
 #include <unordered_map>
 
 #define PI 3.1415926535897932384626433832795
@@ -5,8 +6,6 @@
 #define Mu0 0.0000012566370614359172953850573533118
 
 #define N 3e4    // 积分区间数
-#define ESP 1e-5 // 第一类反常积分 IA与IB的被允许最大差值
-#define CMAX 1000 // 第一类反常积分 最大循环次数
 
 struct DLinkedNode
 {
@@ -396,20 +395,7 @@ long double iT(double p, double q, long double x)
 
 long double calcL(double ri, double re, double l, double nc)
 {
-    unsigned long int upperLimit = 100;
-
-    long double IA = 0;
-    long double IB = 0;
-
-    while (abs(IA - IB) <= ESP || upperLimit / 100 >= CMAX)
-    {
-        IA = IB;
-        IB = 2 * PI * Mu0 * nc * nc * ri * ri * ri * ri * ri * integration_p3(iT, re / ri, l / ri, 0, upperLimit, N);
-
-        upperLimit = upperLimit + 100;
-    }
-
-    return 0;
+    return 2 * PI * Mu0 * nc * nc * ri * ri * ri * ri * ri * integration_p3(iT, re / ri, l / ri, 0, 3e300, N);
 }
 
 long double calcK(double Ra, double Rb, double d)
@@ -461,7 +447,5 @@ class armature
 
 int main()
 {
-    printf("[INFO]OK");
-    drivingCoil dc(0.015125, 0.029125, 0.063, 63, 0.0000000175, 0.000028, 0.7);
-    printf("[TEST]ri = " + (char)dc.ri);
+    return 0;
 }
