@@ -100,11 +100,10 @@ class armature():
 
     def __R(self):
         deltaR = 2 * np.pi * self.SR * self.m / self.l
-        R = [2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (
-            self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
+        R = [2 * np.pi * self.SR * ((self.m / (2 * self.l)) + (self.m * self.n * self.ri / (self.l * (self.re - self.ri))))]
 
-        for k in range(0, self.n):
-            R.append(R[k] + deltaR)
+        for k in range(1, self.n):
+            R.append(R[k - 1] + deltaR)
 
         return R * self.m
 
