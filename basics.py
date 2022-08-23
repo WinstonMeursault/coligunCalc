@@ -58,8 +58,7 @@ class drivingCoil():
 
         self.nc = self.n / ((self.re - self.ri) * self.l)
 
-        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) -
-                  np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
+        self.R = (self.SR * self.k * np.pi * (np.power(self.re, 2) - np.power(self.ri, 2)) * self.l) / np.power(self.Swire, 2)
         self.L = calcL(self.ri, self.re, self.l, self.nc)
 
 
@@ -77,8 +76,7 @@ class armature():
 
         self.__deltaRN = (self.re - self.ri) / self.n
         self.__currentFilamentL = self.l / self.m
-        self.__currentFilamentNc = 1 / \
-            (self.__currentFilamentL * self.__deltaRN)
+        self.__currentFilamentNc = 1 / (self.__currentFilamentL * self.__deltaRN)
 
         self.R = self.__R()
         self.L = self.__L(limit)
@@ -111,7 +109,6 @@ class armature():
         L = []
 
         for l in range(1, self.n + 1):
-            L.append(calcL(self.__currentFilamentRi(l), self.__currentFilamentRe(l),
-                     self.__currentFilamentL, self.__currentFilamentNc, limit))
+            L.append(calcL(self.__currentFilamentRi(l), self.__currentFilamentRe(l), self.__currentFilamentL, self.__currentFilamentNc, limit))
 
         return L * self.m

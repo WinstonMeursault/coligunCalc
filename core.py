@@ -29,8 +29,8 @@ class singleStageCoilgun():
             for j in range(1, self.armature.n + 1):
                 for k in range(1, self.armature.m + 1):
                     for l in range(1, self.armature.n + 1):
-                        self.M[(i - 1) * self.armature.n + j, (k - 1) * self.armature.n + l] = calcM(self.drivingCoil.r, self.armature.currentFilamentAR(l),
-                                                                                                     abs(self.armature.currentFilamentX(k) - self.drivingCoil.x))
+                        self.M[(i - 1) * self.armature.n + j, (k - 1) * self.armature.n + l] = \
+                            calcM(self.drivingCoil.r, self.armature.currentFilamentAR(l), abs(self.armature.currentFilamentX(k) - self.drivingCoil.x))
         for x in range(1, self.M.shape[0]):
             for y in range(1, self.M.shape[1]):
                 if x == y:
@@ -58,8 +58,8 @@ class singleStageCoilgun():
         self.dM1 = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1)))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
-                self.dM1[0, (i - 1) * self.armature.n + j] = calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j),
-                                                                    abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
+                self.dM1[0, (i - 1) * self.armature.n + j] = \
+                    calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j), abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.dM1 = self.dM1 + self.dM1.T
 
     def __cache(self):
@@ -84,7 +84,7 @@ class singleStageCoilgun():
     def run(self, xn):
         while self.armature.x < xn:
             self.__cache()
-            self.__update()
+            self.__update() 
 
         η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.U, 2))
 
