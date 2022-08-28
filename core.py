@@ -78,8 +78,9 @@ class singleStageCoilgun():
         self.I = self.cache.I + self.dt * self.cache.Id 
 
         self.F = 0
-        for i in range(1, self.armature.m * self.armature.n + 1):
-            self.F += self.dM1[0, i] * self.I[i, 0]
+        for i in range(1, self.armature.m + 1):
+            for j in range(self.armature.n + 1):
+                self.F += self.dM1[0, self.armature.n * (i - 1) + j] * self.I[self.armature.n * (i - 1) + j, 0] 
         self.F = -1 * self.I[0, 0] * self.F 
         
         self.a = self.F / self.armature.ma
@@ -91,7 +92,7 @@ class singleStageCoilgun():
             self.__cache()
             self.__update() 
             
-            print(self.armature.x)
+            print(self.F)
 
         η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.U[0, 0], 2))
 
