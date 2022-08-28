@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import numpy as np
 import numpy.matlib
 
@@ -17,7 +19,7 @@ class singleStageCoilgun():
         self.I = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, 1)))
         self.Id = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, 1)))
 
-        self.cache = {"U(n-1)": None, "I(n-1)": None, "Id(n-1)": None}
+        self.cache = None
         self.__cache()
 
         self.R = np.matrix(np.diag([self.drivingCoil.R] + self.armature.R))
@@ -63,30 +65,35 @@ class singleStageCoilgun():
         self.dM1 = self.dM1 + self.dM1.T
 
     def __cache(self):
-        self.cache["U(n-1)"] = self.U
-        self.cache["I(n-1)"] = self.I
-        self.cache["Id(n-1)"] = self.Id
+        self.cache = None
+        self.cache = deepcopy(self)
 
     def __update(self):
         self.__updateM1()
         self.__updatedM1()
 
-        self.U = np.matrix([self.cache["U(n-1)"][0, 0] - self.dt * self.cache["Id(n-1)"][0, 0]] + [0] * self.armature.m * self.armature.n).T
+        self.U = np.matrix([self.cache.U[0, 0] - self.dt * self.cache.Id[0, 0]] + [0] * self.armature.m * self.armature.n).T
 
         self.Id = (self.U + self.Va * self.dM1 * self.I - self.R * self.I - self.M * self.I) / (self.L - self.M1)
-        self.I = self.cache["I(n-1)"] + self.dt * self.cache["Id(n-1)"]
+        self.I = self.cache.I + self.dt * self.cache.Id 
 
         self.F = 0
         for i in range(1, self.armature.m * self.armature.n + 1):
-            self.F += self.dM1[0, i] * self.I[0, i]
-        self.F = -1 * self.I[0, 0] * self.F
+            self.F += self.dM1[0, i] * self.I[i, 0]
+        self.F = -1 * self.I[0, 0] * self.F 
+        
+        self.a = self.F / self.armature.ma
+        self.Va = self.cache.Va + self.cache.a * self.dt
+        self.armature.x = self.cache.armature.x + self.cache.Va * self.dt
 
     def run(self, xn):
         while self.armature.x < xn:
             self.__cache()
             self.__update() 
+            
+            print(self.armature.x)
 
-        η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.U, 2))
+        η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.U[0, 0], 2))
 
         return (η, self.Va)
 
@@ -104,12 +111,11 @@ def TestA():
 
     print("[INFO]READY...")
 
-    dc = drivingCoil(0.015125, 0.029125, 0.063, 63,
-                     0.0000000175, 0.000028, 0.7)
+    dc = drivingCoil(0.015125, 0.029125, 0.063, 63, 0.0000000175, 0.000028, 0.7)
     print("[OK]dc initialized")
 
     # a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70000, 3000, 0.075)
-    a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 10, 10, 0.0505)
+    a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70, 3, 0.0505)
     print("[OK]a initialized")
 
     sscg = singleStageCoilgun(dc, a, 8200, 0.001, 0.001)
