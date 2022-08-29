@@ -88,6 +88,7 @@ class armature():
         return self.ri + (self.re - self.ri) * j / self.n
 
     def currentFilamentAR(self, j):
+        # AR: 平均半径
         return self.ri + self.__deltaRN * (j - 0.5)
 
     def currentFilamentX(self, i):

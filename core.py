@@ -37,6 +37,11 @@ class singleStageCoilgun():
             for y in range(1, self.M.shape[1]):
                 if x == y:
                     self.M[x, y] = 0
+                    
+        self.__updateM1()
+        self.__updatedM1()
+
+        self.Id = self.U / (self.L - self.M1)
 
         self.F = 0
         self.a = 0
@@ -65,34 +70,34 @@ class singleStageCoilgun():
         self.dM1 = self.dM1 + self.dM1.T
 
     def __cache(self):
-        self.cache = None
+        self.cache = None               # 防止self.cache缓存上一次的self.chache
         self.cache = deepcopy(self)
 
     def __update(self):
-        self.__updateM1()
-        self.__updatedM1()
-
         self.U = np.matrix([self.cache.U[0, 0] - self.dt * self.cache.Id[0, 0]] + [0] * self.armature.m * self.armature.n).T
 
-        self.Id = (self.U + self.Va * self.dM1 * self.I - self.R * self.I - self.M * self.I) / (self.L - self.M1)
+        self.Id = np.linalg.inv(self.L - self.M1) * (self.U + self.Va * self.dM1 * self.I - self.R * self.I - self.M * self.I)
         self.I = self.cache.I + self.dt * self.cache.Id 
 
         self.F = 0
         for i in range(1, self.armature.m + 1):
-            for j in range(self.armature.n + 1):
+            for j in range(1, self.armature.n + 1):
                 self.F += self.dM1[0, self.armature.n * (i - 1) + j] * self.I[self.armature.n * (i - 1) + j, 0] 
         self.F = -1 * self.I[0, 0] * self.F 
         
         self.a = self.F / self.armature.ma
         self.Va = self.cache.Va + self.cache.a * self.dt
         self.armature.x = self.cache.armature.x + self.cache.Va * self.dt
+        
+        print("[DEBUG] F = " + str(self.F) + "N, Va = " + str(self.Va) + "m/s")
+
+        self.__updateM1()
+        self.__updatedM1()
 
     def run(self, xn):
         while self.armature.x < xn:
             self.__cache()
             self.__update() 
-            
-            print(self.F)
 
         η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.U[0, 0], 2))
 
@@ -115,14 +120,14 @@ def TestA():
     dc = drivingCoil(0.015125, 0.029125, 0.063, 63, 0.0000000175, 0.000028, 0.7)
     print("[OK]dc initialized")
 
-    # a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70000, 3000, 0.075)
-    a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70, 3, 0.0505)
+    # a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70000, 3000, 0.0505)
+    a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 1, 1, 0.0505)
     print("[OK]a initialized")
 
-    sscg = singleStageCoilgun(dc, a, 8200, 0.001, 0.001)
+    sscg = singleStageCoilgun(dc, a, 8000, 0.001, 0.00001)
     print("[OK]sscg initialized")
 
-    (η, v) = sscg.run(1.2)
+    (η, v) = sscg.run(1)
     print("[RESULT]η = " + str(η * 100) + "%, RIGHT = 8.71%")
     print("[RESULT]v = " + str(v) + "m/s, RIGHT = 66.07m/s")
     print("[INFO]OVER")
