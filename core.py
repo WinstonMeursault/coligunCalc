@@ -15,11 +15,10 @@ class singleStageCoilgun():
 
         self.t = 0
 
-        self.U = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
-        self.I = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, 1)))
+        self.U  = np.matrix([U] + [0] * self.armature.m * self.armature.n).T
+        self.I  = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, 1)))
         self.Id = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, 1)))
 
-        self.cache = None
         self.__cache()
 
         self.R = np.matrix(np.diag([self.drivingCoil.R] + self.armature.R))
@@ -37,7 +36,7 @@ class singleStageCoilgun():
             for y in range(1, self.M.shape[1]):
                 if x == y:
                     self.M[x, y] = 0
-                    
+
         self.__updateM1()
         self.__updatedM1()
 
@@ -57,16 +56,18 @@ class singleStageCoilgun():
         self.M1 = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1)))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
-                self.M1[0, (i - 1) * self.armature.n + j] = calcM(self.drivingCoil.r, self.armature.currentFilamentAR(j),
-                                                                  abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
+                self.M1[0, (i - 1) * self.armature.n + j] = \
+                    calcM(self.drivingCoil.r, self.armature.currentFilamentAR(j),abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.M1 = self.M1 + self.M1.T
 
     def __updatedM1(self):
-        self.dM1 = np.matrix(np.zeros((self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1)))
+        self.dM1 = np.matrix(np.zeros(
+            (self.armature.m * self.armature.n + 1, self.armature.m * self.armature.n + 1)))
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
                 self.dM1[0, (i - 1) * self.armature.n + j] = \
-                    calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j), abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
+                    calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j), abs(
+                        self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.dM1 = self.dM1 + self.dM1.T
 
     def __cache(self):
@@ -74,32 +75,37 @@ class singleStageCoilgun():
         self.cache = deepcopy(self)
 
     def __update(self):
-        self.U = np.matrix([self.cache.U[0, 0] - self.dt * self.cache.Id[0, 0]] + [0] * self.armature.m * self.armature.n).T
+        self.U = np.matrix([self.cache.U[0, 0] - self.dt * self.cache.Id[0, 0]
+                            ] + [0] * self.armature.m * self.armature.n).T
 
-        self.Id = np.linalg.inv(self.L - self.M1) * (self.U + self.Va * self.dM1 * self.I - self.R * self.I - self.M * self.I)
-        self.I = self.cache.I + self.dt * self.cache.Id 
+        self.Id = np.linalg.inv(self.L - self.M1) * (self.U + self.Va *
+                                                     self.dM1 * self.I - self.R * self.I - self.M * self.I)
+        self.I = self.cache.I + self.dt * self.cache.Id
 
         self.F = 0
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
-                self.F += self.dM1[0, self.armature.n * (i - 1) + j] * self.I[self.armature.n * (i - 1) + j, 0] 
-        self.F = -1 * self.I[0, 0] * self.F         # BUG * self.F ???
-        
+                self.F += self.dM1[0, self.armature.n * (
+                    i - 1) + j] * self.I[0, 0] * self.I[self.armature.n * (i - 1) + j, 0]
+        self.F = -1 * self.F
+
         self.a = self.F / self.armature.ma
         self.Va = self.cache.Va + self.cache.a * self.dt
         self.armature.x = self.cache.armature.x + self.cache.Va * self.dt
-        
-        # print("[DEBUG] F = " + str(self.F) + "N, Va = " + str(self.Va) + "m/s, x = " + str(self.armature.x) + "m.")
 
         self.__updateM1()
         self.__updatedM1()
 
+        print("[DEBUG] F = " + str(self.F) + "N, Va = " +
+              str(self.Va) + "m/s, x = " + str(self.armature.x) + "m.")
+
     def run(self, xn):
         while self.armature.x < xn:
             self.__cache()
-            self.__update() 
+            self.__update()
 
-        η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.U[0, 0], 2))
+        η = (self.armature.ma * (np.power(self.Va, 2) -
+             np.power(self.armature.v0, 2))) / (self.C * np.power(self.U[0, 0], 2))
 
         return (η, self.Va)
 
@@ -117,7 +123,8 @@ def TestA():
 
     print("[TEST]TEST A: READY----------------------------------------------------------------")
 
-    dc = drivingCoil(0.015125, 0.029125, 0.063, 63, 0.0000000175, 0.000028, 0.7)
+    dc = drivingCoil(0.015125, 0.029125, 0.063, 63,
+                     0.0000000175, 0.000028, 0.7)
     print("[OK]dc initialized")
 
     # a = armature(0.012, 0.015, 0.07, 0.0000000175, 0, 6.384, 70000, 3000, 0.0505)
@@ -135,6 +142,7 @@ def TestA():
     toc = time.perf_counter()
     t = toc - tic
     print("[DEBUG]TIME: " + str(t) + "s, " + str(t / 60) + "min.")
+
 
 def TestB():
     import time
@@ -159,7 +167,8 @@ def TestB():
     toc = time.perf_counter()
     t = toc - tic
     print("[DEBUG]TIME: " + str(t) + "s, " + str(t / 60) + "min.")
-    
+
+
 def TestC():
     import time
     tic = time.perf_counter()
