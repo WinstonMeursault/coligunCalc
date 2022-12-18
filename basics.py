@@ -1,7 +1,7 @@
 from functools import lru_cache
 
 import numpy as np
-from scipy.integrate import quad
+from scipy.integrate import quad, nquad
 from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 from scipy.special import j0, j1, struve
@@ -9,7 +9,20 @@ from scipy.special import j0, j1, struve
 μ0 = 0.0000012566370614359173
 
 
-def calcL(ri, re, l, nc, limit=200):
+def calcL(ri: float, re: float, l: float, nc: int, limit: int = 200) -> float :
+    """计算线圈自感
+
+    Args:
+        ri (float): 线圈内径
+        re (float): 线圈外径
+        l (float): 线圈长度
+        nc (int): 线圈匝数
+        limit (int, optional): Numpy quad参数, 若警告区间划分数过少可适当提高. Defaults to 200.
+
+    Returns:
+        float: 线圈自感
+    """    
+    
     p = re / ri
     q = l / ri
 
@@ -30,17 +43,31 @@ def calcK(Ra, Rb, d):
 
 
 @lru_cache()
-def calcM(Ra, Rb, d):
-    k = calcK(Ra, Rb, d)
+def calcM(Rai, Rae, La, Na, Rbi, Rbe, Lb, Nb, d):  
 
-    return μ0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+    def integrationM(r1, z1, r2, z2):
+        ra = Rai + r1
+        rb = Rbi + r2
+        dz = abs(abs(d - 0.5 * La + 0.5 * Lb) + z1 - z2)
+
+        k = calcK(ra, rb, dz)
+        return μ0 * np.sqrt(ra * rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+
+    return (Na * Nb * nquad(integrationM, [[0, Lb], [Rbi, Rbe], [0, La], [Rai, Rbe]])[0]) / ((Rae - Rai) * La * (Rbe - Rbi) * Lb)
 
 
 @lru_cache()
-def calcdM(Ra, Rb, d):
-    k = calcK(Ra, Rb, d)
+def calcdM(Rai, Rae, La, Na, Rbi, Rbe, Lb, Nb, d):
 
-    return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(Ra * Rb))
+    def integrationdM(r1, z1, r2, z2):
+        ra = Rai + r1
+        rb = Rbi + r2
+        dz = abs(abs(d - 0.5 * La + 0.5 * Lb) + z1 - z2)
+
+        k = calcK(ra, rb, dz)
+        return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(ra * rb))
+
+    return (Na * Nb * nquad(integrationdM, [[0, Lb], [Rbi, Rbe], [0, La], [Rai, Rbe]])[0]) / ((Rae - Rai) * La * (Rbe - Rbi) * Lb)
 
 
 class drivingCoil():
