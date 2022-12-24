@@ -32,7 +32,9 @@ class singleStageCoilgun():
                 for k in range(1, self.armature.m + 1):
                     for l in range(1, self.armature.n + 1):
                         self.M[(i - 1) * self.armature.n + j, (k - 1) * self.armature.n + l] = \
-                            calcM(self.drivingCoil.r, self.armature.currentFilamentAR(l), abs(self.armature.currentFilamentX(k) - self.drivingCoil.x))
+                            calcM(self.armature.currentFilamentRi(j), self.armature.currentFilamentRe(j),self.armature.currentFilamentL, 1, 
+                                self.armature.currentFilamentRi(l), self.armature.currentFilamentRe(l),self.armature.currentFilamentL, 1, 
+                                    abs(self.armature.currentFilamentX(i) - self.armature.currentFilamentX(k)))
         for x in range(1, self.M.shape[0]):
             for y in range(1, self.M.shape[1]):
                 if x == y:
@@ -58,7 +60,9 @@ class singleStageCoilgun():
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
                 self.M1[0, (i - 1) * self.armature.n + j] = \
-                    calcM(self.drivingCoil.r, self.armature.currentFilamentAR(j), abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
+                    calcM(self.armature.currentFilamentRi(j), self.armature.currentFilamentRe(j),self.armature.currentFilamentL, 1, 
+                        self.drivingCoil.ri, self.drivingCoil.re, self.drivingCoil.l, self.drivingCoil.n, 
+                            abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.M1 = self.M1 + self.M1.T
 
     def __updatedM1(self):
@@ -66,7 +70,9 @@ class singleStageCoilgun():
         for i in range(1, self.armature.m + 1):
             for j in range(1, self.armature.n + 1):
                 self.dM1[0, (i - 1) * self.armature.n + j] = \
-                    calcdM(self.drivingCoil.r, self.armature.currentFilamentAR(j), abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
+                    calcdM(self.armature.currentFilamentRi(j), self.armature.currentFilamentRe(j),self.armature.currentFilamentL, 1, 
+                        self.drivingCoil.ri, self.drivingCoil.re, self.drivingCoil.l, self.drivingCoil.n, 
+                            abs(self.armature.currentFilamentX(i) - self.drivingCoil.x))
         self.dM1 = self.dM1 + self.dM1.T
 
     def __cache(self):

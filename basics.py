@@ -135,13 +135,13 @@ class armature():
         self.x = x0
 
         self.__deltaRN = (self.re - self.ri) / self.n
-        self.__currentFilamentL = self.l / self.m
-        self.__currentFilamentNc = 1 / (self.__currentFilamentL * self.__deltaRN)
+        self.currentFilamentL = self.l / self.m
+        self.__currentFilamentNc = 1 / (self.currentFilamentL * self.__deltaRN)
 
         self.R = self.__R()
         self.L = self.__L(limit)
 
-    def __currentFilamentRi(self, j: int) -> float: 
+    def currentFilamentRi(self, j: int) -> float: 
         """计算电流丝内径
 
         Args:
@@ -152,7 +152,7 @@ class armature():
         """             
         return self.ri + (self.re - self.ri) * (j - 1) / self.n
 
-    def __currentFilamentRe(self, j: int) -> float:
+    def currentFilamentRe(self, j: int) -> float:
         """计算电流丝外径
 
         Args:
@@ -183,7 +183,7 @@ class armature():
         Returns:
             float: 电流丝的绝对位置
         """        
-        return self.x - 0.5 * self.l + (i - 0.5) * self.__currentFilamentL
+        return self.x - 0.5 * self.l + (i - 0.5) * self.currentFilamentL
 
     def updatePosition(self, delta: float) -> None:
         """更新电枢位置(将位置更新为原位置与delta之和)
@@ -206,6 +206,6 @@ class armature():
         L = []
 
         for l in range(1, self.n + 1):
-            L.append(calcL(self.__currentFilamentRi(l), self.__currentFilamentRe(l), self.__currentFilamentL, self.__currentFilamentNc, limit))
+            L.append(calcL(self.currentFilamentRi(l), self.currentFilamentRe(l), self.currentFilamentL, self.__currentFilamentNc, limit))
 
         return L * self.m
