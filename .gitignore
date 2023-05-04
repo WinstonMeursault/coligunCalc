@@ -134,3 +134,9 @@ settings.json
 
 # Notes
 Notes/
+
+# References
+.references/
+
+# VS Code
+.history/
