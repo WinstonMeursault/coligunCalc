@@ -2,7 +2,7 @@ from functools import lru_cache
 from typing import List
 
 import numpy as np
-from scipy.integrate import quad, nquad
+from scipy.integrate import nquad, quad
 from scipy.special import ellipe as eE
 from scipy.special import ellipk as eK
 from scipy.special import j0, j1, struve
@@ -22,22 +22,21 @@ def calcL(ri: float, re: float, l: float, nc: int, limit: int = 200) -> float:
 
     Returns:
         float: 线圈自感
-    """    
-    
+    """
+
     p = re / ri
     q = l / ri
 
     # U = lambda x: quad(lambda x: x * j1(x), x, p * x)[0] / np.power(x, 3)
     def U(x: float) -> float:
-        return np.pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * np.power(x, 2))  
+        return np.pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * np.power(x, 2))
 
     def integrationT(x: float) -> float:
         return np.power(U(x), 2) * (q * x + np.power(np.e, (-1 * q * x)) - 1)
 
     T = quad(integrationT, 0, np.inf, limit=limit)[0]
 
-    return 2 * np.pi * μ0 * np.power(nc, 2) * np.power(ri, 5) * T
-
+    return 2 * np.pi * μ0 * nc ** 2 * np.power(ri, 5) * T
 
 def calcK(Ra: float, Rb: float, d: float) -> float:
     return np.sqrt((4 * Ra * Rb) / (np.power(Ra + Rb, 2) + np.power(d, 2)))
@@ -56,11 +55,11 @@ def calcM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb
         Rbe (float): B线圈外径
         Lb (float): B线圈长度
         Nb (int): B线圈匝数
-        d (float): A B线圈中心面的距离
+        d (float): A B线圈中心面的距离  
 
     Returns:
         float: A B两线圈之间的互感(返回在距离为d时的数值)
-    """      
+    """
 
     def integrationM(r1: float, z1: float, r2: float, z2: float) -> float:
         ra = Rai + r1
@@ -74,7 +73,7 @@ def calcM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb
 
 
 @lru_cache()
-def calcdM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb: float, Nb: int, d: float) -> float:  
+def calcdM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb: float, Nb: int, d: float) -> float:
     """计算两线圈互感梯度(设为A B线圈)
 
     Args:
@@ -90,7 +89,7 @@ def calcdM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, L
 
     Returns:
         float: A B两线圈之间的互感梯度(返回在距离为d时的数值)
-    """      
+    """
 
     def integrationdM(r1: float, z1: float, r2: float, z2: float) -> float:
         ra = Rai + r1
@@ -141,7 +140,7 @@ class armature():
         self.R = self.__R()
         self.L = self.__L(limit)
 
-    def currentFilamentRi(self, j: int) -> float: 
+    def currentFilamentRi(self, j: int) -> float:
         """计算电流丝内径
 
         Args:
@@ -149,7 +148,7 @@ class armature():
 
         Returns:
             float: 电流丝内径
-        """             
+        """
         return self.ri + (self.re - self.ri) * (j - 1) / self.n
 
     def currentFilamentRe(self, j: int) -> float:
@@ -160,7 +159,7 @@ class armature():
 
         Returns:
             float: 电流丝外径
-        """        
+        """
         return self.ri + (self.re - self.ri) * j / self.n
 
     def currentFilamentAR(self, j: int) -> float:
@@ -171,7 +170,7 @@ class armature():
 
         Returns:
             float: 电流丝平均半径
-        """        
+        """
         return self.ri + self.__deltaRN * (j - 0.5)
 
     def currentFilamentX(self, i: int) -> float:
@@ -182,7 +181,7 @@ class armature():
 
         Returns:
             float: 电流丝的绝对位置
-        """        
+        """
         return self.x - 0.5 * self.l + (i - 0.5) * self.currentFilamentL
 
     def updatePosition(self, delta: float) -> None:
@@ -190,7 +189,7 @@ class armature():
 
         Args:
             delta (float): 电枢位移
-        """        
+        """
         self.x += delta
 
     def __R(self) -> List[float]:

@@ -94,16 +94,21 @@ class singleStageCoilgun():
         self.a = self.F / self.armature.ma
         self.Va = self.cache.Va + self.cache.a * self.dt
         self.armature.x += self.cache.Va * self.dt
+        
+        self.t += self.dt
 
         self.__updateM1()
         self.__updatedM1()
 
         print("[DEBUG] F = " + str(self.F) + "N, Va = " + str(self.Va) + "m/s, x = " + str(self.armature.x) + "m.")
 
-    def run(self, xn):
-        while self.armature.x < xn:
-            self.__cache()
-            self.__update()
+    def run(self, threshold):
+        flag = False
+        st = 0
+        while flag is True:
+            if self.a >= 0.01 :
+                self.__cache()
+                self.__update()
 
         η = (self.armature.ma * (np.power(self.Va, 2) - np.power(self.armature.v0, 2))) / (self.C * np.power(self.Uc, 2))
 
@@ -134,7 +139,7 @@ def TestA():
     sscg = singleStageCoilgun(dc, a, 8000, 0.001, 0.001)
     print("[OK]sscg initialized")
 
-    (η, v) = sscg.run(1)
+    (η, v) = sscg.run(0.5)
     print("[RESULT]η = " + str(η * 100) + "%, RIGHT = 8.71%")
     print("[RESULT]v = " + str(v) + "m/s, RIGHT = 66.07m/s")
     print("[INFO]OVER")
