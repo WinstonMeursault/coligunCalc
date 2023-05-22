@@ -14,13 +14,20 @@ def calcL(ri: float, re: float, l: float, nc: int, limit: int = 200) -> float:
     """计算线圈自感
 
     Args:
+    
         ri (float): 线圈内径
+        
         re (float): 线圈外径
+        
         l (float): 线圈长度
+        
         nc (int): 线圈匝数
+        
         limit (int, optional): Numpy quad参数, 若警告区间划分数过少可适当提高. Defaults to 200.
 
+
     Returns:
+    
         float: 线圈自感
     """
 
@@ -29,14 +36,14 @@ def calcL(ri: float, re: float, l: float, nc: int, limit: int = 200) -> float:
 
     # U = lambda x: quad(lambda x: x * j1(x), x, p * x)[0] / np.power(x, 3)
     def U(x: float) -> float:
-        return np.pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * np.power(x, 2))
+        return np.pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * x * x)
 
     def integrationT(x: float) -> float:
         return np.power(U(x), 2) * (q * x + np.power(np.e, (-1 * q * x)) - 1)
 
     T = quad(integrationT, 0, np.inf, limit=limit)[0]
 
-    return 2 * np.pi * μ0 * nc ** 2 * np.power(ri, 5) * T
+    return 2 * np.pi * μ0 * nc ** 2 * ri ** 5 * T
 
 def calcK(Ra: float, Rb: float, d: float) -> float:
     return np.sqrt((4 * Ra * Rb) / (np.power(Ra + Rb, 2) + np.power(d, 2)))
@@ -47,17 +54,28 @@ def calcM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb
     """计算两线圈互感(设为A B线圈)
 
     Args:
+    
         Rai (float): A线圈内径
+        
         Rae (float): A线圈外径
+        
         La (float): A线圈长度
+        
         Na (int): A线圈匝数
+        
         Rbi (float): B线圈内径
+        
         Rbe (float): B线圈外径
+        
         Lb (float): B线圈长度
+        
         Nb (int): B线圈匝数
-        d (float): A B线圈中心面的距离  
+        
+        d (float): A B线圈中心面的距离
+        
 
     Returns:
+    
         float: A B两线圈之间的互感(返回在距离为d时的数值)
     """
 
@@ -77,17 +95,28 @@ def calcdM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, L
     """计算两线圈互感梯度(设为A B线圈)
 
     Args:
+    
         Rai (float): A线圈内径
+        
         Rae (float): A线圈外径
+        
         La (float): A线圈长度
+        
         Na (int): A线圈匝数
+        
         Rbi (float): B线圈内径
+        
         Rbe (float): B线圈外径
+        
         Lb (float): B线圈长度
+        
         Nb (int): B线圈匝数
+        
         d (float): A B线圈中心面的距离
+        
 
     Returns:
+    
         float: A B两线圈之间的互感梯度(返回在距离为d时的数值)
     """
 
@@ -144,7 +173,9 @@ class armature():
         """计算电流丝内径
 
         Args:
+        
             j (int): 电流丝径向编号
+
 
         Returns:
             float: 电流丝内径
@@ -155,9 +186,12 @@ class armature():
         """计算电流丝外径
 
         Args:
+        
             j (int): 电流丝径向编号
 
+
         Returns:
+        
             float: 电流丝外径
         """
         return self.ri + (self.re - self.ri) * j / self.n
@@ -166,9 +200,12 @@ class armature():
         """计算电流丝的平均半径
 
         Args:
+        
             j (int): 电流丝径向编号
 
+
         Returns:
+        
             float: 电流丝平均半径
         """
         return self.ri + self.__deltaRN * (j - 0.5)
@@ -177,9 +214,12 @@ class armature():
         """计算电流丝绝对位置
 
         Args:
+        
             i (int): 电流丝轴向编号
 
+
         Returns:
+        
             float: 电流丝的绝对位置
         """
         return self.x - 0.5 * self.l + (i - 0.5) * self.currentFilamentL
@@ -188,6 +228,7 @@ class armature():
         """更新电枢位置(将位置更新为原位置与delta之和)
 
         Args:
+        
             delta (float): 电枢位移
         """
         self.x += delta
@@ -200,7 +241,7 @@ class armature():
             R.append(R[k - 1] + deltaR)
 
         return R * self.m
-
+    
     def __L(self, limit: int) -> List[float]:
         L = []
 
@@ -208,3 +249,4 @@ class armature():
             L.append(calcL(self.currentFilamentRi(l), self.currentFilamentRe(l), self.currentFilamentL, self.__currentFilamentNc, limit))
 
         return L * self.m
+    
