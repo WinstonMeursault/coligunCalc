@@ -50,8 +50,32 @@ def calcK(Ra: float, Rb: float, d: float) -> float:
 
 
 @lru_cache()
+def calcM_CF(Ra: float, Rb: float, d: float) -> float:
+    """计算两电流丝间互感(设为A B线圈)
+
+    Args:
+    
+        Ra (float): A线圈平均半径
+        
+        Rb (float): B线圈平均半径
+        
+        d (float): A B两线圈距离
+        
+
+    Returns:
+    
+        float: A B两线圈之间的互感
+        
+    """
+    
+    k = calcK(Ra, Rb, d)
+
+    return μ0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
+
+
+@lru_cache()
 def calcM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb: float, Nb: int, d: float) -> float:
-    """计算两线圈互感(设为A B线圈)
+    """计算两线圈间互感(设为A B线圈)
 
     Args:
     
@@ -91,8 +115,33 @@ def calcM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb
 
 
 @lru_cache()
+def calcdM_CF(Ra, Rb, d):
+    """计算两电流丝间互感梯度(设为A B线圈)
+
+    Args:
+    
+        Ra (float): A线圈平均半径
+        
+        Rb (float): B线圈平均半径
+        
+        d (float): A B两线圈距离
+        
+
+    Returns:
+    
+        float: A B两线圈之间的互感
+        
+    """
+        
+    k = calcK(Ra, Rb, d)
+
+    return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(Ra * Rb))
+
+
+
+@lru_cache()
 def calcdM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb: float, Nb: int, d: float) -> float:
-    """计算两线圈互感梯度(设为A B线圈)
+    """计算两线圈间互感梯度(设为A B线圈)
 
     Args:
     
@@ -189,7 +238,7 @@ class armature():
         
             j (int): 电流丝径向编号
 
-
+ 
         Returns:
         
             float: 电流丝外径
@@ -200,7 +249,7 @@ class armature():
         """计算电流丝的平均半径
 
         Args:
-        
+            
             j (int): 电流丝径向编号
 
 
