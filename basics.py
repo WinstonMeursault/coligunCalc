@@ -10,7 +10,7 @@ from scipy.special import j0, j1, struve
 μ0 = 0.0000012566370614359173
 
 
-def calcL(ri: float, re: float, l: float, nc: int, limit: int = 200) -> float:
+def calcL(ri: float, re: float, l: float, Nc: float, limit: int = 200) -> float:
     """计算线圈自感
 
     Args:
@@ -21,7 +21,7 @@ def calcL(ri: float, re: float, l: float, nc: int, limit: int = 200) -> float:
         
         l (float): 线圈长度
         
-        nc (int): 线圈匝数
+        Nc (float): 线圈匝数
         
         limit (int, optional): Numpy quad参数, 若警告区间划分数过少可适当提高. Defaults to 200.
 
@@ -36,14 +36,14 @@ def calcL(ri: float, re: float, l: float, nc: int, limit: int = 200) -> float:
 
     # U = lambda x: quad(lambda x: x * j1(x), x, p * x)[0] / np.power(x, 3)
     def U(x: float) -> float:
-        return np.pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * x * x)
+        return np.pi * (-j1(x) * struve(0, x) + p * j1(p * x) * struve(0, p * x) + j0(x) * struve(1, x) - p * j0(p * x) * struve(1, p * x)) / (2 * np.power(x,2))
 
     def integrationT(x: float) -> float:
         return np.power(U(x), 2) * (q * x + np.power(np.e, (-1 * q * x)) - 1)
 
     T = quad(integrationT, 0, np.inf, limit=limit)[0]
 
-    return 2 * np.pi * μ0 * nc ** 2 * ri ** 5 * T
+    return 2 * np.pi * μ0 * Nc ** 2 * ri ** 5 * T
 
 def calcK(Ra: float, Rb: float, d: float) -> float:
     return np.sqrt((4 * Ra * Rb) / (np.power(Ra + Rb, 2) + np.power(d, 2)))
@@ -73,7 +73,6 @@ def calcM_CF(Ra: float, Rb: float, d: float) -> float:
     return μ0 * np.sqrt(Ra * Rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
 
-@lru_cache()
 def calcM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb: float, Nb: int, d: float) -> float:
     """计算两线圈间互感(设为A B线圈)
 
@@ -111,11 +110,11 @@ def calcM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb
         k = calcK(ra, rb, dz)
         return μ0 * np.sqrt(ra * rb) * ((2 / k - k) * eK(k) - (2 / k) * eE(k))
 
-    return (Na * Nb * nquad(integrationM, [[0, Lb], [Rbi, Rbe], [0, La], [Rai, Rbe]])[0]) / ((Rae - Rai) * La * (Rbe - Rbi) * Lb)
+    return (Na * Nb * nquad(integrationM, [[Rai, Rae], [0, La], [Rbi, Rbe], [0, Lb]])[0]) / ((Rae - Rai) * La * (Rbe - Rbi) * Lb)
 
 
 @lru_cache()
-def calcdM_CF(Ra, Rb, d):
+def calcdM_CF(Ra: float, Rb: float, d: float) -> float:
     """计算两电流丝间互感梯度(设为A B线圈)
 
     Args:
@@ -139,7 +138,6 @@ def calcdM_CF(Ra, Rb, d):
 
 
 
-@lru_cache()
 def calcdM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, Lb: float, Nb: int, d: float) -> float:
     """计算两线圈间互感梯度(设为A B线圈)
 
@@ -177,7 +175,7 @@ def calcdM(Rai: float, Rae: float, La: float, Na: int, Rbi: float, Rbe: float, L
         k = calcK(ra, rb, dz)
         return (μ0 * k * d * (2 * (1 - np.power(k, 2)) * eK(k) - (2 - np.power(k, 2)) * eE(k))) / (4 * (1 - np.power(k, 2)) * np.sqrt(ra * rb))
 
-    return (Na * Nb * nquad(integrationdM, [[0, Lb], [Rbi, Rbe], [0, La], [Rai, Rbe]])[0]) / ((Rae - Rai) * La * (Rbe - Rbi) * Lb)
+    return (Na * Nb * nquad(integrationdM, [[Rai, Rae], [0, La], [Rbi, Rbe], [0, Lb]])[0]) / ((Rae - Rai) * La * (Rbe - Rbi) * Lb)
 
 
 class drivingCoil():
@@ -299,3 +297,9 @@ class armature():
 
         return L * self.m
     
+    
+# import matplotlib.pyplot as pyplot
+# pyplot.plot(np.linspace(-10,10,200), [calcdM_CF(1.2, 1.5, i) for i in np.linspace(-10,10,200)])
+# pyplot.show()
+
+# print(calcL(0.043, 0.06, 0.08, 56700))
