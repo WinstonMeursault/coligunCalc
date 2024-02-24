@@ -1,7 +1,6 @@
 from copy import deepcopy
 
 import numpy as np
-import numpy.matlib
 
 from basics import *
 
@@ -80,10 +79,10 @@ class singleStageCoilgun():
         self.cache = deepcopy(self)
 
     def __update(self):
-        self.U = np.matrix([self.cache.U[0, 0] - self.dt * self.cache.Id[0, 0]] + [0] * self.armature.m * self.armature.n).T
+        self.U = np.matrix([self.cache.U[0, 0] - self.dt * self.cache.Id[0, 0]] + [0] * self.armature.m * self.armature.n).T 
 
         self.Id = np.linalg.inv(self.L - self.M1) * (self.U + self.Va * self.dM1 * self.I - self.R * self.I - self.M * self.I)
-        self.I = self.cache.I + self.dt * self.cache.Id
+        self.I = self.cache.I + self.dt * self.cache.Id 
 
         self.F = 0
         for i in range(1, self.armature.m + 1):
@@ -92,8 +91,8 @@ class singleStageCoilgun():
         self.F = -1 * self.F
 
         self.a = self.F / self.armature.ma
-        self.Va = self.cache.Va + self.cache.a * self.dt
-        self.armature.x += self.cache.Va * self.dt
+        self.Va = self.cache.Va + self.cache.a * self.dt 
+        self.armature.x += self.cache.Va * self.dt 
         
         self.t += self.dt
 
