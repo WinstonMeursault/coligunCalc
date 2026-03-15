@@ -109,6 +109,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+typings/
 
 # Spyder project settings
 .spyderproject
@@ -129,6 +130,7 @@ dmypy.json
 .pyre/
 
 # VS Code
+.history/
 .vscode/
 settings.json
 
@@ -138,5 +140,5 @@ Notes/
 # References
 .references/
 
-# VS Code
-.history/
+# Experiments
+.exp/
