@@ -359,6 +359,25 @@ double dM_coil = mutual_inductance_gradient_coil(
 
 **性能注意**：线圈级函数是库中最耗时的调用（n_nodes=9 时 ~毫秒级，n_nodes=4 时 ~数十微秒）。在时间步进仿真中，通常每级每步调用一次，而非在紧密内循环中使用。
 
+### use_cache 重载
+
+每个丝级和线圈级函数都有一个接受末尾 `bool use_cache = false` 参数的重载：
+
+```cpp
+double mutual_inductance_filament(double radius_a, double radius_b,
+                                  double separation, bool use_cache);
+double mutual_inductance_gradient_filament(double radius_a, double radius_b,
+                                           double separation, bool use_cache);
+double mutual_inductance_coil(..., int n_nodes, bool use_cache);
+double mutual_inductance_gradient_coil(..., int n_nodes, bool use_cache);
+```
+
+当 `use_cache` 为 `true` 时，函数会读写全局 4096 条 LRU 缓存。当相同的 `(radius_a, radius_b, separation)` 三元组被重复查询时，可以提升性能——典型场景是串行冷路径计算，如 `[M]` 矩阵初始化。
+
+当 `use_cache` 为 `false`（默认值）时，缓存被完全绕过。在热路径（每步 `[M_I]` 更新）中使用此模式，因为缓存命中率低且需要线程安全。
+
+不含 `use_cache` 的无参重载为了向后兼容而保留，其行为等同于 `use_cache = false`。
+
 ---
 
 ## LRU 缓存
@@ -949,6 +968,48 @@ int main() {
 
 ---
 
+## 并行执行
+
+仿真引擎使用 OpenMP 实现共享内存多核并行。每个时间步有三个计算循环被并行化：
+
+- 线圈到电流丝互感计算（`M` 和 `dM/dx`）
+- 洛伦兹力求和（归约）
+- 电流丝温度更新（启用热模式时）
+
+### 控制线程数
+
+```cpp
+#include <omp.h>
+omp_set_num_threads(4);
+```
+
+或通过环境变量：
+
+```sh
+OMP_NUM_THREADS=4 ./your_simulation
+```
+
+默认线程数等于逻辑 CPU 数量。
+
+### 线程安全
+
+`mutual_inductance_filament` 和 `mutual_inductance_gradient_filament` 函数在 `use_cache = false`（默认值）时是线程安全的。全局 LRU 缓存仅在串行冷路径代码中访问（`[M]` 矩阵初始化、级间互感预计算）。
+
+### CMake 集成
+
+```cmake
+find_package(OpenMP REQUIRED)
+target_link_libraries(your_target PRIVATE coilgun OpenMP::OpenMP_CXX)
+```
+
+如果链接静态库 `libcoilgun.a`，还必须在你的目标中链接 OpenMP。
+
+### 编译标志
+
+所有 CMake 预设都包含 `-march=native`，用于 SIMD 指令集自动检测。Eigen 在编译时利用此标志为矩阵运算启用 AVX2/FMA/AVX512。
+
+---
+
 ## 构建系统参考
 
 ### CMake 选项
@@ -960,11 +1021,11 @@ int main() {
 
 ### CMake 预设
 
-| 预设 | 生成器 | 构建类型 | 备注 |
-|--------|-----------|------------|-------|
-| `ninja-debug` | Ninja | Debug | 启用测试，生成 compile_commands.json |
-| `ninja-release` | Ninja | Release | — |
-| `make-debug` | Unix Makefiles | Debug | 启用测试，生成 compile_commands.json |
+| 预设 | 生成器 | 构建类型 | 标志 | 备注 |
+|--------|-----------|------------|-------|-------|
+| `ninja-debug` | Ninja | Debug | `-march=native` | 启用测试，生成 compile_commands.json |
+| `ninja-release` | Ninja | Release | `-march=native -O3` | — |
+| `make-debug` | Unix Makefiles | Debug | `-march=native` | 启用测试，生成 compile_commands.json |
 
 ### 测试预设
 

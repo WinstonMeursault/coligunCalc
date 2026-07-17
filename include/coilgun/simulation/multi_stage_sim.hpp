@@ -141,7 +141,6 @@ private:
     MultiStageState compute_derivatives(const MultiStageState& s);
     void     build_filament_M_matrix();
     void     precompute_M_cc();
-    void     update_M1_dM1();
     bool     is_stage_within_range(int stage_idx) const;
     void     extinguish_quiet_stages();
     double   compute_force(const MultiStageState& s);

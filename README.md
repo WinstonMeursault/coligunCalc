@@ -28,6 +28,7 @@ Licensed under GPLv3.
 - **Three optimization levels** — Reference / LookupTable / Full (distance cutoff + adaptive GL order)
 - **Stage triggering** — position-based or time-delay, up to 50 stages
 - **LRU caching** — 4096-entry filament-level M and dM/dz caches
+- **OpenMP multicore parallelism** — parallelized M/dM computation, force summation, and thermal updates per time step
 
 ---
 
@@ -44,7 +45,7 @@ docs/              — Documentation (API reference EN/CN, numerical model, desi
 
 ## Quick Start
 
-**Requirements**: C++17 compiler, CMake ≥ 3.20.
+**Requirements**: C++17 compiler with OpenMP support, CMake ≥ 3.20.
 
 Both Boost.Math and Eigen are fetched automatically via CMake `FetchContent` — no manual installation needed.
 
@@ -87,13 +88,14 @@ int main() {
 
 ```cmake
 # In your CMakeLists.txt
-target_link_libraries(your_target PRIVATE coilgun)
+find_package(OpenMP REQUIRED)
+target_link_libraries(your_target PRIVATE coilgun OpenMP::OpenMP_CXX)
 ```
 
 Or compile directly:
 
 ```sh
-g++ -std=c++17 -Iinclude your_file.cpp build/src/libcoilgun.a -o your_binary
+g++ -std=c++17 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_binary
 ```
 
 ---
@@ -143,11 +145,11 @@ The library implements the numerical model described in [NumericalModel.md](docs
 
 ## CMake Presets
 
-| Preset | Generator | Build type | Notes |
-|--------|-----------|------------|-------|
-| `ninja-debug` | Ninja | Debug | Tests ON, compile_commands.json |
-| `ninja-release` | Ninja | Release | — |
-| `make-debug` | Unix Makefiles | Debug | Tests ON, compile_commands.json |
+| Preset | Generator | Build type | Flags | Notes |
+|--------|-----------|------------|-------|-------|
+| `ninja-debug` | Ninja | Debug | `-march=native` | Tests ON, compile_commands.json |
+| `ninja-release` | Ninja | Release | `-march=native -O3` | — |
+| `make-debug` | Unix Makefiles | Debug | `-march=native` | Tests ON, compile_commands.json |
 
 ---
 

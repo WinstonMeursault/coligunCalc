@@ -40,6 +40,9 @@ endif()
 # --- Library target ---
 add_subdirectory(src)
 
+find_package(OpenMP REQUIRED)
+target_link_libraries(coilgun PUBLIC OpenMP::OpenMP_CXX)
+
 # --- Tests ---
 option(COILGUN_BUILD_TESTS "Build unit tests" ON)
 if(COILGUN_BUILD_TESTS)

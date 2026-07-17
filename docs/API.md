@@ -359,6 +359,25 @@ double dM_coil = mutual_inductance_gradient_coil(
 
 **Performance note**: coil-level functions are the most expensive calls in the library (~milliseconds each for n_nodes=9, ~tens of microseconds for n_nodes=4). In a time-marching simulation you will typically call these once per stage per step, not in tight inner loops.
 
+### use_cache Overloads
+
+Each filament-level and coil-level function has an overload accepting a trailing `bool use_cache = false` parameter:
+
+```cpp
+double mutual_inductance_filament(double radius_a, double radius_b,
+                                  double separation, bool use_cache);
+double mutual_inductance_gradient_filament(double radius_a, double radius_b,
+                                           double separation, bool use_cache);
+double mutual_inductance_coil(..., int n_nodes, bool use_cache);
+double mutual_inductance_gradient_coil(..., int n_nodes, bool use_cache);
+```
+
+When `use_cache` is `true`, the function reads/writes a global 4096-entry LRU cache. This improves performance when the same `(radius_a, radius_b, separation)` triple is queried repeatedly — typical in serial cold-path computations like `[M]` matrix initialisation.
+
+When `use_cache` is `false` (default), the cache is bypassed entirely. Use this on the hot path (per-step `[M_I]` updates) where cache hit rates are low and thread safety is required.
+
+The parameterless overloads (without `use_cache`) are preserved for backward compatibility and behave identically to `use_cache = false`.
+
 ---
 
 ## LRU Cache
@@ -949,6 +968,48 @@ The `MultiStageSim` handles the full multi-stage circuit ODE (inter-coil mutual 
 
 ---
 
+## Parallel Execution
+
+The simulation engine uses OpenMP for shared-memory multicore parallelism. Three computational loops are parallelised per time step:
+
+- Coil-to-filament mutual inductance computation (`M` and `dM/dx`)
+- Lorentz force summation (reduction)
+- Filament temperature update (when thermal mode is enabled)
+
+### Controlling Thread Count
+
+```cpp
+#include <omp.h>
+omp_set_num_threads(4);
+```
+
+Or via environment variable:
+
+```sh
+OMP_NUM_THREADS=4 ./your_simulation
+```
+
+Default thread count equals the number of logical CPUs.
+
+### Thread Safety
+
+The `mutual_inductance_filament` and `mutual_inductance_gradient_filament` functions are thread-safe when called with `use_cache = false` (the default). The global LRU cache is only accessed from serial cold-path code (`[M]` matrix initialisation, inter-coil mutual inductance precomputation).
+
+### CMake Integration
+
+```cmake
+find_package(OpenMP REQUIRED)
+target_link_libraries(your_target PRIVATE coilgun OpenMP::OpenMP_CXX)
+```
+
+If linking against the static library `libcoilgun.a`, you must also link OpenMP in your target.
+
+### Compiler Flags
+
+All CMake presets include `-march=native` for SIMD instruction set auto-detection. Eigen leverages this at compile time to enable AVX2/FMA/AVX512 for matrix operations.
+
+---
+
 ## Build System Reference
 
 ### CMake Options
@@ -960,11 +1021,11 @@ The `MultiStageSim` handles the full multi-stage circuit ODE (inter-coil mutual 
 
 ### CMake Presets
 
-| Preset | Generator | Build type | Notes |
-|--------|-----------|------------|-------|
-| `ninja-debug` | Ninja | Debug | Tests enabled, compile_commands.json |
-| `ninja-release` | Ninja | Release | — |
-| `make-debug` | Unix Makefiles | Debug | Tests enabled, compile_commands.json |
+| Preset | Generator | Build type | Flags | Notes |
+|--------|-----------|------------|-------|-------|
+| `ninja-debug` | Ninja | Debug | `-march=native` | Tests enabled, compile_commands.json |
+| `ninja-release` | Ninja | Release | `-march=native -O3` | — |
+| `make-debug` | Unix Makefiles | Debug | `-march=native` | Tests enabled, compile_commands.json |
 
 ### Test Presets
 

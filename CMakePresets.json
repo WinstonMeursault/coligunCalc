@@ -13,6 +13,7 @@
       "binaryDir": "${sourceDir}/build/ninja-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-march=native",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "COILGUN_BUILD_TESTS": "ON"
       }
@@ -23,7 +24,8 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/ninja-release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS": "-march=native"
       }
     },
     {
@@ -33,6 +35,7 @@
       "binaryDir": "${sourceDir}/build/make-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-march=native",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "COILGUN_BUILD_TESTS": "ON"
       }

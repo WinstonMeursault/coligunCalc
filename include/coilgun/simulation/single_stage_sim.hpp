@@ -108,7 +108,6 @@ public:
 private:
     SimState compute_derivatives(const SimState& s);
     void     build_filament_M_matrix();
-    void     update_M1_dM1();
     double   compute_force(const SimState& s);
     void     update_temperatures(SimState& s, double dt_sub);
     void     record_step(double cap_voltage);

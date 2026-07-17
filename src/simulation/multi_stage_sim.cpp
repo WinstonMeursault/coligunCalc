@@ -132,7 +132,6 @@ MultiStageSim<SP>::MultiStageSim(
         state_.filament_temperatures.setConstant(physics::T_REFERENCE);
     }
 
-    update_M1_dM1();
 }
 
 template<typename SP>
@@ -148,7 +147,7 @@ void MultiStageSim<SP>::build_filament_M_matrix() {
             int jb = b % nr + 1;
             double rb = armature_.filament_mean_radius(jb);
             double sep = filament_axial_sep(armature_, a, b);
-            double m = physics::mutual_inductance_filament(ra, rb, sep);
+            double m = physics::mutual_inductance_filament(ra, rb, sep, true);
             M_mat_(a, b) = m;
             M_mat_(b, a) = m;
         }
@@ -167,7 +166,7 @@ void MultiStageSim<SP>::precompute_M_cc() {
             double m = physics::mutual_inductance_coil(
                 a.inner_radius(), a.outer_radius(), a.length(), a.turns(),
                 b.inner_radius(), b.outer_radius(), b.length(), b.turns(),
-                sep);
+                sep, 9, true);
             M_cc_(i, j) = m;
             M_cc_(j, i) = m;
         }
@@ -181,49 +180,6 @@ bool MultiStageSim<SP>::is_stage_within_range(int stage_idx) const {
     double cutoff = 10.0 * coil.length();
     double dist = std::abs(state_.arm_position - coil.position());
     return dist <= cutoff;
-}
-
-template<typename SP>
-void MultiStageSim<SP>::update_M1_dM1() {
-    M1_mat_.setZero();
-    dM1_mat_.setZero();
-
-    int nr = armature_.radial_filaments();
-    double arm_center = state_.arm_position;
-    double arm_center_init = armature_.position();
-
-    for (int s = 0; s < n_stages_; ++s) {
-        if (!triggered_[s]) continue;
-        if (!is_stage_within_range(s)) continue;
-
-        const auto& coil = coils_[s];
-        double dist = std::abs(arm_center - coil.position());
-
-        int n_nodes = 9;
-        if (opt_level_ == OptimizationLevel::Full && dist > coil.length())
-            n_nodes = 4;
-
-        for (int k = 0; k < N_fil_; ++k) {
-            int i = k / nr + 1;
-            int j = k % nr + 1;
-            double z_rel = armature_.filament_axial_position(i) - arm_center_init;
-            double z_global = arm_center + z_rel;
-            double sep = z_global - coil.position();
-            double fil_ri = armature_.filament_inner_radius(j);
-            double fil_re = armature_.filament_outer_radius(j);
-            double fil_l  = armature_.length() / armature_.axial_filaments();
-
-            M1_mat_(s, k) = physics::mutual_inductance_coil(
-                coil.inner_radius(), coil.outer_radius(),
-                coil.length(), coil.turns(),
-                fil_ri, fil_re, fil_l, 1, sep, n_nodes);
-
-            dM1_mat_(s, k) = physics::mutual_inductance_gradient_coil(
-                coil.inner_radius(), coil.outer_radius(),
-                coil.length(), coil.turns(),
-                fil_ri, fil_re, fil_l, 1, sep, n_nodes);
-        }
-    }
 }
 
 template<typename SP>
@@ -279,9 +235,56 @@ MultiStageState MultiStageSim<SP>::compute_derivatives(const MultiStageState& s)
         ds.filament_temperatures.setZero();
     }
 
+    std::vector<int> active_idx;
+    active_idx.reserve(S);
+    for (int st = 0; st < S; ++st) {
+        if (triggered_[st] && !finished_[st] && is_stage_within_range(st))
+            active_idx.push_back(st);
+    }
+    int n_active = static_cast<int>(active_idx.size());
+
+    int nr = armature_.radial_filaments();
+    double arm_center = s.arm_position;
+    double arm_center_init = armature_.position();
+
+    M1_mat_.setZero();
+    dM1_mat_.setZero();
+
+    if (n_active > 0) {
+#pragma omp parallel for
+        for (int flat = 0; flat < n_active * F; ++flat) {
+            int si = active_idx[flat / F];
+            int fi = flat % F;
+
+            const auto& coil = coils_[si];
+            int i = fi / nr + 1;
+            int j = fi % nr + 1;
+            double z_rel = armature_.filament_axial_position(i) - arm_center_init;
+            double z_global = arm_center + z_rel;
+            double sep = z_global - coil.position();
+            double fil_ri = armature_.filament_inner_radius(j);
+            double fil_re = armature_.filament_outer_radius(j);
+            double fil_l  = armature_.length() / armature_.axial_filaments();
+
+            double dist = std::abs(arm_center - coil.position());
+            int n_nodes = 9;
+            if (opt_level_ == OptimizationLevel::Full && dist > coil.length())
+                n_nodes = 4;
+
+            M1_mat_(si, fi) = physics::mutual_inductance_coil(
+                coil.inner_radius(), coil.outer_radius(),
+                coil.length(), coil.turns(),
+                fil_ri, fil_re, fil_l, 1, sep, n_nodes, false);
+
+            dM1_mat_(si, fi) = physics::mutual_inductance_gradient_coil(
+                coil.inner_radius(), coil.outer_radius(),
+                coil.length(), coil.turns(),
+                fil_ri, fil_re, fil_l, 1, sep, n_nodes, false);
+        }
+    }
+
     build_system_matrix(s);
 
-    // RHS: coil rows + filament rows
     double v = s.arm_velocity;
     RHS_.setZero();
 
@@ -321,6 +324,7 @@ double MultiStageSim<SP>::compute_force(const MultiStageState& s) {
     int S = n_stages_;
     int F = N_fil_;
     double F_net = 0.0;
+#pragma omp parallel for reduction(+:F_net)
     for (int i = 0; i < S; ++i) {
         if (!triggered_[i] || finished_[i]) continue;
         double I_d = s.currents(i);
@@ -332,12 +336,12 @@ double MultiStageSim<SP>::compute_force(const MultiStageState& s) {
 
 template<typename SP>
 void MultiStageSim<SP>::update_temperatures(MultiStageState& s, double dt_sub) {
-    int S = n_stages_;
     int F = N_fil_;
     auto mat = armature_.material();
     double beta = physics::material_beta(mat);
+#pragma omp parallel for
     for (int k = 0; k < F; ++k) {
-        double I_k = s.currents(S + k);
+        double I_k = s.currents(n_stages_ + k);
         double m_k = mass_fil_(k);
         double T_k = s.filament_temperatures(k);
         double cp  = physics::material_cp(mat, T_k);
@@ -526,7 +530,6 @@ template<typename SP>
 const MultiStageStep& MultiStageSim<SP>::step() {
     check_triggers();
     extinguish_quiet_stages();
-    update_M1_dM1();
     state_ = stepper_.advance(dt_, state_,
         [this](const MultiStageState& s) { return compute_derivatives(s); });
 

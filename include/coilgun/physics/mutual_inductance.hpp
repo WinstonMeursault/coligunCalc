@@ -21,6 +21,9 @@ namespace coilgun::physics {
 double mutual_inductance_filament(double radius_a, double radius_b,
                                   double separation);
 
+double mutual_inductance_filament(double radius_a, double radius_b,
+                                  double separation, bool use_cache);
+
 /**
  * @brief Spatial gradient dM/dz of mutual inductance between two coaxial loops.
  * @param radius_a Radius of the first loop, m.
@@ -32,6 +35,9 @@ double mutual_inductance_filament(double radius_a, double radius_b,
  */
 double mutual_inductance_gradient_filament(double radius_a, double radius_b,
                                            double separation);
+
+double mutual_inductance_gradient_filament(double radius_a, double radius_b,
+                                           double separation, bool use_cache);
 
 /**
  * @brief Mutual inductance between two thick cylindrical coils.
@@ -57,6 +63,12 @@ double mutual_inductance_coil(double r_inner_a, double r_outer_a,
                               double length_b, int turns_b,
                               double separation, int n_nodes = 9);
 
+double mutual_inductance_coil(double r_inner_a, double r_outer_a,
+                              double length_a, int turns_a,
+                              double r_inner_b, double r_outer_b,
+                              double length_b, int turns_b,
+                              double separation, int n_nodes, bool use_cache);
+
 /**
  * @brief Spatial gradient dM/dz of mutual inductance at the coil level.
  * @param r_inner_a Inner radius of coil A, m.
@@ -79,5 +91,12 @@ double mutual_inductance_gradient_coil(double r_inner_a, double r_outer_a,
                                        double r_inner_b, double r_outer_b,
                                        double length_b, int turns_b,
                                        double separation, int n_nodes = 9);
+
+double mutual_inductance_gradient_coil(double r_inner_a, double r_outer_a,
+                                       double length_a, int turns_a,
+                                       double r_inner_b, double r_outer_b,
+                                       double length_b, int turns_b,
+                                       double separation, int n_nodes,
+                                       bool use_cache);
 
 } // namespace coilgun::physics

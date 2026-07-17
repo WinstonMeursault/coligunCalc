@@ -91,7 +91,6 @@ SingleStageSim<SP>::SingleStageSim(
         state_.filament_temperatures.setConstant(physics::T_REFERENCE);
     }
 
-    update_M1_dM1();
 }
 
 template<typename SP>
@@ -107,35 +106,10 @@ void SingleStageSim<SP>::build_filament_M_matrix() {
             int jb = b % nr + 1;
             double rb = armature_.filament_mean_radius(jb);
             double sep = filament_axial_sep(armature_, a, b);
-            double m = physics::mutual_inductance_filament(ra, rb, sep);
+            double m = physics::mutual_inductance_filament(ra, rb, sep, true);
             M_mat_(a, b) = m;
             M_mat_(b, a) = m;
         }
-    }
-}
-
-template<typename SP>
-void SingleStageSim<SP>::update_M1_dM1() {
-    int nr = armature_.radial_filaments();
-    double arm_center = state_.arm_position;
-    double arm_center_init = armature_.position();
-    for (int k = 0; k < N_fil_; ++k) {
-        int i = k / nr + 1;
-        int j = k % nr + 1;
-        double z_rel = armature_.filament_axial_position(i) - arm_center_init;
-        double z_global = arm_center + z_rel;
-        double sep = z_global - coil_.position();
-        double fil_ri = armature_.filament_inner_radius(j);
-        double fil_re = armature_.filament_outer_radius(j);
-        double fil_l  = armature_.length() / armature_.axial_filaments();
-        M1_(k) = physics::mutual_inductance_coil(
-            coil_.inner_radius(), coil_.outer_radius(),
-            coil_.length(), coil_.turns(),
-            fil_ri, fil_re, fil_l, 1, sep);
-        dM1_(k) = physics::mutual_inductance_gradient_coil(
-            coil_.inner_radius(), coil_.outer_radius(),
-            coil_.length(), coil_.turns(),
-            fil_ri, fil_re, fil_l, 1, sep);
     }
 }
 
@@ -148,6 +122,30 @@ SimState SingleStageSim<SP>::compute_derivatives(const SimState& s) {
     if (enable_thermal_ && s.filament_temperatures.size() > 0) {
         ds.filament_temperatures.resize(N_fil_);
         ds.filament_temperatures.setZero();
+    }
+
+    int nr = armature_.radial_filaments();
+    double arm_center = s.arm_position;
+    double arm_center_init = armature_.position();
+
+#pragma omp parallel for
+    for (int k = 0; k < N_fil_; ++k) {
+        int i = k / nr + 1;
+        int j = k % nr + 1;
+        double z_rel = armature_.filament_axial_position(i) - arm_center_init;
+        double z_global = arm_center + z_rel;
+        double sep = z_global - coil_.position();
+        double fil_ri = armature_.filament_inner_radius(j);
+        double fil_re = armature_.filament_outer_radius(j);
+        double fil_l  = armature_.length() / armature_.axial_filaments();
+        M1_(k) = physics::mutual_inductance_coil(
+            coil_.inner_radius(), coil_.outer_radius(),
+            coil_.length(), coil_.turns(),
+            fil_ri, fil_re, fil_l, 1, sep, 9, false);
+        dM1_(k) = physics::mutual_inductance_gradient_coil(
+            coil_.inner_radius(), coil_.outer_radius(),
+            coil_.length(), coil_.turns(),
+            fil_ri, fil_re, fil_l, 1, sep, 9, false);
     }
 
     L_total_.setZero();
@@ -187,6 +185,7 @@ SimState SingleStageSim<SP>::compute_derivatives(const SimState& s) {
 template<typename SP>
 double SingleStageSim<SP>::compute_force(const SimState& s) {
     double F = 0.0, I_d = s.currents(0);
+#pragma omp parallel for reduction(+:F)
     for (int k = 0; k < N_fil_; ++k)
         F += I_d * s.currents(k + 1) * dM1_(k);
     return F;
@@ -196,6 +195,7 @@ template<typename SP>
 void SingleStageSim<SP>::update_temperatures(SimState& s, double dt_sub) {
     auto mat = armature_.material();
     double beta = physics::material_beta(mat);
+#pragma omp parallel for
     for (int k = 0; k < N_fil_; ++k) {
         double I_k = s.currents(k + 1);
         double m_k = mass_fil_(k);
@@ -273,7 +273,6 @@ void SingleStageSim<SP>::prepare_summary() {
 
 template<typename SP>
 const SimStep& SingleStageSim<SP>::step() {
-    update_M1_dM1();
     state_ = stepper_.advance(dt_, state_,
         [this](const SimState& s) { return compute_derivatives(s); });
 
