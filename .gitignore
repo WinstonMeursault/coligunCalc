@@ -142,3 +142,30 @@ Notes/
 
 # Experiments
 .exp/
+
+# Agent
+.ckb/
+.depwire/
+
+# C++ build artifacts
+*.o
+*.a
+*.exe
+*.out
+*.app
+_build/
+CMakeUserPresets.json
+compile_commands.json
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake in-source build artifacts
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+Makefile
+CTestTestfile.cmake
