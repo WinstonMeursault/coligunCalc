@@ -1010,6 +1010,113 @@ All CMake presets include `-march=native` for SIMD instruction set auto-detectio
 
 ---
 
+## GPU Acceleration (CUDA)
+
+The library provides an optional GPU-accelerated backend (`libcoilgun_cuda.a`) for mutual inductance computation. Enable via CMake:
+
+```sh
+cmake --preset ninja-debug -DCOILGUN_ENABLE_CUDA=ON
+```
+
+### Prerequisites
+
+- CUDA Toolkit ≥ 12.8 (for Blackwell sm_120; ≥ 9.0 for earlier architectures)
+- Boost.Math ≥ 1.86 (fetched automatically via CMake FetchContent)
+- NVIDIA GPU with Compute Capability ≥ 6.0 (Pascal+) for FP64 atomic support
+
+### Include and Link
+
+```cpp
+#include <coilgun/coilgun_cuda.hpp>   // full GPU API + CPU API
+```
+
+```cmake
+target_link_libraries(your_target PRIVATE coilgun_cuda coilgun)
+```
+
+### GpuOptLevel
+
+| Level | Distance Cutoff | GL Order | Use Case |
+|---|---|---|---|
+| `Standard` | No | Fixed n_nodes=9 | Debug / verification |
+| `Full` | Yes (>10× coil length) | Fixed n_nodes=9 | Production |
+
+**Note:** Unlike the CPU `OptimizationLevel::Full`, the GPU backend does not use adaptive GL order (n_nodes=4/9). GPU kernel accuracy with 4 GL nodes is insufficient for the coil-edge region; always using 9 nodes ensures numerical consistency.
+
+### GpuBackend
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_backend.hpp>
+
+coilgun::simulation::cuda::GpuBackend backend;
+backend.device_id = 0;           // cudaSetDevice target
+backend.threads_per_block = 512; // integration kernel block size
+```
+
+### GpuSingleStageSim
+
+API identical to CPU `SingleStageSim`. Migration requires only changing the class name and include path.
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_single_stage_sim.hpp>
+
+using coilgun::simulation::cuda::GpuSingleStageSim;
+
+GpuSingleStageSim<EulerStepper> sim(coil, arm, std::move(excitation), dt);
+sim.run();
+double v = sim.result().summary.muzzle_velocity;
+```
+
+| Constructor Parameter | Description | Default |
+|---|---|---|
+| `coil` | DrivingCoil (copied) | — |
+| `armature` | Armature (copied) | — |
+| `excitation` | Excitation (moved-in) | — |
+| `dt` | Fixed time step (s) | — |
+| `enable_thermal` | Adiabatic heating | false |
+| `opt_level` | GpuOptLevel | Full |
+| `backend` | GpuBackend config | default |
+
+### GpuMultiStageSim
+
+API identical to CPU `MultiStageSim`.
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_multi_stage_sim.hpp>
+
+using coilgun::simulation::cuda::GpuMultiStageSim;
+
+std::vector<DrivingCoil> coils = {c1, c2};
+std::vector<std::unique_ptr<Excitation>> excs;
+excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
+excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
+std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
+
+GpuMultiStageSim<EulerStepper> sim(
+    std::move(coils), arm, std::move(excs), triggers, dt,
+    false, GpuOptLevel::Full, backend);
+sim.run();
+```
+
+Notes:
+- `enable_thermal` temperature updates run on CPU (<1% of runtime)
+- `GpuOptLevel` replaces CPU `OptimizationLevel` (T(q,p) lookup is construction-time)
+- Inter-coil mutual inductance is precomputed on CPU at construction
+
+### Architecture
+
+The GPU backend accelerates only the 4D Gauss-Legendre mutual inductance integration (the >95% compute hotspot). All other computation — linear system solve (Eigen LDLT), kinematic updates, temperature updates, trigger/excitation logic — remains on the CPU.
+
+```
+Per-step loop:
+  GPU:  4D GL integration → M1, dM1 matrices
+  CPU:  LDLT solve → current update → force → motion → excitation advance
+```
+
+Device memory is managed by `GpuAdaptor`: coil geometry and GL quadrature nodes are uploaded once at construction. Per-step, only the armature position vector is transferred to the device, and M1/dM1 matrices are transferred back.
+
+---
+
 ## Build System Reference
 
 ### CMake Options
@@ -1030,5 +1137,5 @@ All CMake presets include `-march=native` for SIMD instruction set auto-detectio
 ### Test Presets
 
 ```sh
-ctest --preset debug   # run all 11 test suites
+ctest --preset debug   # run all 17 test suites
 ```

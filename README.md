@@ -37,7 +37,7 @@ Licensed under GPLv3.
 ```
 include/coilgun/   — Public headers (core types, physics, components, simulation)
 src/               — Library implementation (static library libcoilgun.a)
-tests/             — Unit and integration tests (doctest, 11 suites)
+tests/             — Unit and integration tests (doctest, 17 suites)
 tools/             — T(q,p) lookup table generator
 docs/              — Documentation (API reference EN/CN, numerical model, design docs)
 .references/       — Reference papers in PDF (gitignored, local-only)
@@ -52,7 +52,7 @@ Both Boost.Math and Eigen are fetched automatically via CMake `FetchContent` —
 ```sh
 cmake --preset ninja-debug       # configure
 cmake --build --preset ninja-debug   # build
-ctest --preset debug              # run tests (11/11)
+ctest --preset debug              # run tests (17/17 with CUDA)
 ```
 
 ### Minimal Usage Example
@@ -115,7 +115,7 @@ The library implements the numerical model described in [NumericalModel.md](docs
 
 ---
 
-## Test Suite (11 suites, all passing)
+## Test Suite (17 suites, all passing)
 
 | Suite | Coverage |
 |-------|----------|
@@ -130,6 +130,12 @@ The library implements the numerical model described in [NumericalModel.md](docs
 | `test_single_stage_sim` | Capacitor, crowbar, Euler/RK4, thermal |
 | `test_multi_stage_sim` | 1-stage equivalence, 2-stage, triggers, optimization levels |
 | `test_integration` | End-to-end single-stage scenarios |
+| `test_gpu_elliptic` | GPU K(k), E(k) vs CPU reference |
+| `test_gpu_filament` | GPU filament-level M, dM/dz vs CPU |
+| `test_gpu_coil_pair` | GPU coil-filament M, dM/dz vs CPU |
+| `test_gpu_vs_cpu_single` | GPU single-stage end-to-end vs CPU (ε < 0.5%) |
+| `test_gpu_vs_cpu_multi` | GPU multi-stage end-to-end vs CPU (ε < 0.5%) |
+| `test_gpu_batch` | GPU batch simulation mode |
 
 ---
 

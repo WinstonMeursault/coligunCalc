@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(coilgun VERSION 0.1.0 LANGUAGES CXX)
+project(coilgunCalc VERSION 1.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -42,6 +42,17 @@ add_subdirectory(src)
 
 find_package(OpenMP REQUIRED)
 target_link_libraries(coilgun PUBLIC OpenMP::OpenMP_CXX)
+
+# --- CUDA acceleration (optional) ---
+option(COILGUN_ENABLE_CUDA "Build GPU-accelerated backend" OFF)
+if(COILGUN_ENABLE_CUDA)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "Target CUDA architectures")
+    find_package(CUDAToolkit REQUIRED)
+    add_subdirectory(src/cuda)
+endif()
 
 # --- Tests ---
 option(COILGUN_BUILD_TESTS "Build unit tests" ON)

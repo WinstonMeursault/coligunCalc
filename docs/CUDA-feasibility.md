@@ -136,3 +136,25 @@ __host__ __device__ double elliptic_e(double m) {
 3. 引入 GPU 双路径将显著增加维护成本
 
 **升级建议**: 若未来需高分辨率仿真 (N_fil > 500, S > 100, n_nodes ≥ 16)，GPU 加速的性价比将大幅提升。届时可直接利用 Boost.Math 的内置 CUDA 支持进行实施。
+
+## 实施结果
+
+2026-07-17 在 `feature/cudaAcceleration` 分支完成实施。核心发现：
+
+- **Boost.Math 集成**：v1.86+ 的 `BOOST_MATH_GPU_ENABLED` 使得 `ellint_1`/`ellint_2` 可直接用于 `__device__` 上下文，无需重写椭圆积分
+- **CUDA 兼容性**：CUDA 13.3 完全支持 Blackwell sm_120 (RTX 5080 Laptop)，包括 FP64 `atomicAdd`
+- **精度验证**：
+  - 椭圆积分：GPU vs CPU ≤ 1e-14（位级一致）
+  - 4D 积分：GPU vs CPU ≤ 5e-7（与 T(q,p) 查表同量级）
+  - 单级端到端：v_muzzle 误差 ≤ 0.2%（~5000 步仿真累积）
+  - 多级端到端：存在已知 bug（GPU 速度 ~0.001 m/s vs CPU ~1.6 m/s），待排查
+- **工程教训**：
+  - nvcc 和 g++ 对 Eigen 头文件编译时若对齐设置不一致会导致 ODR 违规和堆损坏。解决：统一 `EIGEN_MAX_ALIGN_BYTES=32` 和 `-march=native`
+  - 只包含 CUDA 内核启动代码（`<<<>>>`）的测试文件需 nvcc 编译；仅调用 GPU API 的测试文件用 g++ 编译即可
+
+## 待优化项
+
+- 实现真正的 Batch kernel（grid 含 `sim_id` 维度）替代当前逐个仿真的循环
+- 添加 `CMakePresets.json` 的 CUDA 预设
+- 排查并修复多级仿真的 GPU 计算 bug
+- 高分辨率性能基准测试（S > 50, N_fil > 500）

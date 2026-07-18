@@ -28,3 +28,33 @@ add_coilgun_test(test_armature)
 add_coilgun_test(test_integration)
 add_coilgun_test(test_single_stage_sim)
 add_coilgun_test(test_multi_stage_sim)
+
+if(COILGUN_ENABLE_CUDA)
+    # Tests with direct kernel launches (<<<>>>) — must compile with nvcc.
+    function(add_gpu_test_cuda name)
+        add_executable(${name} ${name}.cpp test_main.cpp)
+        set_source_files_properties(${name}.cpp PROPERTIES LANGUAGE CUDA)
+        set_target_properties(${name} PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+        target_compile_definitions(${name} PRIVATE EIGEN_MAX_ALIGN_BYTES=32)
+        target_link_libraries(${name} PRIVATE coilgun_cuda coilgun doctest::doctest)
+        target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+        add_test(NAME ${name} COMMAND ${name})
+    endfunction()
+
+    # Tests using GPU API classes (no kernel launches) — compile with g++.
+    function(add_gpu_test name)
+        add_executable(${name} ${name}.cpp test_main.cpp)
+        target_link_libraries(${name} PRIVATE coilgun_cuda coilgun doctest::doctest
+                              CUDA::cudart)
+        target_compile_definitions(${name} PRIVATE EIGEN_MAX_ALIGN_BYTES=32)
+        target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
+        add_test(NAME ${name} COMMAND ${name})
+    endfunction()
+
+    add_gpu_test_cuda(test_gpu_elliptic)
+    add_gpu_test_cuda(test_gpu_filament)
+    add_gpu_test_cuda(test_gpu_coil_pair)
+    add_gpu_test(test_gpu_vs_cpu_single)
+    add_gpu_test(test_gpu_vs_cpu_multi)
+    add_gpu_test(test_gpu_batch)
+endif()

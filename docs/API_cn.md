@@ -1010,6 +1010,113 @@ target_link_libraries(your_target PRIVATE coilgun OpenMP::OpenMP_CXX)
 
 ---
 
+## GPU 加速 (CUDA)
+
+本库提供可选的 GPU 加速后端 (`libcoilgun_cuda.a`)，用于互感计算。通过 CMake 启用：
+
+```sh
+cmake --preset ninja-debug -DCOILGUN_ENABLE_CUDA=ON
+```
+
+### 前置条件
+
+- CUDA Toolkit ≥ 12.8（Blackwell sm_120 需要；早期架构需要 ≥ 9.0）
+- Boost.Math ≥ 1.86（通过 CMake FetchContent 自动获取）
+- NVIDIA GPU 计算能力 ≥ 6.0（Pascal+），支持 FP64 原子操作
+
+### 引入和链接
+
+```cpp
+#include <coilgun/coilgun_cuda.hpp>   // 完整 GPU API + CPU API
+```
+
+```cmake
+target_link_libraries(your_target PRIVATE coilgun_cuda coilgun)
+```
+
+### GpuOptLevel
+
+| 等级 | 距离截断 | GL 阶数 | 用途 |
+|---|---|---|---|
+| `Standard` | 否 | 固定 n_nodes=9 | 调试 / 验证 |
+| `Full` | 是 (>10× 线圈长度) | 固定 n_nodes=9 | 生产 |
+
+**注意：** 与 CPU 的 `OptimizationLevel::Full` 不同，GPU 后端不使用自适应 GL 阶数（n_nodes=4/9）。4 节点的 GPU kernel 精度在线圈边缘区域不足；始终使用 9 节点可保证数值一致性。
+
+### GpuBackend
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_backend.hpp>
+
+coilgun::simulation::cuda::GpuBackend backend;
+backend.device_id = 0;           // cudaSetDevice 目标
+backend.threads_per_block = 512; // 积分 kernel 的 block 大小
+```
+
+### GpuSingleStageSim
+
+API 与 CPU 版 `SingleStageSim` 一致。迁移仅需修改类名和 include 路径。
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_single_stage_sim.hpp>
+
+using coilgun::simulation::cuda::GpuSingleStageSim;
+
+GpuSingleStageSim<EulerStepper> sim(coil, arm, std::move(excitation), dt);
+sim.run();
+double v = sim.result().summary.muzzle_velocity;
+```
+
+| 构造参数 | 说明 | 默认值 |
+|---|---|---|
+| `coil` | DrivingCoil（拷贝） | — |
+| `armature` | Armature（拷贝） | — |
+| `excitation` | Excitation（移动传入） | — |
+| `dt` | 固定时间步长 (s) | — |
+| `enable_thermal` | 绝热升温 | false |
+| `opt_level` | GpuOptLevel | Full |
+| `backend` | GpuBackend 配置 | default |
+
+### GpuMultiStageSim
+
+API 与 CPU 版 `MultiStageSim` 一致。
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_multi_stage_sim.hpp>
+
+using coilgun::simulation::cuda::GpuMultiStageSim;
+
+std::vector<DrivingCoil> coils = {c1, c2};
+std::vector<std::unique_ptr<Excitation>> excs;
+excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
+excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
+std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
+
+GpuMultiStageSim<EulerStepper> sim(
+    std::move(coils), arm, std::move(excs), triggers, dt,
+    false, GpuOptLevel::Full, backend);
+sim.run();
+```
+
+注意事项：
+- `enable_thermal` 温度更新在 CPU 上执行（占运行时间 <1%）
+- `GpuOptLevel` 替代 CPU 版 `OptimizationLevel`（T(q,p) 查表在构造时完成）
+- 线圈间互感在构造时由 CPU 预计算
+
+### 架构
+
+GPU 后端仅加速 4D Gauss-Legendre 互感积分（>95% 的计算热点）。其余所有计算——线性系统求解 (Eigen LDLT)、运动学更新、温度更新、触发/激励逻辑——保持在 CPU 上。
+
+```
+每步循环:
+  GPU:  4D GL 积分 → M1, dM1 矩阵
+  CPU:  LDLT 求解 → 电流更新 → 力 → 运动 → 激励推进
+```
+
+设备内存由 `GpuAdaptor` 管理：线圈几何和 GL 积分节点在构造时一次性上传。每步仅将电枢位置向量传输到设备，并将 M1/dM1 矩阵传回。
+
+---
+
 ## 构建系统参考
 
 ### CMake 选项
@@ -1030,5 +1137,5 @@ target_link_libraries(your_target PRIVATE coilgun OpenMP::OpenMP_CXX)
 ### 测试预设
 
 ```sh
-ctest --preset debug   # 运行全部 11 套测试
+ctest --preset debug   # 运行全部 17 套测试
 ```

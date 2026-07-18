@@ -23,6 +23,8 @@ target_include_directories(coilgun
     $<INSTALL_INTERFACE:include>
 )
 
+target_compile_definitions(coilgun PUBLIC EIGEN_MAX_ALIGN_BYTES=32)
+
 target_link_libraries(coilgun
   PUBLIC
     Eigen3::Eigen
