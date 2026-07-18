@@ -129,8 +129,8 @@ namespace coilgun::physics {
         double density;            // mass density (kg/m³)
     };
 
-    extern const MaterialProperties COPPER;        // 1.75e-8 Ω·m, 0.0039 K⁻¹, 8960 kg/m³
-    extern const MaterialProperties ALUMINUM;      // 2.82e-8 Ω·m, 0.0040 K⁻¹, 2700 kg/m³
+    extern const MaterialProperties COPPER;        // 1.75e-8 Ω·m, 0.0041 K⁻¹, 8960 kg/m³
+    extern const MaterialProperties ALUMINUM;      // 2.82e-8 Ω·m, 0.0042 K⁻¹, 2700 kg/m³
 
     enum class ArmatureMaterial { Aluminum, Copper };
 
@@ -258,7 +258,7 @@ double coilgun::physics::inductance_shape_factor_reference(double q, double p); 
 The self-inductance of a hollow cylindrical coil is:
 
 ```
-L = μ₀ · nc² · ri³ · T(q, p)
+L = 2π · μ₀ · nc² · ri⁵ · T(q, p)
 ```
 
 where `nc = N / ((outer - inner) × length)` is the turns density, `ri` is the inner radius, and `T(q, p)` is the dimensionless shape factor with `q = length / inner_radius`, `p = outer_radius / inner_radius`.
@@ -281,7 +281,7 @@ The `DrivingCoil` and `Armature` classes use `self_inductance` internally.
 **Example**:
 
 ```cpp
-// Uses table (q=5, p=3 — both in range):
+// q = 0.05/0.01 = 5 is outside the table range, so this uses exact fallback:
 double L1 = self_inductance(0.01, 0.03, 0.05, 1e5);
 
 // q = 0.0002/0.01 = 0.02 < 0.05 — triggers exact fallback:
@@ -747,9 +747,9 @@ double v2 = sim.result().summary.muzzle_velocity;  // identical to v1
 #include <coilgun/simulation/multi_stage_sim.hpp>
 
 enum class OptimizationLevel {
-    Reference   = 0,   // All reference-grade: exact self-inductance, no distance cutoff, fixed 9-pt GL.
-    LookupTable = 1,   // T(q,p) lookup table for self-inductance; other calcs reference-grade.
-    Full        = 2    // All optimisations: table lookup + distance cutoff + adaptive GL order.
+    Reference   = 0,   // Fixed 9-point mutual-inductance quadrature, no distance cutoff.
+    LookupTable = 1,   // Reserved for component-level T(q,p) lookup selection; same runtime path as Reference.
+    Full        = 2    // Distance cutoff plus adaptive 9/4-point mutual-inductance quadrature.
 };
 ```
 
@@ -853,9 +853,9 @@ public:
 
     const MultiStageResult& result()      const;
     const MultiStageState&  state()       const;
-    double  dt()              const;
-    int     step_count()      const;
-    int     num_stages()      const;
+    double  dt()              const;     // time step (s)
+    int     step_count()      const;     // step count
+    int     num_stages()      const;     // configured stage count
 };
 ```
 
@@ -865,7 +865,7 @@ public:
 
 **Thermal mode:** When `enable_thermal = true`, each armature filament undergoes adiabatic ohmic heating per NumericalModel Sec.6. Resistance updates every step based on temperature-dependent resistivity.
 
-**Optimization:** The `opt_level` parameter controls computational optimisations independent of the components' self-inductance calculation mode (which is set at component construction time). At `Reference` level, all mutual inductance calculations use fixed 9-point Gauss-Legendre quadrature and no distance cutoff. At `Full`, distant coil-filament pairs are skipped and nearby pairs use 9-point while far pairs use 4-point quadrature.
+**Optimization:** The `opt_level` parameter controls runtime mutual-inductance work independently of the components' self-inductance calculation mode, which is fixed at component construction. `Reference` and `LookupTable` currently use the same runtime path: fixed 9-point Gauss-Legendre quadrature with no distance cutoff. `LookupTable` is retained for API compatibility and does not retroactively change component self-inductances. `Full` skips distant stages and uses 9-point near / 4-point far quadrature.
 
 ---
 
@@ -1055,6 +1055,7 @@ struct GpuBackend {
     int     threads_per_block = 512;   ///< Threads per block for the 4D integration kernel.
     size_t  max_batch_sims    = 256;   ///< Pre-allocation cap for batch simulation buffers.
     bool    enable_profiling  = false; ///< Insert NVTX range annotations for nsight profiling.
+    bool    use_persistent    = true;  ///< Use persistent kernel with mapped memory. Falls back to per-pair kernel launches if false or if cudaHostAllocMapped fails.
 };
 
 }
@@ -1063,9 +1064,10 @@ struct GpuBackend {
 | Field | Purpose | Default |
 |-------|---------|---------|
 | `device_id` | Selects which physical GPU to target (relevant on multi-GPU systems). | `0` |
-| `threads_per_block` | Number of threads per block for the 4D GL integration kernel. Must be a power of 2 ≤ 1024. Larger values reduce per-thread loop count but increase shared-memory pressure. | `512` |
-| `max_batch_sims` | Maximum number of simulations in a `SimBatch`. Buffers are pre-allocated to this size. Exceeding it throws `std::runtime_error`. | `256` |
+| `threads_per_block` | Requested number of threads per block for the 4D GL integration kernel. The persistent launcher clamps values above 512; callers should use a positive power of two no greater than 512. | `512` |
+| `max_batch_sims` | Maximum number of simulations in a `SimBatch`. `SimBatch` rejects a larger `num_sims` with `std::invalid_argument`; the field itself does not allocate buffers. | `256` |
 | `enable_profiling` | When true, inserts NVTX push/pop ranges around each `step()` for GPU timeline profiling. | `false` |
+| `use_persistent` | When true, launches a persistent kernel at construction and uses mapped memory with doorbell protocol for host-device sync (zero kernel launch overhead per step). Falls back to per-pair kernel launches if `false` or if `cudaHostAllocMapped` fails. Requires compute capability ≥ 6.0. | `true` |
 
 **Example**:
 
@@ -1085,8 +1087,9 @@ be.threads_per_block = 1024;  // maximise parallelism
 namespace coilgun::simulation::cuda {
 
 enum class GpuOptLevel {
-    Standard = 0,   ///< n_nodes=9, no distance cutoff. Use for debugging/verification.
-    Full     = 1,   ///< Distance cutoff (>10× coil length) + fixed n_nodes=9. Production.
+    Standard   = 0,   ///< n_nodes=9, no distance cutoff. Use for debugging/verification.
+    Full       = 1,   ///< Distance cutoff (>10× coil length) + fixed n_nodes=9. Production.
+    Aggressive = 2,   ///< FP32 integrand + FP64 reduction, distance cutoff, n_nodes=9. Large-scale sweeps.
 };
 
 }
@@ -1094,8 +1097,9 @@ enum class GpuOptLevel {
 
 | Level | Distance cutoff | GL order | Behaviour |
 |:-----:|:---------------:|:--------:|-----------|
-| `Standard` | No | n_nodes = 9 | All (stage, filament) pairs are processed, even if the stage is far from the armature. The kernel uses 9 GL nodes per dimension (6561 integration points). This is the safest setting. |
-| `Full` | Yes | n_nodes = 9 | Stages farther than 10× the coil length from the armature are skipped entirely. At typical distances all active stages are within range. |
+| `Standard` | No | n_nodes = 9 | All (stage, filament) pairs are processed. The kernel uses 9 GL nodes per dimension (6561 integration points). This is the safest setting. |
+| `Full` | Yes | n_nodes = 9 | Stages farther than 10× the coil length from the armature are skipped. At typical distances all active stages are within range. |
+| `Aggressive` | Yes | n_nodes = 9 | Same as `Full` but uses FP32 arithmetic for the integrand (including FP32 AGM elliptic integrals) with FP64 accumulation. 3-5× faster on consumer GPUs. Slight precision tradeoff. |
 
 **Note**: The GPU backend does NOT support adaptive GL order (n_nodes=4/9 mix). Using n_nodes=4 on the GPU causes non-deterministic floating-point drift in the shared-memory reduction (only 3 active warps out of 8). The CPU `OptimizationLevel::Full` uses both distance cutoff and adaptive quadrature; the GPU `GpuOptLevel::Full` uses distance cutoff only.
 
@@ -1309,7 +1313,7 @@ int main() {
 | Aspect | CPU | GPU |
 |--------|-----|-----|
 | M/dM computation | OpenMP-parallelised | CUDA kernel (one block per pair) |
-| Optimisation level | `OptimizationLevel` (3 levels) | `GpuOptLevel` (2 levels) |
+| Optimisation level | `OptimizationLevel` (3 levels) | `GpuOptLevel` (3 levels) |
 | Adaptive GL order | n_nodes=9 or 4 (distance-based) | n_nodes=9 only |
 | Temperature update | OpenMP-parallelised | Serial CPU loop |
 | Force summation | OpenMP reduction | Serial loop |
@@ -1366,7 +1370,7 @@ public:
 |-----------|-------------|
 | `coils` | Shared driving coil geometry (copied). Same for all simulations. |
 | `armature` | Shared armature geometry and filament discretisation (copied). |
-| `num_sims` | Number of concurrent simulations. Must be ≤ `max_batch_sims` in GpuBackend. |
+| `num_sims` | Number of simulations. Must be positive and ≤ `max_batch_sims` in `GpuBackend`. |
 | `dt` | Fixed time step (s), shared across all simulations. |
 | `backend` | GPU backend configuration. |
 
@@ -1379,7 +1383,7 @@ public:
 | `result(sim_id)` | Retrieve `MultiStageResult` for a specific simulation. |
 | `num_sims()` | Number of simulations in this batch. |
 
-**Execution model**: `SimBatch` internally manages one `GpuAdaptor` and an array of per-simulation state objects. Each time step, it first checks triggers and extinguishes quiet stages for all simulations, then computes M1/dM1 for all active pairs via a GPU kernel launch loop, then solves the ODE and updates kinematics for each simulation independently on the CPU.
+**Execution model**: `SimBatch` internally manages one `GpuAdaptor` and an array of per-simulation state objects. With `GpuBackend::use_persistent=true` (the default), one persistent CUDA kernel services the fixed `(stage, filament)` pair index space and mapped host buffers carry each simulation's separations and results. The host still checks triggers, solves the ODE, updates kinematics, and services simulations serially. With `use_persistent=false`, it falls back to the per-pair kernel launch path.
 
 **Example — parameter sweep over capacitor voltage**:
 
@@ -1434,7 +1438,7 @@ int main() {
 }
 ```
 
-**Note**: The current implementation launches one CUDA kernel per (stage, filament) pair per simulation per step (kernel launch overhead ~100 µs/step for typical sizes). This is functionally equivalent to running `GpuMultiStageSim` objects in a loop, but provides a unified API and shared geometry. A persistent-kernel optimisation (zero launches per step) is designed and planned for a future release.
+**Note**: The fallback implementation launches one CUDA kernel per (stage, filament) pair per simulation per step. The default persistent path launches its worker kernel once at construction and uses mapped-memory doorbells thereafter, avoiding per-step kernel launches. Persistent mode is experimental and can be disabled through `GpuBackend::use_persistent`.
 
 ---
 
@@ -1521,10 +1525,9 @@ These are only compilable with `nvcc` (`#ifdef __CUDACC__` guarded). They provid
 ┌─────────────────────────────────────────────┐
 │ Host (CPU)                                   │
 │   check_triggers() → extinguish_quiet()       │
-│   for each (stage, filament) pair:            │
-│     compute separation → CUDA kernel launch   │
-│   cudaDeviceSynchronize()                    │
-│   cudaMemcpy D→H: M1_mat, dM1_mat            │
+│   fill mapped separations / doorbells         │
+│   wait for persistent kernel (or launch pairs)│
+│   read mapped results (or cudaMemcpy D→H)     │
 │   build_system_matrix [L - M_I]              │
 │   Eigen LDLT solve → new currents            │
 │   compute_force(F = Σ I_d × I_f × dM)        │
@@ -1532,6 +1535,7 @@ These are only compilable with `nvcc` (`#ifdef __CUDACC__` guarded). They provid
 │   update capacitor voltage / temperature     │
 ├─────────────────────────────────────────────┤
 │ Device (GPU)                                  │
+│   persistent_batch_kernel or                 │
 │   mutual_inductance_coil_pair_kernel          │
 │     per block: 512 threads × ~13 loops        │
 │     each loop: 1 elliptic integral pair       │
@@ -1569,7 +1573,7 @@ GPU advantage increases with problem scale because the 4D integration kernel (65
 
 ### Thread Safety
 
-The GPU classes are **single-threaded** — they do not support concurrent `step()` calls on the same instance. Multi-simulation concurrency is achieved through `SimBatch` (which serialises) or by creating independent `GpuMultiStageSim` instances on separate `cudaStream_t` objects.
+The GPU classes are **single-threaded** — they do not support concurrent `step()` calls on the same instance. `SimBatch` serializes host-side simulation updates; the public GPU simulation constructors do not expose a `cudaStream_t` parameter, so independent-stream execution is not part of this API.
 
 The underlying CUDA kernel is thread-safe with respect to the host: mapped memory and kernel launches use the default stream, which serialises operations.
 
@@ -1579,8 +1583,9 @@ The underlying CUDA kernel is thread-safe with respect to the host: mapped memor
 |---|---|
 | Adaptive GL order (n_nodes=4/9) | Removed. Using 4 GL nodes on the GPU causes non-deterministic floating-point drift (B1). |
 | Thermal mode | Temperature updates run on CPU (single-threaded). The computation is <1% of runtime. |
-| Batch kernel | A true batch kernel (single grid launch processing all simulations) is designed (P0) but blocked by an nvcc cross-module struct-layout issue. The persistent-kernel optimisation (D1-D2) is the planned replacement.
+| Persistent kernel | Experimental. Uses mapped memory with doorbell protocol for host-device sync. It is used by all three GPU simulation classes by default; `use_persistent=false` selects the fallback. Allocation failure falls back to per-pair launches. |
 | CUDA Graphs | Not implemented. Would require fixed n_active per step (no dynamic triggering/termination). |
+| Double buffering | Not implemented. Persistent results are synchronized before the CPU LDLT solve; no CPU/GPU overlap is promised. |
 
 ---
 
@@ -1606,5 +1611,5 @@ The underlying CUDA kernel is thread-safe with respect to the host: mapped memor
 ### Test Presets
 
 ```sh
-ctest --preset debug   # run all 17 test suites
+ctest --preset debug   # run all 18 configured test suites
 ```

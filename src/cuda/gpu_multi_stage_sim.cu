@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <atomic>
 #include <utility>
 
 namespace coilgun::physics {
@@ -138,10 +139,30 @@ GpuMultiStageSim<SP>::GpuMultiStageSim(
         state_.filament_temperatures.resize(N);
         state_.filament_temperatures.setConstant(physics::T_REFERENCE);
     }
+
+    init_persistent_mode();
 }
 
 template<typename SP>
-GpuMultiStageSim<SP>::~GpuMultiStageSim() = default;
+void GpuMultiStageSim<SP>::init_persistent_mode() {
+    if (backend_.use_persistent) {
+        int N_b = n_stages_ * N_fil_;
+        use_persistent_ = init_persistent_buffers(pbuf_, N_b, backend_);
+        if (use_persistent_) {
+            launch_persistent_kernel(pbuf_, adaptor_, N_b,
+                                          backend_.threads_per_block, 9, opt_level_);
+        }
+    }
+}
+
+template<typename SP>
+GpuMultiStageSim<SP>::~GpuMultiStageSim() {
+    if (use_persistent_) {
+        *pbuf_.shutdown = 1;
+        cudaDeviceSynchronize();
+        free_persistent_buffers(pbuf_);
+    }
+}
 
 template<typename SP>
 void GpuMultiStageSim<SP>::build_filament_M_matrix() {
@@ -165,7 +186,7 @@ void GpuMultiStageSim<SP>::build_filament_M_matrix() {
 
 template<typename SP>
 bool GpuMultiStageSim<SP>::is_stage_within_range(int stage_idx) const {
-    if (opt_level_ != GpuOptLevel::Full) return true;
+    if (opt_level_ == GpuOptLevel::Standard) return true;
     const auto& coil = coils_[stage_idx];
     double cutoff = 10.0 * coil.length();
     double dist = std::abs(state_.arm_position - coil.position());
@@ -173,7 +194,7 @@ bool GpuMultiStageSim<SP>::is_stage_within_range(int stage_idx) const {
 }
 
 template<typename SP>
-void GpuMultiStageSim<SP>::compute_M1_dM1() {
+void GpuMultiStageSim<SP>::compute_M1_dM1_fallback() {
     int S = n_stages_;
     int F = N_fil_;
     int nr = armature_.radial_filaments();
@@ -232,6 +253,60 @@ void GpuMultiStageSim<SP>::compute_M1_dM1() {
             dM1_mat_(si, k) = h_dM[idx];
         }
     }
+}
+
+template<typename SP>
+void GpuMultiStageSim<SP>::compute_M1_dM1_persistent() {
+    int S = n_stages_, F = N_fil_;
+    int N_b = S * F;
+    int nr = armature_.radial_filaments();
+    double arm_center_init = armature_.position();
+    double arm_center = state_.arm_position;
+
+    // Keep the persistent-kernel index space identical to the stage/filament
+    // matrix.  The kernel derives its geometry from idx, so compacting active
+    // pairs would associate a separation with the wrong stage or filament.
+    for (int si = 0; si < S; ++si) {
+        for (int fi = 0; fi < F; ++fi) {
+            int i = fi / nr + 1, j = fi % nr + 1;
+            double z_rel = armature_.filament_axial_position(i) - arm_center_init;
+            int idx = si * F + fi;
+            pbuf_.seps[idx] = arm_center + z_rel - coils_[si].position();
+        }
+    }
+
+    // Inactive pairs are harmless: their matrix entries are ignored when the
+    // corresponding stage is inactive, while processing the full fixed index
+    // space preserves the kernel's geometry mapping.
+    *pbuf_.active_pairs = N_b;
+    __sync_synchronize();
+
+    for (int i = 0; i < N_b; ++i)
+        pbuf_.doorbell[i] = 1;
+    __sync_synchronize();
+    ++*pbuf_.batch_id;
+
+    for (int i = 0; i < N_b; ++i) {
+        while (pbuf_.doorbell[i] != 0)
+            __sync_synchronize();
+    }
+
+    M1_mat_.resize(S, F);
+    dM1_mat_.resize(S, F);
+    for (int si = 0; si < S; ++si)
+        for (int fi = 0; fi < F; ++fi) {
+            int idx = si * F + fi;
+            M1_mat_(si, fi)  = pbuf_.out_M[idx];
+            dM1_mat_(si, fi) = pbuf_.out_dM[idx];
+        }
+}
+
+template<typename SP>
+void GpuMultiStageSim<SP>::compute_M1_dM1() {
+    if (use_persistent_)
+        compute_M1_dM1_persistent();
+    else
+        compute_M1_dM1_fallback();
 }
 
 template<typename SP>

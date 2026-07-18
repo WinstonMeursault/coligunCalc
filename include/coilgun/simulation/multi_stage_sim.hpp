@@ -27,9 +27,9 @@ namespace coilgun::simulation {
  * Levels are cumulative: each level includes all optimisations of lower levels.
  */
 enum class OptimizationLevel {
-    Reference   = 0,   ///< All reference-grade: exact self-inductance, no distance cutoff, 9-pt GL.
-    LookupTable = 1,   ///< T(q,p) lookup table for self-inductance only; other calcs reference-grade.
-    Full        = 2    ///< All optimisations: table lookup + distance cutoff + adaptive GL order.
+    Reference   = 0,   ///< Fixed 9-point mutual-inductance quadrature, no distance cutoff.
+    LookupTable = 1,   ///< Reserved for the component-level T(q,p) lookup selection; same runtime path as Reference.
+    Full        = 2    ///< Distance cutoff plus adaptive 9/4-point mutual-inductance quadrature.
 };
 
 /**

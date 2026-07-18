@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+#include "coilgun/simulation/cuda/persistent_kernel.cuh"
+
 namespace coilgun::simulation::cuda {
 
 /**
@@ -88,6 +90,7 @@ private:
         std::vector<bool>                        triggered;
         std::vector<bool>                        finished;
         std::vector<double>                      trigger_times;
+        bool                                     configured = false;
         MultiStageState                          state;
         Eigen::VectorXd                          R_fil;
         Eigen::VectorXd                          R_fil_ref;
@@ -133,6 +136,13 @@ private:
     Eigen::MatrixXd L_total_;
     Eigen::VectorXd RHS_;
     StepperPolicy stepper_;
+
+    bool               use_persistent_ = false;  ///< True if persistent kernel initialised successfully.
+    PersistentBuffers  pbuf_;                    ///< Mapped memory buffers for persistent kernel.
+
+    void init_persistent_mode();
+    void compute_all_M1_dM1_persistent();
+    void compute_all_M1_dM1_fallback();
 };
 
 } // namespace coilgun::simulation::cuda

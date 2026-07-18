@@ -5,6 +5,7 @@ add_library(coilgun_cuda STATIC
     gpu_single_stage_sim.cu
     gpu_multi_stage_sim.cu
     sim_batch.cu
+    persistent_kernel.cu
 )
 
 target_include_directories(coilgun_cuda

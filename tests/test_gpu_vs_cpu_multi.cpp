@@ -23,6 +23,8 @@ using coilgun::simulation::CrowbarExcitation;
 using coilgun::simulation::TriggerConfig;
 using coilgun::simulation::TriggerMode;
 using coilgun::simulation::cuda::GpuMultiStageSim;
+using coilgun::simulation::cuda::GpuBackend;
+using coilgun::simulation::cuda::GpuOptLevel;
 
 static double run_cpu_multi() {
     DrivingCoil c1(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
@@ -49,7 +51,10 @@ static double run_gpu_multi() {
     excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
     excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
     std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
-    GpuMultiStageSim<EulerStepper> sim(std::move(coils), arm, std::move(excs), triggers, 1e-6);
+    GpuBackend be;
+    be.use_persistent = false;  // fallback for deterministic GPU vs CPU comparison
+    GpuMultiStageSim<EulerStepper> sim(std::move(coils), arm, std::move(excs), triggers,
+                                       1e-6, false, GpuOptLevel::Full, be);
     sim.run();
     return sim.result().summary.muzzle_velocity;
 }

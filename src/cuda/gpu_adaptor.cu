@@ -100,7 +100,8 @@ void GpuAdaptor::setup(const std::vector<components::DrivingCoil>& coils,
     size_t pair_count = static_cast<size_t>(n_stages_) * n_fil_;
 
     auto alloc = [](auto& d, size_t n, const char* name) {
-        cudaError_t err = cudaMalloc(&d, n * sizeof(std::remove_pointer_t<decltype(d)>));
+        using ElemType = std::remove_pointer_t<std::decay_t<decltype(d)>>;
+        cudaError_t err = cudaMalloc(&d, n * sizeof(ElemType));
         if (err != cudaSuccess)
             throw std::runtime_error(std::string("cudaMalloc failed: ") + name);
     };
@@ -152,7 +153,8 @@ void GpuAdaptor::setup_batch(const std::vector<components::DrivingCoil>& coils,
     size_t batch_count = pair_count * batch_size_;
 
     auto alloc = [](auto& d, size_t n, const char* name) {
-        cudaError_t err = cudaMalloc(&d, n * sizeof(std::remove_pointer_t<decltype(d)>));
+        using ElemType = std::remove_pointer_t<std::decay_t<decltype(d)>>;
+        cudaError_t err = cudaMalloc(&d, n * sizeof(ElemType));
         if (err != cudaSuccess)
             throw std::runtime_error(std::string("cudaMalloc failed: ") + name);
     };

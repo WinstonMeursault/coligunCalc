@@ -21,6 +21,8 @@
 #include <Eigen/Dense>
 #include <memory>
 
+#include "coilgun/simulation/cuda/persistent_kernel.cuh"
+
 namespace coilgun::simulation::cuda {
 
 /**
@@ -128,6 +130,18 @@ private:
     Eigen::VectorXd mass_fil_;
 
     GpuAdaptor adaptor_;
+
+    bool               use_persistent_ = false;  ///< True if persistent kernel initialised successfully.
+    PersistentBuffers  pbuf_;                    ///< Mapped memory buffers for persistent kernel.
+
+    /// @brief Allocate mapped memory and launch the persistent kernel.
+    void init_persistent_mode();
+
+    /// @brief Compute M1/dM1 using the persistent kernel (mapped memory, doorbell protocol).
+    void compute_M1_dM1_persistent();
+
+    /// @brief Compute M1/dM1 using per-pair kernel launches (fallback when persistent unavailable).
+    void compute_M1_dM1_fallback();
 
     Eigen::MatrixXd M1_mat_;
     Eigen::MatrixXd dM1_mat_;

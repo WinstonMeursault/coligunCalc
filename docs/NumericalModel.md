@@ -744,6 +744,8 @@ $$
 
 where $\rho$ is the wire resistivity. The turns density is $n_{\mathrm{c}} = N_{\mathrm{d}} / [(r_{\mathrm{de}} - r_{\mathrm{di}}) \cdot l_{\mathrm{d}}]$, related to $k$ through $N_{\mathrm{d}} S_{\mathrm{wire}} = k \cdot (r_{\mathrm{de}} - r_{\mathrm{di}}) \cdot l_{\mathrm{d}}$.
 
+> **Implementation note — driving coil thermal resistance**: The current simulation treats the driving coil DC resistance $R_{\mathrm{d}}$ as constant (evaluated at room-temperature resistivity). In a practical coilgun, driving coils are typically wound from heavy-gauge copper wire with substantial thermal mass and are exposed to open air or active cooling between shots. Their temperature rise during a single millisecond-duration launch is negligible. The armature, by contrast, operates inside a relatively confined barrel bore with poor heat dissipation — hence only armature filament resistances are thermally updated (§6.4). Should a simulation scenario require it (e.g., sustained rapid-fire with accumulated coil heating), Eq. (6.5) can be extended with $\rho(T)$ from Eq. (6.9).
+
 #### 6.3.2 Armature Filament Resistance
 
 For an armature with inner radius $r_{\mathrm{ai}}$, outer radius $r_{\mathrm{ae}}$, length $l_{\mathrm{a}}$, discretized into $m$ axial slices and $n$ radial layers, each filament is a thin-walled circular ring [2, §3.1.1].

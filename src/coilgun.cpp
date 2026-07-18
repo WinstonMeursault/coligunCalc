@@ -1,1 +1,1 @@
-// Placeholder — populated in subsequent commits
+#include <coilgun/coilgun.hpp>

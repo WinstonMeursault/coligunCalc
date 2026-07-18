@@ -68,7 +68,7 @@ double material_beta(ArmatureMaterial material);
  * @param temperature_kelvin Temperature in kelvin.
  * @return Specific heat capacity at constant pressure.
  *
- * Eq. (6.2) in NumericalModel.md — converted from kJ to J by factor 1000.
+ * Eq. (6.3) in NumericalModel.md — converted from kJ to J by factor 1000.
  */
 double specific_heat_capacity_copper(double temperature_kelvin);
 
