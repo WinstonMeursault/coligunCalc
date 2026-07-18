@@ -17,7 +17,7 @@ namespace coilgun::simulation::cuda {
  */
 enum class GpuOptLevel {
     Standard = 0,   ///< Fixed n_nodes=9, no distance cutoff.
-    Full     = 1,   ///< Distance cutoff + adaptive n_nodes (near=9, far=4).
+    Full     = 1,   ///< Distance cutoff (>10× coil length) + fixed n_nodes=9.
 };
 
 /**

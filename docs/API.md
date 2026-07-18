@@ -1012,108 +1012,575 @@ All CMake presets include `-march=native` for SIMD instruction set auto-detectio
 
 ## GPU Acceleration (CUDA)
 
-The library provides an optional GPU-accelerated backend (`libcoilgun_cuda.a`) for mutual inductance computation. Enable via CMake:
+The library provides an optional GPU-accelerated backend (`libcoilgun_cuda.a`) that offloads the 4D Gauss-Legendre mutual inductance integration to the GPU. The CPU path is completely unchanged — the GPU classes are separate, drop-in replacements.
 
 ```sh
-cmake --preset ninja-debug -DCOILGUN_ENABLE_CUDA=ON
+cmake --preset ninja-cuda-debug      # configure with CUDA
+cmake --build --preset ninja-cuda-debug  # build
+ctest --preset debug                 # run all tests (CPU + GPU)
 ```
 
 ### Prerequisites
 
-- CUDA Toolkit ≥ 12.8 (for Blackwell sm_120; ≥ 9.0 for earlier architectures)
-- Boost.Math ≥ 1.86 (fetched automatically via CMake FetchContent)
-- NVIDIA GPU with Compute Capability ≥ 6.0 (Pascal+) for FP64 atomic support
+| Requirement | Minimum | Notes |
+|---|---|---|
+| CUDA Toolkit | ≥ 12.8 (Blackwell sm_120); ≥ 9.0 (earlier arch) | `nvcc` must be in PATH |
+| Boost.Math | ≥ 1.86 | Fetched automatically via CMake |
+| NVIDIA GPU | Compute Capability ≥ 6.0 (Pascal+) | Required for FP64 atomic support |
+| Host compiler | g++ ≥ 9 or equivalent | Must match the one nvcc detects |
 
 ### Include and Link
 
 ```cpp
-#include <coilgun/coilgun_cuda.hpp>   // full GPU API + CPU API
+#include <coilgun/coilgun_cuda.hpp>   // all GPU classes + CPU umbrella
 ```
 
 ```cmake
-target_link_libraries(your_target PRIVATE coilgun_cuda coilgun)
+target_link_libraries(your_target PRIVATE coilgun_cuda coilgun CUDA::cudart)
 ```
 
-### GpuOptLevel
+The `coilgun_cuda` target depends on `coilgun` transitively — both libraries are needed.
 
-| Level | Distance Cutoff | GL Order | Use Case |
-|---|---|---|---|
-| `Standard` | No | Fixed n_nodes=9 | Debug / verification |
-| `Full` | Yes (>10× coil length) | Fixed n_nodes=9 | Production |
-
-**Note:** Unlike the CPU `OptimizationLevel::Full`, the GPU backend does not use adaptive GL order (n_nodes=4/9). GPU kernel accuracy with 4 GL nodes is insufficient for the coil-edge region; always using 9 nodes ensures numerical consistency.
+---
 
 ### GpuBackend
 
 ```cpp
 #include <coilgun/simulation/cuda/gpu_backend.hpp>
 
-coilgun::simulation::cuda::GpuBackend backend;
-backend.device_id = 0;           // cudaSetDevice target
-backend.threads_per_block = 512; // integration kernel block size
+namespace coilgun::simulation::cuda {
+
+struct GpuBackend {
+    int     device_id         = 0;     ///< cudaSetDevice target.
+    int     threads_per_block = 512;   ///< Threads per block for the 4D integration kernel.
+    size_t  max_batch_sims    = 256;   ///< Pre-allocation cap for batch simulation buffers.
+    bool    enable_profiling  = false; ///< Insert NVTX range annotations for nsight profiling.
+};
+
+}
 ```
 
-### GpuSingleStageSim
+| Field | Purpose | Default |
+|-------|---------|---------|
+| `device_id` | Selects which physical GPU to target (relevant on multi-GPU systems). | `0` |
+| `threads_per_block` | Number of threads per block for the 4D GL integration kernel. Must be a power of 2 ≤ 1024. Larger values reduce per-thread loop count but increase shared-memory pressure. | `512` |
+| `max_batch_sims` | Maximum number of simulations in a `SimBatch`. Buffers are pre-allocated to this size. Exceeding it throws `std::runtime_error`. | `256` |
+| `enable_profiling` | When true, inserts NVTX push/pop ranges around each `step()` for GPU timeline profiling. | `false` |
 
-API identical to CPU `SingleStageSim`. Migration requires only changing the class name and include path.
+**Example**:
+
+```cpp
+coilgun::simulation::cuda::GpuBackend be;
+be.device_id = 0;
+be.threads_per_block = 1024;  // maximise parallelism
+```
+
+---
+
+### GpuOptLevel
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_backend.hpp>
+
+namespace coilgun::simulation::cuda {
+
+enum class GpuOptLevel {
+    Standard = 0,   ///< n_nodes=9, no distance cutoff. Use for debugging/verification.
+    Full     = 1,   ///< Distance cutoff (>10× coil length) + fixed n_nodes=9. Production.
+};
+
+}
+```
+
+| Level | Distance cutoff | GL order | Behaviour |
+|:-----:|:---------------:|:--------:|-----------|
+| `Standard` | No | n_nodes = 9 | All (stage, filament) pairs are processed, even if the stage is far from the armature. The kernel uses 9 GL nodes per dimension (6561 integration points). This is the safest setting. |
+| `Full` | Yes | n_nodes = 9 | Stages farther than 10× the coil length from the armature are skipped entirely. At typical distances all active stages are within range. |
+
+**Note**: The GPU backend does NOT support adaptive GL order (n_nodes=4/9 mix). Using n_nodes=4 on the GPU causes non-deterministic floating-point drift in the shared-memory reduction (only 3 active warps out of 8). The CPU `OptimizationLevel::Full` uses both distance cutoff and adaptive quadrature; the GPU `GpuOptLevel::Full` uses distance cutoff only.
+
+---
+
+### GpuSingleStageSim
 
 ```cpp
 #include <coilgun/simulation/cuda/gpu_single_stage_sim.hpp>
 
-using coilgun::simulation::cuda::GpuSingleStageSim;
+namespace coilgun::simulation::cuda {
 
-GpuSingleStageSim<EulerStepper> sim(coil, arm, std::move(excitation), dt);
-sim.run();
-double v = sim.result().summary.muzzle_velocity;
+template<typename SP = EulerStepper>
+class GpuSingleStageSim {
+public:
+    GpuSingleStageSim(
+        components::DrivingCoil          coil,          // copied
+        components::Armature             armature,      // copied
+        std::unique_ptr<Excitation>      excitation,    // moved-in
+        double                           dt,
+        bool                             enable_thermal = false,
+        GpuOptLevel                      opt_level = GpuOptLevel::Full,
+        const GpuBackend&                backend = {}
+    );
+
+    const SimStep&   step();
+    const SimResult& run();
+    const SimResult& run(const TerminationPolicy& p);
+    void             reset();
+
+    const SimResult& result()     const;
+    const SimState&  state()      const;
+    double  dt()         const;
+    int     step_count() const;
+};
+
+} // namespace
 ```
 
-| Constructor Parameter | Description | Default |
-|---|---|---|
-| `coil` | DrivingCoil (copied) | — |
-| `armature` | Armature (copied) | — |
-| `excitation` | Excitation (moved-in) | — |
-| `dt` | Fixed time step (s) | — |
-| `enable_thermal` | Adiabatic heating | false |
-| `opt_level` | GpuOptLevel | Full |
-| `backend` | GpuBackend config | default |
+**Constructor parameters**:
+
+| Parameter | Description | Typical value |
+|-----------|-------------|---------------|
+| `coil` | Driving coil geometry (copied) | — |
+| `armature` | Armature geometry and filament discretisation (copied) | — |
+| `excitation` | Excitation source (moved-in) | `CrowbarExcitation(450.0, 0.001)` |
+| `dt` | Fixed time step (s) | `1e-6` |
+| `enable_thermal` | Enable adiabatic filament heating (CPU-side) | `false` |
+| `opt_level` | GPU optimisation level | `GpuOptLevel::Full` |
+| `backend` | GPU backend configuration | `{}` (defaults) |
+
+**Methods**:
+
+| Method | Behaviour |
+|--------|-----------|
+| `step()` | Advance one time step. Launches CUDA kernels per filament pair, solves the ODE via Eigen LDLT, updates kinematics, records diagnostics. Returns the newly recorded `SimStep`. |
+| `run()` | Run to default termination. Blocks until the excitation finishes (crowbar diode ON and current decayed). |
+| `run(policy)` | Run to custom `TerminationPolicy`. |
+| `reset()` | Restore to initial state. Resets all currents to zero, restores armature position/velocity to construction values, resets the excitation, clears result history. |
+| `result()` | Result after the last `run()`. Contains `history` (vector of SimStep) and `summary` (SimSummary). |
+| `state()` | Current internal state — live reference. |
+| `dt()` | Fixed time step. |
+| `step_count()` | Steps since construction or last `reset()`. |
+
+**Internals**: The class internally owns a `GpuAdaptor` that uploads coil geometry, filament discretisation, and GL quadrature nodes to device memory once at construction. Each `step()` call transports the armature position to the device, launches the 4D integration kernel per (coil, filament) pair, and reads back `M1`/`dM1` matrices.
+
+**Complete example**:
+
+```cpp
+#include <coilgun/coilgun_cuda.hpp>
+#include <iostream>
+
+int main() {
+    using namespace coilgun::physics;
+    using coilgun::components::DrivingCoil;
+    using coilgun::components::Armature;
+    using coilgun::simulation::cuda::GpuSingleStageSim;
+    using coilgun::simulation::EulerStepper;
+    using coilgun::simulation::CrowbarExcitation;
+
+    DrivingCoil coil(0.01, 0.03, 0.05, 150,
+                     COPPER.resistivity_ref, 1e-6, 0.7);
+    Armature arm(0.005, 0.025, 0.08,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.120, 5, 2, 0.05);
+
+    auto exc = std::make_unique<CrowbarExcitation>(450.0, 0.001);
+    GpuSingleStageSim<EulerStepper> sim(coil, arm, std::move(exc), 1e-6);
+
+    sim.run();
+    std::cout << "Muzzle velocity: " << sim.result().summary.muzzle_velocity << " m/s\n";
+    std::cout << "Efficiency:      " << sim.result().summary.efficiency * 100 << " %\n";
+    return 0;
+}
+```
+
+The public API is identical to `SingleStageSim`. The only change needed to migrate from CPU to GPU is the class name and include path.
+
+---
 
 ### GpuMultiStageSim
-
-API identical to CPU `MultiStageSim`.
 
 ```cpp
 #include <coilgun/simulation/cuda/gpu_multi_stage_sim.hpp>
 
-using coilgun::simulation::cuda::GpuMultiStageSim;
+namespace coilgun::simulation::cuda {
 
-std::vector<DrivingCoil> coils = {c1, c2};
-std::vector<std::unique_ptr<Excitation>> excs;
-excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
-excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
-std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
+template<typename SP = EulerStepper>
+class GpuMultiStageSim {
+public:
+    static constexpr int kMaxStages = 50;
 
-GpuMultiStageSim<EulerStepper> sim(
-    std::move(coils), arm, std::move(excs), triggers, dt,
-    false, GpuOptLevel::Full, backend);
-sim.run();
+    GpuMultiStageSim(
+        std::vector<components::DrivingCoil>     coils,          // copied
+        components::Armature                      armature,      // copied
+        std::vector<std::unique_ptr<Excitation>>  excitations,   // moved-in
+        std::vector<TriggerConfig>                trigger_configs,
+        double                                    dt,
+        bool                                      enable_thermal = false,
+        GpuOptLevel                               opt_level = GpuOptLevel::Full,
+        const GpuBackend&                         backend = {}
+    );
+
+    const MultiStageStep&  step();
+    const MultiStageResult& run();
+    const MultiStageResult& run(const TerminationPolicy& p);
+    void                    reset();
+
+    const MultiStageResult& result()      const;
+    const MultiStageState&  state()       const;
+    double  dt()              const;
+    int     step_count()      const;
+    int     num_stages()      const;
+};
+
+} // namespace
 ```
 
-Notes:
-- `enable_thermal` temperature updates run on CPU (<1% of runtime)
-- `GpuOptLevel` replaces CPU `OptimizationLevel` (T(q,p) lookup is construction-time)
-- Inter-coil mutual inductance is precomputed on CPU at construction
+**Constructor constraints**: `coils.size() == excitations.size()`, `trigger_configs.size() == coils.size() - 1`, `coils.size() <= kMaxStages (50)`. Violating any throws `std::invalid_argument`.
+
+**Constructor parameters**:
+
+| Parameter | Description | Typical value |
+|-----------|-------------|---------------|
+| `coils` | Driving coil geometry per stage (copied) | — |
+| `armature` | Armature geometry and filament discretisation (copied) | — |
+| `excitations` | One `Excitation` per stage (moved-in) | `CrowbarExcitation(450.0, 0.001)` each |
+| `trigger_configs` | One `TriggerConfig` per stage except stage 0 | `{Position, 0.09}` |
+| `dt` | Fixed time step (s) | `1e-6` |
+| `enable_thermal` | Enable adiabatic filament heating (CPU-side) | `false` |
+| `opt_level` | GPU optimisation level | `GpuOptLevel::Full` |
+| `backend` | GPU backend configuration | `{}` (defaults) |
+
+**Methods** — identical signatures to CPU `MultiStageSim`:
+
+| Method | Behaviour |
+|--------|-----------|
+| `step()` | Advance one time step. Checks triggers, extinguishes quiet stages, launches CUDA kernels for all active (stage, filament) pairs, solves ODE, updates kinematics. |
+| `run()` / `run(policy)` | Run to termination. |
+| `reset()` | Restore all state to initial conditions. |
+| `result()` / `state()` / `dt()` / `step_count()` / `num_stages()` | Query. |
+
+**Internals**: Computes M1/dM1 matrices for all active stage-filament pairs using CUDA kernels. Inter-filament mutual inductance matrix `[M]` is precomputed on CPU at construction (it does not change during simulation). Inter-coil mutual inductance `M_cc` is also precomputed on CPU and populates the off-diagonal coil-coil block of the system matrix. The LDLT linear solve, force computation, and kinematic updates remain on CPU. The ODE dimension is `n_stages + N_filaments`. Inactive stages have identity rows/columns.
+
+**Complete example**:
+
+```cpp
+#include <coilgun/coilgun_cuda.hpp>
+#include <iostream>
+
+int main() {
+    using namespace coilgun::physics;
+    using coilgun::components::DrivingCoil;
+    using coilgun::components::Armature;
+    using coilgun::simulation::cuda::GpuMultiStageSim;
+    using coilgun::simulation::EulerStepper;
+    using coilgun::simulation::CrowbarExcitation;
+    using coilgun::simulation::TriggerConfig;
+    using coilgun::simulation::TriggerMode;
+
+    DrivingCoil c1(0.01, 0.03, 0.05, 150,
+                   COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil c2(0.01, 0.03, 0.05, 150,
+                   COPPER.resistivity_ref, 1e-6, 0.7, 0.10);
+    Armature arm(0.005, 0.025, 0.08,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.120, 5, 2, 0.05);
+
+    std::vector<DrivingCoil> coils = {c1, c2};
+    std::vector<std::unique_ptr<Excitation>> excs;
+    excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
+    excs.push_back(std::make_unique<CrowbarExcitation>(450.0, 0.001));
+    std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
+
+    GpuMultiStageSim<EulerStepper> sim(
+        std::move(coils), arm, std::move(excs), triggers, 1e-6);
+
+    sim.run();
+    auto& r = sim.result();
+    std::cout << "Muzzle velocity: " << r.summary.muzzle_velocity << " m/s\n";
+    std::cout << "Efficiency:      " << r.summary.efficiency * 100 << " %\n";
+    for (auto& ps : r.summary.per_stage)
+        std::cout << "  Stage " << ps.stage_index
+                  << ": I_peak=" << ps.peak_current << " A\n";
+    return 0;
+}
+```
+
+**Differences from CPU `MultiStageSim`**:
+
+| Aspect | CPU | GPU |
+|--------|-----|-----|
+| M/dM computation | OpenMP-parallelised | CUDA kernel (one block per pair) |
+| Optimisation level | `OptimizationLevel` (3 levels) | `GpuOptLevel` (2 levels) |
+| Adaptive GL order | n_nodes=9 or 4 (distance-based) | n_nodes=9 only |
+| Temperature update | OpenMP-parallelised | Serial CPU loop |
+| Force summation | OpenMP reduction | Serial loop |
+| T(q,p) lookup table | Used when in table range | Construction-time only (not GPU) |
+
+---
+
+### SimBatch
+
+```cpp
+#include <coilgun/simulation/cuda/sim_batch.hpp>
+
+namespace coilgun::simulation::cuda {
+
+template<typename SP = EulerStepper>
+class SimBatch {
+public:
+    static constexpr int kMaxStages = 50;
+
+    SimBatch(
+        std::vector<components::DrivingCoil> coils,
+        components::Armature                  armature,
+        int                                   num_sims,
+        double                                dt,
+        const GpuBackend&                     backend = {});
+
+    ~SimBatch();
+
+    SimBatch(const SimBatch&) = delete;
+    SimBatch& operator=(const SimBatch&) = delete;
+
+    void set_excitations(
+        int sim_id,
+        std::vector<std::unique_ptr<Excitation>> excitations,
+        std::vector<TriggerConfig>               trigger_configs);
+
+    void run();
+    void run(const TerminationPolicy& policy);
+
+    const MultiStageResult& result(int sim_id) const;
+    int num_sims() const;
+};
+
+} // namespace
+```
+
+`SimBatch` is a container for **parameter sweeps** — running multiple simulations that share identical coil and armature geometry but differ in excitation parameters (voltage, capacitance) and/or trigger positions.
+
+**Constraints**: All simulations must share **exactly** the same coil geometry and filament discretisation (`m × n`). The `coils` and `armature` passed to the constructor are shared across all simulations. Per-simulation excitation sources and trigger configurations are set via `set_excitations()`.
+
+**Constructor parameters**:
+
+| Parameter | Description |
+|-----------|-------------|
+| `coils` | Shared driving coil geometry (copied). Same for all simulations. |
+| `armature` | Shared armature geometry and filament discretisation (copied). |
+| `num_sims` | Number of concurrent simulations. Must be ≤ `max_batch_sims` in GpuBackend. |
+| `dt` | Fixed time step (s), shared across all simulations. |
+| `backend` | GPU backend configuration. |
+
+**Methods**:
+
+| Method | Behaviour |
+|--------|-----------|
+| `set_excitations(sim_id, excitations, triggers)` | Configure excitation sources and trigger settings for simulation `sim_id`. Must be called for each simulation before `run()`. |
+| `run()` / `run(policy)` | Run all simulations simultaneously. Each simulation runs independently; the first to reach its termination condition does not block others. |
+| `result(sim_id)` | Retrieve `MultiStageResult` for a specific simulation. |
+| `num_sims()` | Number of simulations in this batch. |
+
+**Execution model**: `SimBatch` internally manages one `GpuAdaptor` and an array of per-simulation state objects. Each time step, it first checks triggers and extinguishes quiet stages for all simulations, then computes M1/dM1 for all active pairs via a GPU kernel launch loop, then solves the ODE and updates kinematics for each simulation independently on the CPU.
+
+**Example — parameter sweep over capacitor voltage**:
+
+```cpp
+#include <coilgun/coilgun_cuda.hpp>
+#include <iostream>
+#include <vector>
+
+int main() {
+    using namespace coilgun::physics;
+    using coilgun::components::DrivingCoil;
+    using coilgun::components::Armature;
+    using coilgun::simulation::cuda::SimBatch;
+    using coilgun::simulation::EulerStepper;
+    using coilgun::simulation::CrowbarExcitation;
+    using coilgun::simulation::TriggerConfig;
+    using coilgun::simulation::TriggerMode;
+    using coilgun::simulation::TerminationPolicy;
+
+    // Shared geometry
+    DrivingCoil c1(0.01, 0.03, 0.05, 150,
+                   COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil c2(0.01, 0.03, 0.05, 150,
+                   COPPER.resistivity_ref, 1e-6, 0.7, 0.10);
+    Armature arm(0.005, 0.025, 0.08,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.120, 5, 2, 0.05);
+
+    int N = 5;
+    SimBatch<EulerStepper> batch({c1, c2}, arm, N, 1e-6);
+
+    // Configure per-simulation excitations
+    double voltages[] = {300.0, 350.0, 400.0, 450.0, 500.0};
+    for (int i = 0; i < N; ++i) {
+        std::vector<std::unique_ptr<Excitation>> excs;
+        excs.push_back(std::make_unique<CrowbarExcitation>(voltages[i], 0.001));
+        excs.push_back(std::make_unique<CrowbarExcitation>(voltages[i], 0.001));
+        std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
+        batch.set_excitations(i, std::move(excs), triggers);
+    }
+
+    auto pol = TerminationPolicy::defaults();
+    pol.max_steps = 500;  // truncate for quick sweep
+    batch.run(pol);
+
+    for (int i = 0; i < N; ++i) {
+        auto& r = batch.result(i);
+        std::cout << "V=" << voltages[i] << "V  →  v="
+                  << r.summary.muzzle_velocity << " m/s\n";
+    }
+    return 0;
+}
+```
+
+**Note**: The current implementation launches one CUDA kernel per (stage, filament) pair per simulation per step (kernel launch overhead ~100 µs/step for typical sizes). This is functionally equivalent to running `GpuMultiStageSim` objects in a loop, but provides a unified API and shared geometry. A persistent-kernel optimisation (zero launches per step) is designed and planned for a future release.
+
+---
+
+### GpuAdaptor (Advanced)
+
+```cpp
+#include <coilgun/simulation/cuda/gpu_adaptor.hpp>
+
+namespace coilgun::simulation::cuda {
+
+struct CoilGeo { double ri, re, len, pos; int turns; };
+struct FilGeo  { double ri, re, len; };
+
+class GpuAdaptor {
+public:
+    GpuAdaptor();
+    ~GpuAdaptor();
+    GpuAdaptor(const GpuAdaptor&) = delete;
+    GpuAdaptor& operator=(const GpuAdaptor&) = delete;
+    GpuAdaptor(GpuAdaptor&&) noexcept;
+    GpuAdaptor& operator=(GpuAdaptor&&) noexcept;
+
+    void setup(const std::vector<DrivingCoil>& coils, const Armature& arm, int n_nodes);
+    void setup_batch(const std::vector<DrivingCoil>& coils, const Armature& arm, int num_sims, int n_nodes);
+
+    void upload_separation(const std::vector<double>& seps);
+    void download_results(std::vector<double>& M_out, std::vector<double>& dM_out, int n_pairs);
+    void upload_batch_separations(const std::vector<double>& seps);
+    void download_batch_results(std::vector<double>& M_out, std::vector<double>& dM_out);
+
+    const CoilGeo*  d_coils()   const;
+    const FilGeo*   d_fils()    const;
+    const double*   d_nodes()    const;
+    const double*   d_weights()  const;
+    double*         d_results_M();
+    double*         d_results_dM();
+    double*         d_seps();
+    double*         d_batch_seps();
+    double*         d_batch_results_M();
+    double*         d_batch_results_dM();
+
+    int n_stages() const; int n_fil() const; int n_nodes() const; int batch_size() const;
+};
+
+}
+```
+
+`GpuAdaptor` manages device memory for GPU-accelerated simulations. It is used internally by `GpuSingleStageSim`, `GpuMultiStageSim`, and `SimBatch`. Most users do not need to interact with it directly.
+
+**`CoilGeo` / `FilGeo`** are packed POD structs for device transfer. They mirror the geometry fields of `DrivingCoil` and `Armature` respectively, flattened for GPU kernel parameter space.
+
+**`setup()`** allocates and uploads invariant geometry (coils, filaments, GL nodes/weights) to device memory. Must be called once before any per-step operations.
+
+**`setup_batch()`** extends `setup()` with per-simulation batch buffers for `SimBatch`. Allocates `num_sims`-wide separation and result arrays.
+
+**`upload_separation()`** / **`download_results()`** handle per-step host↔device data movement for a single simulation.
+
+**`upload_batch_separations()`** / **`download_batch_results()`** handle per-step host↔device data movement for a batch of simulations.
+
+The device pointer accessors (`d_*()`) return pointers to allocated device memory — used by CUDA kernels directly. Note that `d_batch_*()` pointers are only valid after `setup_batch()` has been called.
+
+**Note**: `GpuAdaptor` is move-only (deleted copy). The destructor frees all device allocations via `cudaFree()`.
+
+---
+
+### Internal Device Headers
+
+The `.cuh` headers define `__host__ __device__` functions used by GPU kernels. They are not intended for user code.
+
+```cpp
+#include <coilgun/physics/elliptic.cuh>          // __host__ __device__ elliptic integrals
+#include <coilgun/physics/mutual_inductance.cuh> // __host__ __device__ filament M, dM/dz
+```
+
+These are only compilable with `nvcc` (`#ifdef __CUDACC__` guarded). They provide GPU-compatible inline implementations of the elliptic integral and filament mutual inductance functions. The `coilgun_cuda.hpp` umbrella header does **not** include these — they are for internal use only.
+
+---
 
 ### Architecture
 
-The GPU backend accelerates only the 4D Gauss-Legendre mutual inductance integration (the >95% compute hotspot). All other computation — linear system solve (Eigen LDLT), kinematic updates, temperature updates, trigger/excitation logic — remains on the CPU.
+**Compute flow per time step**:
 
 ```
-Per-step loop:
-  GPU:  4D GL integration → M1, dM1 matrices
-  CPU:  LDLT solve → current update → force → motion → excitation advance
+┌─────────────────────────────────────────────┐
+│ Host (CPU)                                   │
+│   check_triggers() → extinguish_quiet()       │
+│   for each (stage, filament) pair:            │
+│     compute separation → CUDA kernel launch   │
+│   cudaDeviceSynchronize()                    │
+│   cudaMemcpy D→H: M1_mat, dM1_mat            │
+│   build_system_matrix [L - M_I]              │
+│   Eigen LDLT solve → new currents            │
+│   compute_force(F = Σ I_d × I_f × dM)        │
+│   update velocity / position                 │
+│   update capacitor voltage / temperature     │
+├─────────────────────────────────────────────┤
+│ Device (GPU)                                  │
+│   mutual_inductance_coil_pair_kernel          │
+│     per block: 512 threads × ~13 loops        │
+│     each loop: 1 elliptic integral pair       │
+│     shared memory tree reduction              │
+│     → 1 double M, 1 double dM per pair       │
+└─────────────────────────────────────────────┘
 ```
 
-Device memory is managed by `GpuAdaptor`: coil geometry and GL quadrature nodes are uploaded once at construction. Per-step, only the armature position vector is transferred to the device, and M1/dM1 matrices are transferred back.
+**Data uploaded once at construction** (via `GpuAdaptor`):
+
+| Buffer | Size | Content |
+|--------|------|---------|
+| `d_coils_` | `n_stages × sizeof(CoilGeo)` | ri, re, length, position, turns per stage |
+| `d_fils_` | `N_fil × sizeof(FilGeo)` | ri, re, length per filament ring |
+| `d_nodes_` | `9 × sizeof(double)` | Gauss-Legendre quadrature nodes |
+| `d_weights_` | `9 × sizeof(double)` | GL quadrature weights |
+
+**Data transferred per step**:
+
+| Direction | Size | Content |
+|-----------|------|---------|
+| H→D | `n_active × N_fil × sizeof(double)` | Armature position → separation values |
+| D→H | `n_stages × N_fil × 2 × sizeof(double)` | M1 and dM1 matrices |
+
+### Performance Characteristics
+
+| Scale (S×F) | CPU (16-core) | GPU (RTX 5080) | GPU advantage |
+|---|---|---|---|
+| 1×10 | 19 s | 16 s | 1.2× |
+| 2×10 | 58 s | 52 s | 1.1× |
+| 25×45 (typical) | ~5 min | ~2 min (est.) | ~2.5× |
+| 50×200 (high-res) | ~2 h | ~15 min (est.) | ~8× |
+
+GPU advantage increases with problem scale because the 4D integration kernel (6561 elliptic integral evaluations per pair) exposes massive parallelism. At small scales, kernel launch overhead and PCIe transfers dominate. At large scales, GPU compute throughput saturates.
+
+### Thread Safety
+
+The GPU classes are **single-threaded** — they do not support concurrent `step()` calls on the same instance. Multi-simulation concurrency is achieved through `SimBatch` (which serialises) or by creating independent `GpuMultiStageSim` instances on separate `cudaStream_t` objects.
+
+The underlying CUDA kernel is thread-safe with respect to the host: mapped memory and kernel launches use the default stream, which serialises operations.
+
+### Known Limitations
+
+| Limitation | Detail |
+|---|---|
+| Adaptive GL order (n_nodes=4/9) | Removed. Using 4 GL nodes on the GPU causes non-deterministic floating-point drift (B1). |
+| Thermal mode | Temperature updates run on CPU (single-threaded). The computation is <1% of runtime. |
+| Batch kernel | A true batch kernel (single grid launch processing all simulations) is designed (P0) but blocked by an nvcc cross-module struct-layout issue. The persistent-kernel optimisation (D1-D2) is the planned replacement.
+| CUDA Graphs | Not implemented. Would require fixed n_active per step (no dynamic triggering/termination). |
 
 ---
 
@@ -1125,6 +1592,7 @@ Device memory is managed by `GpuAdaptor`: coil geometry and GL quadrature nodes 
 |--------|---------|-------------|
 | `COILGUN_BUILD_TESTS` | `ON` | Build unit and integration tests |
 | `COILGUN_BUILD_GENERATOR` | `OFF` | Build the T(q,p) lookup table generator |
+| `COILGUN_ENABLE_CUDA` | `OFF` | Build the GPU-accelerated backend (`libcoilgun_cuda.a`) |
 
 ### CMake Presets
 
@@ -1133,6 +1601,7 @@ Device memory is managed by `GpuAdaptor`: coil geometry and GL quadrature nodes 
 | `ninja-debug` | Ninja | Debug | `-march=native` | Tests enabled, compile_commands.json |
 | `ninja-release` | Ninja | Release | `-march=native -O3` | — |
 | `make-debug` | Unix Makefiles | Debug | `-march=native` | Tests enabled, compile_commands.json |
+| `ninja-cuda-debug` | Ninja | Debug | `-march=native` | CUDA enabled, Tests enabled |
 
 ### Test Presets
 

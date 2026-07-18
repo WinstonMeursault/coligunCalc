@@ -29,6 +29,7 @@ Licensed under GPLv3.
 - **Stage triggering** — position-based or time-delay, up to 50 stages
 - **LRU caching** — 4096-entry filament-level M and dM/dz caches
 - **OpenMP multicore parallelism** — parallelized M/dM computation, force summation, and thermal updates per time step
+- **GPU acceleration (CUDA)** — mutual inductance 4D integration offloaded to GPU via CUDA 13.3+, with seamless API compatibility
 
 ---
 
@@ -52,8 +53,33 @@ Both Boost.Math and Eigen are fetched automatically via CMake `FetchContent` —
 ```sh
 cmake --preset ninja-debug       # configure
 cmake --build --preset ninja-debug   # build
-ctest --preset debug              # run tests (17/17 with CUDA)
+ctest --preset debug              # run tests
 ```
+
+### GPU Acceleration (CUDA)
+
+**Additional requirements**: CUDA Toolkit ≥ 12.8 (for Blackwell sm_120; ≥ 9.0 for earlier architectures), NVIDIA GPU with Compute Capability ≥ 6.0.
+
+```sh
+cmake --preset ninja-cuda-debug      # configure with CUDA
+cmake --build --preset ninja-cuda-debug  # build CPU + GPU libraries
+ctest --preset debug                 # run all tests (CPU + GPU)
+```
+
+GPU usage is API-compatible with CPU:
+
+```cpp
+#include <coilgun/coilgun_cuda.hpp>
+
+using coilgun::simulation::cuda::GpuSingleStageSim;
+// or: coilgun::simulation::cuda::GpuMultiStageSim
+
+GpuSingleStageSim<EulerStepper> sim(coil, arm, std::move(exc), dt);
+sim.run();
+double v = sim.result().summary.muzzle_velocity;
+```
+
+The GPU backend accelerates only the 4D mutual inductance integration (>95% of runtime). Linear system solve, kinematics, and thermal updates remain on CPU.
 
 ### Minimal Usage Example
 
@@ -156,6 +182,7 @@ The library implements the numerical model described in [NumericalModel.md](docs
 | `ninja-debug` | Ninja | Debug | `-march=native` | Tests ON, compile_commands.json |
 | `ninja-release` | Ninja | Release | `-march=native -O3` | — |
 | `make-debug` | Unix Makefiles | Debug | `-march=native` | Tests ON, compile_commands.json |
+| `ninja-cuda-debug` | Ninja | Debug | `-march=native` | CUDA ON, Tests ON |
 
 ---
 

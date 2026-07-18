@@ -13,3 +13,4 @@
 #include "coilgun/simulation/cuda/gpu_backend.hpp"
 #include "coilgun/simulation/cuda/gpu_single_stage_sim.hpp"
 #include "coilgun/simulation/cuda/gpu_multi_stage_sim.hpp"
+#include "coilgun/simulation/cuda/sim_batch.hpp"

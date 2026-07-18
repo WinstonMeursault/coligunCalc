@@ -10,6 +10,7 @@
 
 #include "coilgun/physics/mutual_inductance.cuh"
 #include "coilgun/physics/quadrature.hpp"
+#include "coilgun/simulation/cuda/gpu_adaptor.hpp"
 #include <cuda_runtime.h>
 #include <cmath>
 
@@ -119,6 +120,89 @@ __global__ void mutual_inductance_coil_pair_kernel(
     if (tid == 0) {
         out_M[blockIdx.x]  = prefactor * sM[0];
         out_dM[blockIdx.x] = prefactor * sdM[0];
+    }
+}
+
+/**
+ * @brief Batch kernel: compute M and dM for multiple simulations sharing geometry.
+ *
+ * Grid: (n_stages × N_fil, num_sims).
+ * Each block processes one (stage, filament) for one simulation.
+ */
+__global__ void mutual_inductance_coil_pair_batch_kernel(
+        const coilgun::simulation::cuda::CoilGeo* coils,
+        const coilgun::simulation::cuda::FilGeo*  fils,
+        const double* seps,
+        int num_sims, int n_stages, int N_fil, int n_nodes,
+        double* out_M, double* out_dM) {
+
+    int pair_idx = blockIdx.x;
+    int sim_id   = blockIdx.y;
+
+    if (sim_id >= num_sims || pair_idx >= n_stages * N_fil) return;
+
+    int si = pair_idx / N_fil;
+    int fi = pair_idx % N_fil;
+
+    const auto& coil = coils[si];
+    const auto& fil  = fils[fi];
+
+    const double ra_mid  = 0.5 * (coil.re + coil.ri);
+    const double ra_half = 0.5 * (coil.re - coil.ri);
+    const double rb_mid  = 0.5 * (fil.re + fil.ri);
+    const double rb_half = 0.5 * (fil.re - fil.ri);
+    const double la_half = 0.5 * coil.len;
+    const double lb_half = 0.5 * fil.len;
+    const double prefactor = coil.turns / 16.0;
+
+    int pair_count = n_stages * N_fil;
+    double separation = seps[sim_id * pair_count + pair_idx];
+
+    int n2 = n_nodes * n_nodes;
+    int n4 = n2 * n2;
+    int tid = threadIdx.x;
+    int total_threads = blockDim.x;
+
+    __shared__ double sM[512];
+    __shared__ double sdM[512];
+    sM[tid]  = 0.0;
+    sdM[tid] = 0.0;
+
+    for (int idx = tid; idx < n4; idx += total_threads) {
+        int i1 = idx / (n_nodes * n_nodes * n_nodes);
+        int rem1 = idx % (n_nodes * n_nodes * n_nodes);
+        int j1 = rem1 / (n_nodes * n_nodes);
+        int rem2 = rem1 % (n_nodes * n_nodes);
+        int i2 = rem2 / n_nodes;
+        int j2 = rem2 % n_nodes;
+
+        double w = d_gl_weights[i1] * d_gl_weights[j1]
+                 * d_gl_weights[i2] * d_gl_weights[j2];
+
+        double ra = map_coord_device(ra_mid, ra_half, d_gl_nodes[i1]);
+        double rb = map_coord_device(rb_mid, rb_half, d_gl_nodes[i2]);
+        double za = map_coord_device(0.0, la_half, d_gl_nodes[j1]);
+        double zb = map_coord_device(separation, lb_half, d_gl_nodes[j2]);
+
+        double abs_sep = fabs(zb - za);
+        sM[tid]  += w * mutual_inductance_filament_device(ra, rb, abs_sep);
+        sdM[tid] += w * mutual_inductance_gradient_filament_device(ra, rb, zb - za);
+    }
+
+    __syncthreads();
+
+    for (int stride = total_threads / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            sM[tid]  += sM[tid + stride];
+            sdM[tid] += sdM[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        int out_idx = sim_id * pair_count + pair_idx;
+        out_M[out_idx]  = prefactor * sM[0];
+        out_dM[out_idx] = prefactor * sdM[0];
     }
 }
 

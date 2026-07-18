@@ -39,6 +39,20 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "COILGUN_BUILD_TESTS": "ON"
       }
+    },
+    {
+      "name": "ninja-cuda-debug",
+      "displayName": "Ninja CUDA Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja-cuda-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-march=native",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "COILGUN_BUILD_TESTS": "ON",
+        "COILGUN_ENABLE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "native"
+      }
     }
   ],
   "buildPresets": [
@@ -56,6 +70,11 @@
       "name": "make-debug",
       "displayName": "Make Debug",
       "configurePreset": "make-debug"
+    },
+    {
+      "name": "ninja-cuda-debug",
+      "displayName": "Ninja CUDA Debug",
+      "configurePreset": "ninja-cuda-debug"
     }
   ],
   "testPresets": [

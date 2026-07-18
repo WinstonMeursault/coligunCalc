@@ -73,6 +73,15 @@ public:
                           std::vector<double>& dM_out,
                           int n_pairs);
 
+    /// Upload per-step separation vectors for all simulations in batch mode.
+    /// @param seps Flat vector [num_sims][n_stages * n_fil], sim-major.
+    void upload_batch_separations(const std::vector<double>& seps);
+
+    /// Download M and dM results for all simulations in batch mode.
+    /// @param M_out,dM_out Flat vectors [num_sims][n_pairs], sim-major.
+    void download_batch_results(std::vector<double>& M_out,
+                                std::vector<double>& dM_out);
+
     /// @name Device pointers
     /// @{
     const CoilGeo*  d_coils()   const { return d_coils_; }
@@ -82,6 +91,9 @@ public:
     double*         d_results_M()  { return d_results_M_; }
     double*         d_results_dM() { return d_results_dM_; }
     double*         d_seps()       { return d_seps_; }
+    double*         d_batch_seps()        { return d_batch_seps_; }
+    double*         d_batch_results_M()   { return d_batch_results_M_; }
+    double*         d_batch_results_dM()  { return d_batch_results_dM_; }
     /// @}
 
     /// @name Dimensions
@@ -102,6 +114,10 @@ private:
     double*  d_results_M_  = nullptr;
     double*  d_results_dM_ = nullptr;
     double*  d_seps_       = nullptr;
+
+    double*  d_batch_seps_       = nullptr;
+    double*  d_batch_results_M_  = nullptr;
+    double*  d_batch_results_dM_ = nullptr;
 
     int n_stages_  = 0;
     int n_fil_     = 0;

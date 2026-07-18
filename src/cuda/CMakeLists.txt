@@ -4,6 +4,7 @@ add_library(coilgun_cuda STATIC
     gpu_adaptor.cu
     gpu_single_stage_sim.cu
     gpu_multi_stage_sim.cu
+    sim_batch.cu
 )
 
 target_include_directories(coilgun_cuda
