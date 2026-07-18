@@ -11,13 +11,19 @@
 namespace coilgun::simulation::cuda {
 
 /**
- * @brief GPU optimization level.
+ * @brief GPU optimization level. Levels are cumulative — each includes
+ *        all optimisations of lower levels.
  *
- * Controls distance cutoff and adaptive quadrature order.
+ * | Level      | Precision                | Distance cutoff | GL order | Use case           |
+ * |:----------:|:------------------------:|:---------------:|:--------:|--------------------|
+ * | Standard   | FP64                     | No              | 9        | Validation/debug   |
+ * | Full       | FP64                     | Yes (>10x coil) | 9        | Production default |
+ * | Aggressive | FP32 integrand + FP64 red.| Yes (>10x coil) | 9        | Large-scale sweeps |
  */
 enum class GpuOptLevel {
-    Standard = 0,   ///< Fixed n_nodes=9, no distance cutoff.
-    Full     = 1,   ///< Distance cutoff (>10× coil length) + fixed n_nodes=9.
+    Standard   = 0,   ///< FP64, no distance cutoff, n_nodes=9.
+    Full       = 1,   ///< FP64, distance cutoff, n_nodes=9.
+    Aggressive = 2,   ///< FP32 integrand, FP64 reduction, distance cutoff, n_nodes=9.
 };
 
 /**
@@ -28,6 +34,7 @@ struct GpuBackend {
     int     threads_per_block = 512;  ///< Threads per block for integration kernel.
     size_t  max_batch_sims    = 256;  ///< Pre-allocated buffer size for batch mode.
     bool    enable_profiling  = false; ///< Enable NVTX range annotations.
+    bool    use_persistent    = true;  ///< Use persistent kernel (mapped memory). Falls back to per-pair launches if false or if cudaHostAllocMapped fails.
 };
 
 } // namespace coilgun::simulation::cuda

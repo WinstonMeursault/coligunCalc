@@ -38,7 +38,7 @@ Licensed under GPLv3.
 ```
 include/coilgun/   — Public headers (core types, physics, components, simulation)
 src/               — Library implementation (static library libcoilgun.a)
-tests/             — Unit and integration tests (doctest, 17 suites)
+tests/             — Unit and integration tests (doctest, 18 configured suites)
 tools/             — T(q,p) lookup table generator
 docs/              — Documentation (API reference EN/CN, numerical model, design docs)
 .references/       — Reference papers in PDF (gitignored, local-only)
@@ -141,27 +141,30 @@ The library implements the numerical model described in [NumericalModel.md](docs
 
 ---
 
-## Test Suite (17 suites, all passing)
+## Test Suite (18 suites)
 
-| Suite | Coverage |
-|-------|----------|
-| `test_elliptic` | K(k), E(k) against known values |
-| `test_struve` | H₀(x), H₁(x) against SciPy reference |
-| `test_quadrature` | Gauss-Legendre/Laguerre node generation |
-| `test_lookup` | T(q,p) table + bilinear interpolation vs reference |
-| `test_self_inductance` | Table vs exact, edge cases, exact/comparison |
-| `test_mutual_inductance` | Filament & coil-level M and dM/dz |
-| `test_driving_coil` | Geometry, R, L, turns density |
-| `test_armature` | Filament geometry, per-filament R/L/mass |
-| `test_single_stage_sim` | Capacitor, crowbar, Euler/RK4, thermal |
-| `test_multi_stage_sim` | 1-stage equivalence, 2-stage, triggers, optimization levels |
-| `test_integration` | End-to-end single-stage scenarios |
-| `test_gpu_elliptic` | GPU K(k), E(k) vs CPU reference |
-| `test_gpu_filament` | GPU filament-level M, dM/dz vs CPU |
-| `test_gpu_coil_pair` | GPU coil-filament M, dM/dz vs CPU |
-| `test_gpu_vs_cpu_single` | GPU single-stage end-to-end vs CPU (ε < 0.5%) |
-| `test_gpu_vs_cpu_multi` | GPU multi-stage end-to-end vs CPU (ε < 0.5%) |
-| `test_gpu_batch` | GPU batch simulation mode |
+| Suite | Coverage | Status |
+|-------|----------|--------|
+| `test_elliptic` | K(k), E(k) against known values | ✅ |
+| `test_struve` | H₀(x), H₁(x) against SciPy reference | ✅ |
+| `test_quadrature` | Gauss-Legendre/Laguerre node generation | ✅ |
+| `test_lookup` | T(q,p) table + bilinear interpolation vs reference | ✅ |
+| `test_self_inductance` | Table vs exact, edge cases, exact/comparison | ✅ |
+| `test_mutual_inductance` | Filament & coil-level M and dM/dz | ✅ |
+| `test_driving_coil` | Geometry, R, L, turns density | ✅ |
+| `test_armature` | Filament geometry, per-filament R/L/mass | ✅ |
+| `test_single_stage_sim` | Capacitor, crowbar, Euler/RK4, thermal | ✅ |
+| `test_multi_stage_sim` | 1-stage equivalence, 2-stage, triggers, optimization levels | ✅ |
+| `test_integration` | End-to-end single-stage scenarios | ✅ |
+| `test_gpu_elliptic` | GPU K(k), E(k) vs CPU reference | ✅ |
+| `test_gpu_filament` | GPU filament-level M, dM/dz vs CPU | ✅ |
+| `test_gpu_coil_pair` | GPU coil-filament M, dM/dz vs CPU | ✅ |
+| `test_gpu_vs_cpu_single` | GPU single-stage end-to-end vs CPU (ε < 0.5%) | ✅ |
+| `test_gpu_vs_cpu_multi` | GPU multi-stage end-to-end vs CPU (ε < 0.5%) | ❌ |
+| `test_gpu_batch` | GPU batch simulation mode | ⏱️ |
+| `test_gpu_sim_batch` | SimBatch persistent vs fallback consistency | ✅ |
+
+> 16 passing, 1 failing (`test_gpu_vs_cpu_multi` — GPU persistent kernel precision), 1 timing out (`test_gpu_batch` — WIP).
 
 ---
 
@@ -170,8 +173,7 @@ The library implements the numerical model described in [NumericalModel.md](docs
 - [API Reference (EN)](docs/API.md) — Complete C++ function and class API
 - [API 参考 (中文)](docs/API_cn.md) — Chinese translation
 - [Numerical Model](docs/NumericalModel.md) — Detailed physics derivation and algorithm
-- [Multi-Stage Design](docs/multi_stage_sim_design.md) — Architecture and implementation plan
-- [82mm Test Dataset](docs/test_dataset_82mm_coilgun.md) — Validation dataset from Xiang (2015)
+- [Audit Report](docs/audit_report.md) — Codebase audit findings and fix plan
 
 ---
 

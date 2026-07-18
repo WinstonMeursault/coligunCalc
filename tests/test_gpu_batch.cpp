@@ -23,6 +23,8 @@ using coilgun::simulation::CrowbarExcitation;
 using coilgun::simulation::TriggerConfig;
 using coilgun::simulation::TriggerMode;
 using coilgun::simulation::cuda::GpuMultiStageSim;
+using coilgun::simulation::cuda::GpuBackend;
+using coilgun::simulation::cuda::GpuOptLevel;
 
 struct SweepPoint { double voltage; };
 
@@ -65,7 +67,10 @@ TEST_CASE("GPU batch — 10 parameter sweep vs CPU") {
         excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
         excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
         std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
-        GpuMultiStageSim<EulerStepper> sim(coils, arm, std::move(excs), triggers, 1e-6);
+        GpuBackend be;
+        be.use_persistent = false;
+        GpuMultiStageSim<EulerStepper> sim(coils, arm, std::move(excs), triggers, 1e-6,
+                                            false, GpuOptLevel::Full, be);
         sim.run();
         v_gpu[i] = sim.result().summary.muzzle_velocity;
     }

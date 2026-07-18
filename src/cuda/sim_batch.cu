@@ -16,6 +16,7 @@
 #include "coilgun/physics/mutual_inductance.hpp"
 #include "coilgun/physics/constants.hpp"
 #include "coilgun/simulation/excitation.hpp"
+#include <atomic>
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
@@ -56,6 +57,12 @@ SimBatch<SP>::SimBatch(
     , coils_(std::move(coils)), armature_(std::move(armature))
 {
     cudaSetDevice(backend_.device_id);
+    if (n_stages_ <= 0)
+        throw std::invalid_argument("SimBatch: at least one coil stage is required");
+    if (num_sims_ <= 0)
+        throw std::invalid_argument("SimBatch: num_sims must be positive");
+    if (static_cast<size_t>(num_sims_) > backend_.max_batch_sims)
+        throw std::invalid_argument("SimBatch: num_sims exceeds backend.max_batch_sims");
     if (n_stages_ > kMaxStages)
         throw std::invalid_argument("SimBatch: n_stages exceeds kMaxStages");
 
@@ -114,9 +121,18 @@ SimBatch<SP>::SimBatch(
     batch_dM1_.resize(num_sims_, pc); batch_dM1_.setZero();
     L_total_.resize(n_stages_+F, n_stages_+F);
     RHS_.resize(n_stages_+F);
+
+    init_persistent_mode();
 }
 
-template<typename SP> SimBatch<SP>::~SimBatch() = default;
+template<typename SP>
+SimBatch<SP>::~SimBatch() {
+    if (use_persistent_) {
+        *pbuf_.shutdown = 1;
+        cudaDeviceSynchronize();
+        free_persistent_buffers(pbuf_);
+    }
+}
 
 template<typename SP>
 void SimBatch<SP>::set_excitations(int sim_id,
@@ -128,10 +144,11 @@ void SimBatch<SP>::set_excitations(int sim_id,
     if ((int)trigger_configs.size()!=n_stages_-1) throw std::invalid_argument("triggers size");
     sims_[sim_id].excitations = std::move(excitations);
     sims_[sim_id].trigger_configs = std::move(trigger_configs);
+    sims_[sim_id].configured = true;
 }
 
 template<typename SP>
-void SimBatch<SP>::compute_all_M1_dM1() {
+void SimBatch<SP>::compute_all_M1_dM1_fallback() {
     int S = n_stages_, F = N_fil_;
     int nr = armature_.radial_filaments();
     double arm_center_init = armature_.position();
@@ -169,6 +186,75 @@ void SimBatch<SP>::compute_all_M1_dM1() {
             batch_M1_(s,si*F+fi)=hM[si*F+fi]; batch_dM1_(s,si*F+fi)=hdM[si*F+fi];
         }
     }
+}
+
+template<typename SP>
+void SimBatch<SP>::init_persistent_mode() {
+    if (backend_.use_persistent) {
+        int N_b = n_stages_ * N_fil_;
+        use_persistent_ = init_persistent_buffers(pbuf_, N_b, backend_);
+        if (use_persistent_) {
+            launch_persistent_kernel(pbuf_, adaptor_, N_b,
+                                          backend_.threads_per_block, 9, GpuOptLevel::Full);
+        }
+    }
+}
+
+template<typename SP>
+void SimBatch<SP>::compute_all_M1_dM1_persistent() {
+    int S = n_stages_, F = N_fil_;
+    int N_b = S * F;
+    int nr = armature_.radial_filaments();
+    double arm_center_init = armature_.position();
+
+    for (int s = 0; s < num_sims_; ++s) {
+        auto& sim = sims_[s];
+        sim.all_finished = true;
+        for (int i = 0; i < S; ++i)
+            if (sim.triggered[i] && !sim.finished[i]) {
+                sim.all_finished = false; break;
+            }
+        if (sim.all_finished) continue;
+
+        double arm_center = sim.state.arm_position;
+        for (int si = 0; si < S; ++si) {
+            for (int fi = 0; fi < F; ++fi) {
+                int i = fi / nr + 1, j = fi % nr + 1;
+                double z_rel = armature_.filament_axial_position(i) - arm_center_init;
+                int idx = si * F + fi;
+                pbuf_.seps[idx] = arm_center + z_rel - coils_[si].position();
+            }
+        }
+
+        // Persistent blocks are indexed as si * F + fi.  Process the full
+        // fixed index space so inactive pairs cannot shift later geometry.
+        *pbuf_.active_pairs = N_b;
+        __sync_synchronize();
+        for (int i = 0; i < N_b; ++i)
+            pbuf_.doorbell[i] = 1;
+        __sync_synchronize();
+        ++*pbuf_.batch_id;
+
+        for (int i = 0; i < N_b; ++i) {
+            while (pbuf_.doorbell[i] != 0)
+                __sync_synchronize();
+        }
+
+        for (int si = 0; si < S; ++si)
+            for (int fi = 0; fi < F; ++fi) {
+                int idx = si * F + fi;
+                batch_M1_(s, idx)  = pbuf_.out_M[idx];
+                batch_dM1_(s, idx) = pbuf_.out_dM[idx];
+            }
+    }
+}
+
+template<typename SP>
+void SimBatch<SP>::compute_all_M1_dM1() {
+    if (use_persistent_)
+        compute_all_M1_dM1_persistent();
+    else
+        compute_all_M1_dM1_fallback();
 }
 
 template<typename SP>
@@ -254,8 +340,35 @@ template<typename SP>
 bool SimBatch<SP>::check_termination(SimInstance& sim, const TerminationPolicy& policy) const {
     if(policy.enable_bound_check&&sim.state.arm_position>=policy.barrel_end_position)return true;
     if(sim.step_count>=policy.max_steps)return true;
-    for(int i=0;i<n_stages_;++i)if(sim.triggered[i]&&!sim.finished[i])return false;
-    return true;
+    bool all_finished = true;
+    for(int i=0;i<n_stages_;++i)
+        if(sim.triggered[i]&&!sim.finished[i]){all_finished=false;break;}
+    if (all_finished) return true;
+
+    if (policy.enable_velocity_check &&
+        sim.step_count >= policy.velocity_decay_steps &&
+        static_cast<int>(sim.result.history.size()) >= policy.velocity_decay_steps + 1) {
+        bool decaying = true;
+        const auto& history = sim.result.history;
+        const int n = static_cast<int>(history.size());
+        for (int i = 0; i < policy.velocity_decay_steps; ++i) {
+            if (history[n - 1 - i].state.arm_velocity >=
+                history[n - 2 - i].state.arm_velocity) {
+                decaying = false;
+                break;
+            }
+        }
+        if (decaying) {
+            Eigen::MatrixXd dM(n_stages_, N_fil_);
+            const int sid = static_cast<int>(&sim - sims_.data());
+            for (int stage = 0; stage < n_stages_; ++stage)
+                for (int filament = 0; filament < N_fil_; ++filament)
+                    dM(stage, filament) = batch_dM1_(sid, stage * N_fil_ + filament);
+            const double acceleration = compute_force(sim, dM) / armature_.mass();
+            if (std::abs(acceleration) < policy.accel_threshold) return true;
+        }
+    }
+    return false;
 }
 
 template<typename SP> void SimBatch<SP>::prepare_summary(SimInstance& sim) {
@@ -281,6 +394,9 @@ template<typename SP> void SimBatch<SP>::step_all() {
 
 template<typename SP> void SimBatch<SP>::run(){run(TerminationPolicy::defaults());}
 template<typename SP> void SimBatch<SP>::run(const TerminationPolicy& policy) {
+    for (const auto& sim : sims_)
+        if (!sim.configured)
+            throw std::logic_error("SimBatch: set_excitations must configure every simulation before run");
     while(true){bool any=false;for(int s=0;s<num_sims_;++s)if(!check_termination(sims_[s],policy)){any=true;break;}if(!any)break;step_all();}
     for(int s=0;s<num_sims_;++s)prepare_summary(sims_[s]);
 }

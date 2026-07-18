@@ -129,8 +129,8 @@ namespace coilgun::physics {
         double density;            // 质量密度 (kg/m³)
     };
 
-    extern const MaterialProperties COPPER;        // 1.75e-8 Ω·m, 0.0039 K⁻¹, 8960 kg/m³
-    extern const MaterialProperties ALUMINUM;      // 2.82e-8 Ω·m, 0.0040 K⁻¹, 2700 kg/m³
+    extern const MaterialProperties COPPER;        // 1.75e-8 Ω·m, 0.0041 K⁻¹, 8960 kg/m³
+    extern const MaterialProperties ALUMINUM;      // 2.82e-8 Ω·m, 0.0042 K⁻¹, 2700 kg/m³
 
     enum class ArmatureMaterial { Aluminum, Copper };
 
@@ -258,7 +258,7 @@ double coilgun::physics::inductance_shape_factor_reference(double q, double p); 
 空心圆柱线圈的自感为：
 
 ```
-L = μ₀ · nc² · ri³ · T(q, p)
+L = 2π · μ₀ · nc² · ri⁵ · T(q, p)
 ```
 
 其中 `nc = N / ((ro - ri) × l)` 为匝密度，`ri` 为内半径，`T(q, p)` 为无量纲形状因子，`q = 长度 / 内半径`，`p = 外半径 / 内半径`。
@@ -281,7 +281,7 @@ L = μ₀ · nc² · ri³ · T(q, p)
 **示例**：
 
 ```cpp
-// 查表（q=5, p=3 均在范围内）：
+// q = 0.05/0.01 = 5 超出查表范围，因此回落到精确计算：
 double L1 = self_inductance(0.01, 0.03, 0.05, 1e5);
 
 // q = 0.0002/0.01 = 0.02 < 0.05 — 触发精确回落：
@@ -711,7 +711,7 @@ sim.run(pol);
 ```cpp
 #include <coilgun/simulation/single_stage_sim.hpp>
 
-template<typename SP = EulerStepper>
+template<typename StepperPolicy = EulerStepper>
 class SingleStageSim {
 public:
     SingleStageSim(
@@ -747,9 +747,9 @@ double v2 = sim.result().summary.muzzle_velocity;  // 与 v1 完全相同
 #include <coilgun/simulation/multi_stage_sim.hpp>
 
 enum class OptimizationLevel {
-    Reference   = 0,   // 全部参考性计算：自感精确计算、无距离截断、固定 9 点 GL 积分
-    LookupTable = 1,   // 仅启用 T(q,p) 查表加速自感计算，其他为参考性计算
-    Full        = 2    // 全优化：查表 + 距离截断 + 自适应 GL 阶数（近 9 远 4）
+    Reference   = 0,   // 固定 9 点互感求积，无距离截断
+    LookupTable = 1,   // 保留给组件级 T(q,p) 查表选择；当前运行时路径与 Reference 相同
+    Full        = 2    // 距离截断 + 互感自适应 9/4 点求积
 };
 ```
 
@@ -831,7 +831,7 @@ struct MultiStageResult {
 ```cpp
 #include <coilgun/simulation/multi_stage_sim.hpp>
 
-template<typename SP = EulerStepper>
+template<typename StepperPolicy = EulerStepper>
 class MultiStageSim {
 public:
     static constexpr int kMaxStages = 50;   // 最大级数上限
@@ -865,7 +865,7 @@ public:
 
 **热模式**：当 `enable_thermal = true` 时，每个电枢纤维经历绝热焦耳加热（NumericalModel §6）。电阻每步根据温度相关电阻率更新。
 
-**优化**：`opt_level` 参数控制运行时计算优化，独立于组件构造时的自感计算模式（后者在构造 DrivingCoil/Armature 时已确定）。在 `Reference` 级别，所有互感计算使用固定 9 点 Gauss-Legendre 求积且无距离截断。在 `Full` 级别，远处线圈-纤维对被跳过，近处使用 9 点、远处使用 4 点求积。
+**优化**：`opt_level` 参数控制运行时互感计算，独立于组件构造时确定的自感计算模式。`Reference` 和 `LookupTable` 当前使用相同运行时路径：固定 9 点 Gauss-Legendre 求积且无距离截断。`LookupTable` 仅为 API 兼容保留，不会回溯改变组件已经计算好的自感。`Full` 会跳过远处级，并对近处使用 9 点、远处使用 4 点求积。
 
 ---
 
@@ -1055,6 +1055,7 @@ struct GpuBackend {
     int     threads_per_block = 512;   ///< 4D 积分 kernel 的每 block 线程数。
     size_t  max_batch_sims    = 256;   ///< 批量仿真缓冲区的预分配上限。
     bool    enable_profiling  = false; ///< 插入 NVTX 范围标记，用于 nsight 分析。
+    bool    use_persistent    = true;  ///< 使用持久化 kernel（映射内存 + 门铃协议）。false 或 cudaHostAllocMapped 失败时回退到逐对 kernel 启动。
 };
 
 }
@@ -1063,9 +1064,10 @@ struct GpuBackend {
 | 字段 | 说明 | 默认值 |
 |-------|---------|---------|
 | `device_id` | 选择目标物理 GPU（多 GPU 系统相关）。 | `0` |
-| `threads_per_block` | 4D GL 积分 kernel 的每 block 线程数。必须是 2 的幂且 ≤ 1024。较大值减少每线程循环次数但增加共享内存压力。 | `512` |
-| `max_batch_sims` | `SimBatch` 中的最大仿真数。缓冲区预分配到此大小。超出则抛出 `std::runtime_error`。 | `256` |
+| `threads_per_block` | 4D GL 积分 kernel 请求的每 block 线程数。持久化启动器会将大于 512 的值截断；调用方应使用不大于 512 的正数 2 的幂。 | `512` |
+| `max_batch_sims` | `SimBatch` 中的最大仿真数。`SimBatch` 对超过该值的 `num_sims` 抛出 `std::invalid_argument`；该字段本身不负责分配缓冲区。 | `256` |
 | `enable_profiling` | 为 true 时，在每个 `step()` 周围插入 NVTX push/pop 范围用于 GPU 时间线分析。 | `false` |
+| `use_persistent` | 为 true 时，在构造时启动持久化 kernel，使用映射内存和门铃协议进行 host-device 同步（每步零 kernel launch overhead）。false 或 cudaHostAllocMapped 失败时回退到逐对 kernel 启动。需要计算能力 ≥ 6.0。 | `true` |
 
 **示例**：
 
@@ -1085,8 +1087,9 @@ be.threads_per_block = 1024;  // 最大化并行度
 namespace coilgun::simulation::cuda {
 
 enum class GpuOptLevel {
-    Standard = 0,   ///< n_nodes=9，无距离截断。用于调试/验证。
-    Full     = 1,   ///< 距离截断（>10× 线圈长度）+ 固定 n_nodes=9。生产环境。
+    Standard   = 0,   ///< n_nodes=9，无距离截断。用于调试/验证。
+    Full       = 1,   ///< 距离截断（>10× 线圈长度）+ 固定 n_nodes=9。生产环境。
+    Aggressive = 2,   ///< FP32 integrand + FP64 reduction，距离截断，n_nodes=9。大规模参数扫描。
 };
 
 }
@@ -1094,8 +1097,9 @@ enum class GpuOptLevel {
 
 | 等级 | 距离截断 | GL 阶数 | 行为 |
 |:-----:|:---------------:|:--------:|-----------|
-| `Standard` | 否 | n_nodes = 9 | 所有 (stage, filament) 对都处理，即使 stage 距离电枢很远。kernel 使用 9 个 GL 节点（6561 个积分点）。最安全的设置。 |
+| `Standard` | 否 | n_nodes = 9 | 所有 (stage, filament) 对都处理。kernel 使用 9 个 GL 节点（6561 个积分点）。最安全的设置。 |
 | `Full` | 是 | n_nodes = 9 | 距离电枢超过 10× 线圈长度的 stage 被完全跳过。在典型距离下所有活跃 stage 都在范围内。 |
+| `Aggressive` | 是 | n_nodes = 9 | 与 `Full` 相同但 integrand 使用 FP32 算术（含 FP32 AGM 椭圆积分）和 FP64 累加。消费级 GPU 上可获得 3-5× 加速。精度损失微小。 |
 
 **注意**：GPU 后端不支持自适应 GL 阶数（n_nodes=4/9 混合）。GPU 上使用 n_nodes=4 会导致共享内存归约的非确定性浮点漂移（仅 8 个 warp 中的 3 个有实际工作）。CPU `OptimizationLevel::Full` 同时使用距离截断和自适应积分；GPU `GpuOptLevel::Full` 仅使用距离截断。
 
@@ -1309,7 +1313,7 @@ int main() {
 | 方面 | CPU | GPU |
 |--------|-----|-----|
 | M/dM 计算 | OpenMP 并行化 | CUDA kernel（每对一个 block） |
-| 优化等级 | `OptimizationLevel`（3 级） | `GpuOptLevel`（2 级） |
+| 优化等级 | `OptimizationLevel`（3 级） | `GpuOptLevel`（3 级） |
 | 自适应 GL 阶数 | n_nodes=9/4（距离决定） | 仅 n_nodes=9 |
 | 温度更新 | OpenMP 并行化 | CPU 串行循环 |
 | 力求和 | OpenMP 归约 | 串行循环 |
@@ -1366,7 +1370,7 @@ public:
 |-----------|-------------|
 | `coils` | 共享驱动线圈几何（拷贝）。所有仿真相同。 |
 | `armature` | 共享电枢几何和丝元离散化（拷贝）。 |
-| `num_sims` | 并发仿真数。必须 ≤ GpuBackend 中的 `max_batch_sims`。 |
+| `num_sims` | 仿真数量。必须为正数且 ≤ `GpuBackend` 中的 `max_batch_sims`。 |
 | `dt` | 固定时间步长（s），所有仿真共享。 |
 | `backend` | GPU 后端配置。 |
 
@@ -1379,7 +1383,7 @@ public:
 | `result(sim_id)` | 获取特定仿真的 `MultiStageResult`。 |
 | `num_sims()` | 本批次中的仿真数。 |
 
-**执行模型**：`SimBatch` 内部管理一个 `GpuAdaptor` 和一个 per-sim 状态对象数组。每个时间步先对所有仿真检查触发器和静默 stage，然后通过 GPU kernel launch 循环计算所有活跃对的 M1/dM1，最后在 CPU 上对每个仿真独立求解 ODE 和更新运动学。
+**执行模型**：`SimBatch` 内部管理一个 `GpuAdaptor` 和一个 per-sim 状态对象数组。当 `GpuBackend::use_persistent=true`（默认值）时，一个持久化 CUDA kernel 服务固定的 `(stage, filament)` 对索引空间，通过映射主机缓冲区传递每个仿真的分离值和结果。主机侧仍负责检查触发器、求解 ODE、更新运动学，并串行处理各仿真。当 `use_persistent=false` 时回退到逐对 kernel 启动路径。
 
 **示例——电容电压参数扫描**：
 
@@ -1434,7 +1438,7 @@ int main() {
 }
 ```
 
-**注意**：当前实现对每个 step 的每个 (stage, filament) 对、每个仿真发射一个 CUDA kernel（对典型规模 launch overhead ~100 µs/步）。功能上等价于用循环调用 `GpuMultiStageSim`，但提供了统一的 API 和共享几何。持久化 kernel 优化（每步零 kernel launch）已设计，计划在后续版本中实现。
+**注意**：回退实现会在每个 step 为每个仿真的每个 (stage, filament) 对发射一个 CUDA kernel。默认的持久化路径在构造时只启动一次 worker kernel，之后通过映射内存门铃通信，避免每步启动 kernel。持久化模式仍属实验性功能，可通过 `GpuBackend::use_persistent` 禁用。
 
 ---
 
@@ -1521,10 +1525,9 @@ public:
 ┌─────────────────────────────────────────────┐
 │ Host (CPU)                                   │
 │   check_triggers() → extinguish_quiet()       │
-│   对每个 (stage, filament) 对:               │
-│     计算分离 → CUDA kernel launch            │
-│   cudaDeviceSynchronize()                    │
-│   cudaMemcpy D→H: M1_mat, dM1_mat            │
+│   填充映射分离值 / 门铃                         │
+│   等待持久化 kernel（或启动逐对 kernel）       │
+│   读取映射结果（或 cudaMemcpy D→H）            │
 │   build_system_matrix [L - M_I]              │
 │   Eigen LDLT 求解 → 新电流                    │
 │   compute_force(F = Σ I_d × I_f × dM)        │
@@ -1532,6 +1535,7 @@ public:
 │   更新电容电压 / 温度                          │
 ├─────────────────────────────────────────────┤
 │ Device (GPU)                                  │
+│   persistent_batch_kernel 或                 │
 │   mutual_inductance_coil_pair_kernel          │
 │     每 block: 512 threads × ~13 次循环        │
 │     每次循环: 1 对椭圆积分                     │
@@ -1569,7 +1573,7 @@ GPU 优势随问题规模增大而提升，因为 4D 积分 kernel（每对 6561
 
 ### 线程安全
 
-GPU 类是**单线程**的——不支持在同一实例上并发调用 `step()`。多仿真并发通过 `SimBatch`（串行化）或创建独立的 `GpuMultiStageSim` 实例并绑定到不同的 `cudaStream_t` 来实现。
+GPU 类是**单线程**的——不支持在同一实例上并发调用 `step()`。`SimBatch` 将主机侧仿真更新串行化；公开 GPU 仿真构造函数不接收 `cudaStream_t`，因此独立 stream 执行不属于此 API。
 
 底层 CUDA kernel 对 host 是线程安全的：映射内存和 kernel launch 使用默认流，操作被串行化。
 
@@ -1579,8 +1583,9 @@ GPU 类是**单线程**的——不支持在同一实例上并发调用 `step()`
 |---|---|
 | 自适应 GL 阶数（n_nodes=4/9） | 已移除。GPU 上使用 4 个 GL 节点会导致非确定性浮点漂移（B1）。 |
 | 热模式 | 温度更新在 CPU 上运行（单线程）。该计算 <1% 运行时间。 |
-| Batch kernel | 真正的 batch kernel（单次 grid launch 处理所有仿真）已设计（P0）但被 nvcc 跨模块 struct-layout 问题阻塞。持久化 kernel 优化（D1-D2）是计划中的替代方案。 |
+| 持久化 kernel | 实验性。使用映射内存和门铃协议进行 host-device 同步。三个 GPU 仿真类默认使用；`use_persistent=false` 时选择回退路径。分配失败时回退到逐对 kernel 启动。 |
 | CUDA Graphs | 未实现。需要每步固定 n_active（无动态触发/终止分支）。 |
+| 双缓冲 | 未实现。持久化结果在 CPU LDLT 求解前同步，不承诺 CPU/GPU 重叠执行。 |
 
 ---
 
@@ -1606,5 +1611,5 @@ GPU 类是**单线程**的——不支持在同一实例上并发调用 `step()`
 ### 测试预设
 
 ```sh
-ctest --preset debug   # 运行全部 17 套测试
+ctest --preset debug   # 运行全部 18 个已配置测试
 ```

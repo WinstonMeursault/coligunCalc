@@ -13,7 +13,9 @@
 #include "coilgun/simulation/cuda/gpu_single_stage_sim.hpp"
 #include "coilgun/physics/mutual_inductance.hpp"
 #include "coilgun/physics/constants.hpp"
+#include <atomic>
 #include <cmath>
+#include <iostream>
 #include <utility>
 
 namespace coilgun::physics {
@@ -76,13 +78,14 @@ GpuSingleStageSim<SP>::GpuSingleStageSim(
     adaptor_.setup({coil_}, armature_, 9);
     physics::upload_gl_nodes(9);
 
+    init_persistent_mode();
+
     M1_mat_.resize(1, N);
     dM1_mat_.resize(1, N);
     L_total_.resize(N + 1, N + 1);
     RHS_.resize(N + 1);
 
     state_.currents.resize(N + 1);
-    state_.currents.setZero();
     state_.arm_position = armature_.position();
     state_.arm_velocity = armature_.velocity();
     if (enable_thermal_) {
@@ -92,7 +95,25 @@ GpuSingleStageSim<SP>::GpuSingleStageSim(
 }
 
 template<typename SP>
-GpuSingleStageSim<SP>::~GpuSingleStageSim() = default;
+GpuSingleStageSim<SP>::~GpuSingleStageSim() {
+    if (use_persistent_) {
+        *pbuf_.shutdown = 1;
+        cudaDeviceSynchronize();
+        free_persistent_buffers(pbuf_);
+    }
+}
+
+template<typename SP>
+void GpuSingleStageSim<SP>::init_persistent_mode() {
+    if (backend_.use_persistent) {
+        int N_fil = armature_.total_filaments();
+        use_persistent_ = init_persistent_buffers(pbuf_, N_fil, backend_);
+        if (use_persistent_) {
+            launch_persistent_kernel(pbuf_, adaptor_, N_fil,
+                                      backend_.threads_per_block, 9, opt_level_);
+        }
+    }
+}
 
 template<typename SP>
 void GpuSingleStageSim<SP>::build_filament_M_matrix() {
@@ -115,7 +136,7 @@ void GpuSingleStageSim<SP>::build_filament_M_matrix() {
 }
 
 template<typename SP>
-void GpuSingleStageSim<SP>::compute_M1_dM1() {
+void GpuSingleStageSim<SP>::compute_M1_dM1_fallback() {
     int N = N_fil_;
     int nr = armature_.radial_filaments();
     double arm_center = state_.arm_position;
@@ -157,6 +178,46 @@ void GpuSingleStageSim<SP>::compute_M1_dM1() {
         M1_mat_(0, k)  = h_M[k];
         dM1_mat_(0, k) = h_dM[k];
     }
+}
+
+template<typename SP>
+void GpuSingleStageSim<SP>::compute_M1_dM1_persistent() {
+    int F = armature_.total_filaments(), N_b = F;
+    int nr = armature_.radial_filaments();
+    double arm_center_init = armature_.position();
+
+    // Submit one batch and wait for its mapped results before solving the ODE.
+    // The previous double-buffer fields did not advance newly completed data,
+    // which made the solver reuse a stale one-step-old matrix.
+    double arm_center = state_.arm_position;
+    for (int fi = 0; fi < F; ++fi) {
+        int i = fi / nr + 1, j = fi % nr + 1;
+        double z_rel = armature_.filament_axial_position(i) - arm_center_init;
+        pbuf_.seps[fi] = arm_center + z_rel - coil_.position();
+    }
+    *pbuf_.active_pairs = F;
+    __sync_synchronize();
+    for (int i = 0; i < N_b; ++i) pbuf_.doorbell[i] = 1;
+    __sync_synchronize();
+    ++*pbuf_.batch_id;
+
+    for (int i = 0; i < N_b; ++i) {
+        while (pbuf_.doorbell[i] != 0) __sync_synchronize();
+    }
+    __sync_synchronize();
+    M1_mat_.resize(1, F); dM1_mat_.resize(1, F);
+    for (int fi = 0; fi < F; ++fi) {
+        M1_mat_(0, fi)  = pbuf_.out_M[fi];
+        dM1_mat_(0, fi) = pbuf_.out_dM[fi];
+    }
+}
+
+template<typename SP>
+void GpuSingleStageSim<SP>::compute_M1_dM1() {
+    if (use_persistent_)
+        compute_M1_dM1_persistent();
+    else
+        compute_M1_dM1_fallback();
 }
 
 template<typename SP>

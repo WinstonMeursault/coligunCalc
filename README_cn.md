@@ -38,7 +38,7 @@
 ```
 include/coilgun/   — 公开头文件（核心类型、物理层、组件层、仿真器）
 src/               — 库实现（静态库 libcoilgun.a）
-tests/             — 单元测试与集成测试（doctest，17 套）
+tests/             — 单元测试与集成测试（doctest，18 个已配置测试）
 tools/             — T(q,p) 查表生成工具
 docs/              — 文档（API 参考中/英文、数值模型、设计文档）
 .references/       — 参考论文 PDF（gitignored，仅本地）
@@ -141,27 +141,30 @@ g++ -std=c++17 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_b
 
 ---
 
-## 测试套件（17 套，全部通过）
+## 测试套件（18 套）
 
-| 套件 | 覆盖范围 |
-|-------|----------|
-| `test_elliptic` | K(k)、E(k) 与已知值对比 |
-| `test_struve` | H₀(x)、H₁(x) 与 SciPy 参考值对比 |
-| `test_quadrature` | Gauss-Legendre/Laguerre 节点生成 |
-| `test_lookup` | T(q,p) 表 + 双线性插值 vs 参考值 |
-| `test_self_inductance` | 查表 vs 精确、边界情况、精确/比较 |
-| `test_mutual_inductance` | 丝级和线圈级 M 及 dM/dz |
-| `test_driving_coil` | 几何参数、R、L、匝密度 |
-| `test_armature` | 丝几何、逐丝 R/L/质量 |
-| `test_single_stage_sim` | 电容、续流、Euler/RK4、热模式 |
-| `test_multi_stage_sim` | 单级等效性、两级、触发、优化等级 |
-| `test_integration` | 端到端单级场景 |
-| `test_gpu_elliptic` | GPU K(k)、E(k) vs CPU 参考 |
-| `test_gpu_filament` | GPU 丝级 M、dM/dz vs CPU |
-| `test_gpu_coil_pair` | GPU 线圈-丝 M、dM/dz vs CPU |
-| `test_gpu_vs_cpu_single` | GPU 单级端到端 vs CPU (ε < 0.5%) |
-| `test_gpu_vs_cpu_multi` | GPU 多级端到端 vs CPU (ε < 0.5%) |
-| `test_gpu_batch` | GPU 批量仿真模式 |
+| 套件 | 覆盖范围 | 状态 |
+|-------|----------|:----:|
+| `test_elliptic` | K(k)、E(k) 与已知值对比 | ✅ |
+| `test_struve` | H₀(x)、H₁(x) 与 SciPy 参考值对比 | ✅ |
+| `test_quadrature` | Gauss-Legendre/Laguerre 节点生成 | ✅ |
+| `test_lookup` | T(q,p) 表 + 双线性插值 vs 参考值 | ✅ |
+| `test_self_inductance` | 查表 vs 精确、边界情况、精确/比较 | ✅ |
+| `test_mutual_inductance` | 丝级和线圈级 M 及 dM/dz | ✅ |
+| `test_driving_coil` | 几何参数、R、L、匝密度 | ✅ |
+| `test_armature` | 丝几何、逐丝 R/L/质量 | ✅ |
+| `test_single_stage_sim` | 电容、续流、Euler/RK4、热模式 | ✅ |
+| `test_multi_stage_sim` | 单级等效性、两级、触发、优化等级 | ✅ |
+| `test_integration` | 端到端单级场景 | ✅ |
+| `test_gpu_elliptic` | GPU K(k)、E(k) vs CPU 参考 | ✅ |
+| `test_gpu_filament` | GPU 丝级 M、dM/dz vs CPU | ✅ |
+| `test_gpu_coil_pair` | GPU 线圈-丝 M、dM/dz vs CPU | ✅ |
+| `test_gpu_vs_cpu_single` | GPU 单级端到端 vs CPU (ε < 0.5%) | ✅ |
+| `test_gpu_vs_cpu_multi` | GPU 多级端到端 vs CPU (ε < 0.5%) | ❌ |
+| `test_gpu_batch` | GPU 批量仿真模式 | ⏱️ |
+| `test_gpu_sim_batch` | SimBatch 持久化 vs 回退一致性 | ✅ |
+
+> 16 项通过，1 项失败（`test_gpu_vs_cpu_multi` — GPU 持久化 kernel 精度），1 项超时（`test_gpu_batch` — 开发中）。
 
 ---
 
@@ -170,8 +173,7 @@ g++ -std=c++17 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_b
 - [API 参考（英文）](docs/API.md) — 完整 C++ 函数与类 API
 - [API 参考（中文）](docs/API_cn.md) — 中文版
 - [数值模型](docs/NumericalModel.md) — 物理推导与算法详解
-- [多级仿真设计](docs/multi_stage_sim_design.md) — 架构与实现方案
-- [82mm 测试数据集](docs/test_dataset_82mm_coilgun.md) — 向洪 (2015) 验证数据
+- [审计报告](docs/audit_report.md) — 代码库审计发现和修复计划
 
 ---
 

@@ -57,6 +57,35 @@ __host__ __device__ inline double elliptic_modulus(
     return k;
 }
 
+// --- FP32 elliptic integrals via AGM (for GpuOptLevel::Aggressive) ---
+
+/// Complete elliptic integral K(k) via AGM — FP32, device-side.
+__host__ __device__ inline float elliptic_k_f32(float k) {
+    float a = 1.0f, b = sqrtf(1.0f - k * k);
+    for (int i = 0; i < 8; ++i) {
+        float an = 0.5f * (a + b);
+        float bn = sqrtf(a * b);
+        if (fabsf(an - bn) < 1e-7f) { a = an; break; }
+        a = an; b = bn;
+    }
+    return 1.5707963267948966f / a; // pi/2 / a
+}
+
+/// Complete elliptic integral E(k) via AGM — FP32, device-side.
+__host__ __device__ inline float elliptic_e_f32(float k) {
+    float a = 1.0f, b = sqrtf(1.0f - k * k);
+    float c = k * k, s = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        float an = 0.5f * (a + b);
+        float bn = sqrtf(a * b);
+        float cn = 0.25f * (a - b) * (a - b);
+        s += c * (1 << i);  // c * 2^i
+        if (fabsf(an - bn) < 1e-7f) { a = an; break; }
+        a = an; b = bn; c = cn;
+    }
+    return 1.5707963267948966f * (1.0f - s) / a; // pi/2 * (1-s) / a
+}
+
 } // namespace coilgun::physics
 
 #endif // __CUDACC__

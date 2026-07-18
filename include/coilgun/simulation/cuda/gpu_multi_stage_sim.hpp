@@ -24,6 +24,8 @@
 #include <memory>
 #include <vector>
 
+#include "coilgun/simulation/cuda/persistent_kernel.cuh"
+
 namespace coilgun::simulation::cuda {
 
 /**
@@ -32,8 +34,9 @@ namespace coilgun::simulation::cuda {
  * Public API is identical to MultiStageSim. Internally, the 4D
  * Gauss-Legendre mutual inductance integration is offloaded to CUDA.
  * The linear system solve (Eigen LDLT) and kinematic/thermal updates
- * remain on CPU. Inter-coil mutual inductance is omitted for
- * simplicity.
+ * remain on CPU. Inter-coil mutual inductance is precomputed at
+ * construction and applied to the coil-coil off-diagonal block of the
+ * system matrix (identical treatment to CPU MultiStageSim).
  *
  * @tparam SP Time-stepping policy (EulerStepper or RK4Stepper).
  *
@@ -148,6 +151,18 @@ private:
     std::vector<double> trigger_times_;
 
     GpuAdaptor adaptor_;
+
+    bool               use_persistent_ = false;  ///< True if persistent kernel initialised successfully.
+    PersistentBuffers  pbuf_;                    ///< Mapped memory buffers for persistent kernel.
+
+    /// @brief Allocate mapped memory and launch the persistent kernel.
+    void init_persistent_mode();
+
+    /// @brief Compute M1/dM1 using the persistent kernel (mapped memory, doorbell protocol).
+    void compute_M1_dM1_persistent();
+
+    /// @brief Compute M1/dM1 using per-pair kernel launches (fallback when persistent unavailable).
+    void compute_M1_dM1_fallback();
 
     Eigen::MatrixXd M1_mat_, dM1_mat_;
     Eigen::MatrixXd L_total_;

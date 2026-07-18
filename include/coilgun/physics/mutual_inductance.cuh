@@ -58,6 +58,42 @@ __host__ __device__ inline double mutual_inductance_gradient_filament_device(
            / (4.0 * one_minus_m * sqrt_ab) * bracket;
 }
 
+// --- FP32 filament mutual inductance (for GpuOptLevel::Aggressive) ---
+
+constexpr float kMU0_f32 = 1.2566370614359173e-06f;
+
+/// FP32 mutual inductance between two coaxial loops — device-compatible.
+__host__ __device__ inline float mutual_inductance_filament_f32(
+        float radius_a, float radius_b, float separation) {
+    float num = 4.0f * radius_a * radius_b;
+    float den = (radius_a + radius_b) * (radius_a + radius_b) + separation * separation;
+    float k = sqrtf(num / den);
+    k = fmaxf(1e-12f, fminf(k, 1.0f - 1e-10f));
+    float K = elliptic_k_f32(k);
+    float E = elliptic_e_f32(k);
+    float sqrt_ab = sqrtf(radius_a * radius_b);
+    return kMU0_f32 * sqrt_ab * ((2.0f / k - k) * K - (2.0f / k) * E);
+}
+
+/// FP32 mutual inductance gradient — device-compatible.
+__host__ __device__ inline float mutual_inductance_gradient_filament_f32(
+        float radius_a, float radius_b, float separation) {
+    if (fabsf(separation) < 1e-16f) return 0.0f;
+    float abs_sep = fabsf(separation);
+    float num = 4.0f * radius_a * radius_b;
+    float den = (radius_a + radius_b) * (radius_a + radius_b) + abs_sep * abs_sep;
+    float k = sqrtf(num / den);
+    k = fmaxf(1e-12f, fminf(k, 1.0f - 1e-10f));
+    float m = k * k;
+    float one_minus_m = 1.0f - m;
+    float K = elliptic_k_f32(k);
+    float E = elliptic_e_f32(k);
+    float sqrt_ab = sqrtf(radius_a * radius_b);
+    float bracket = 2.0f * one_minus_m * K - (2.0f - m) * E;
+    float sign = (separation > 0.0f) ? 1.0f : -1.0f;
+    return sign * kMU0_f32 * k * abs_sep / (4.0f * one_minus_m * sqrt_ab) * bracket;
+}
+
 } // namespace coilgun::physics
 
 #endif // __CUDACC__
