@@ -1,158 +1,80 @@
 /**
  * @file gpu_single_stage_sim.hpp
  * @brief GPU-accelerated single-stage coilgun simulation.
- * @author Winston Meursault
- *
- * Identical public API to SingleStageSim. Internally uses CUDA kernels
- * for the 4D mutual inductance integration and Eigen LDLT for the linear
- * system solve (identical to CPU path).
  */
 
 #pragma once
 
 #include "coilgun/simulation/single_stage_sim.hpp"
-#include "coilgun/simulation/excitation.hpp"
-#include "coilgun/simulation/termination.hpp"
-#include "coilgun/simulation/time_stepper.hpp"
-#include "coilgun/components/driving_coil.hpp"
-#include "coilgun/components/armature.hpp"
-#include "coilgun/simulation/cuda/gpu_adaptor.hpp"
 #include "coilgun/simulation/cuda/gpu_backend.hpp"
-#include <Eigen/Dense>
-#include <memory>
+#include "coilgun/simulation/cuda/gpu_engine.hpp"
 
-#include "coilgun/simulation/cuda/persistent_kernel.cuh"
+#include <memory>
 
 namespace coilgun::simulation::cuda {
 
-/**
- * @brief GPU-accelerated single-stage coilgun simulator.
- *
- * Public API is identical to SingleStageSim. Internally, the 4D
- * Gauss-Legendre mutual inductance integration is offloaded to CUDA.
- * The linear system solve (Eigen LDLT) and kinematic/thermal updates
- * remain on CPU.
- *
- * @tparam StepperPolicy Time-stepping policy (EulerStepper or RK4Stepper).
- *
- * @see SingleStageSim
- */
+inline GpuBackend single_stage_default_backend() {
+    GpuBackend backend;
+    backend.use_persistent = false;
+    backend.backend = BackendMode::Graph;
+    return backend;
+}
+
 template<typename StepperPolicy = EulerStepper>
 class GpuSingleStageSim {
 public:
-    /**
-     * @brief Construct and initialise a GPU-accelerated single-stage simulation.
-     * @param coil Driving coil geometry (copied).
-     * @param armature Armature geometry and discretisation (copied).
-     * @param excitation Excitation source (moved-in).
-     * @param dt Fixed time step, s.
-     * @param enable_thermal Enable adiabatic filament heating.
-     * @param opt_level GPU optimisation level (default: Full).
-     * @param backend GPU backend configuration.
-     */
+    // GpuEngine currently exposes a committed-step API, not the four staged
+    // evaluations required by RK4. RK4 instantiations therefore fail loudly
+    // in step() instead of silently changing the requested integration method.
     GpuSingleStageSim(
-        components::DrivingCoil                coil,
-        components::Armature                   armature,
-        std::unique_ptr<Excitation>           excitation,
-        double                                 dt,
-        bool                                   enable_thermal = false,
-        GpuOptLevel                            opt_level = GpuOptLevel::Full,
-        const GpuBackend&                      backend = {});
+        components::DrivingCoil coil,
+        components::Armature armature,
+        std::unique_ptr<Excitation> excitation,
+        double dt,
+         bool enable_thermal = false,
+         GpuOptLevel opt_level = GpuOptLevel::Full,
+         const GpuBackend& backend = single_stage_default_backend(),
+         BackendMode explicit_backend = BackendMode::Auto);
 
-    ~GpuSingleStageSim();
+    ~GpuSingleStageSim() = default;
 
     GpuSingleStageSim(const GpuSingleStageSim&) = delete;
     GpuSingleStageSim& operator=(const GpuSingleStageSim&) = delete;
 
-    /**
-     * @brief Advance one time step.
-     * @return Reference to the newly recorded SimStep.
-     */
     const SimStep& step();
-
-    /**
-     * @brief Run to completion using the default termination policy.
-     * @return Simulation result (history + summary).
-     */
     const SimResult& run();
-
-    /**
-     * @brief Run to completion with a custom termination policy.
-     * @param policy Termination criteria.
-     * @return Simulation result.
-     */
     const SimResult& run(const TerminationPolicy& policy);
-
-    /**
-     * @brief Reset to initial conditions.
-     *
-     * Restores all currents to zero, armature position/velocity to their
-     * initial values, resets the excitation, and clears the result history.
-     */
     void reset();
 
-    /// @brief Result after the last run().
-    const SimResult& result()  const { return result_; }
-    /// @brief Current internal state.
-    const SimState&  state()   const { return state_; }
-    /// @brief Fixed time step, s.
-    double  dt()          const { return dt_; }
-    /// @brief Step count since construction or last reset().
-    int     step_count()  const { return step_count_; }
+    const SimResult& result() const { return result_; }
+    const SimState& state() const { return state_; }
+    double dt() const { return dt_; }
+    int step_count() const { return step_count_; }
+    // The wrapper owns the engine and its CUDA/CPU resources through RAII.
+    // The moved-in excitation remains owned by this wrapper; no raw device
+    // pointer is exposed by this interface.
+    const ExecutionReport& execution_report() const { return engine_->report(); }
+    std::vector<double> filament_resistances() const { return engine_->state().resistances; }
 
 private:
-    /// @brief Compute M1 and dM1 matrices using GPU kernel.
-    void compute_M1_dM1();
-
-    SimState compute_derivatives(const SimState& s);
-    void     build_filament_M_matrix();
-    double   compute_force(const SimState& s);
-    void     update_temperatures(SimState& s, double dt_sub);
-    void     record_step(double cap_voltage);
-    bool     check_termination(const TerminationPolicy& policy);
-    void     prepare_summary();
+    void sync_state_from_engine();
+    double compute_force() const;
+    void record_step();
+    bool check_termination(const TerminationPolicy& policy) const;
+    void prepare_summary();
 
     components::DrivingCoil coil_;
-    components::Armature    armature_;
+    components::Armature armature_;
     std::unique_ptr<Excitation> excitation_;
     double dt_;
-    bool   enable_thermal_;
+    bool enable_thermal_;
     GpuOptLevel opt_level_;
-    GpuBackend  backend_;
-
-    int N_fil_;
-    double R_d_, L_d_;
-
-    Eigen::MatrixXd M_mat_;
-    Eigen::VectorXd L_fil_;
-    Eigen::VectorXd R_fil_ref_;
-    Eigen::VectorXd R_fil_;
-    Eigen::VectorXd mass_fil_;
-
-    GpuAdaptor adaptor_;
-
-    bool               use_persistent_ = false;  ///< True if persistent kernel initialised successfully.
-    PersistentBuffers  pbuf_;                    ///< Mapped memory buffers for persistent kernel.
-
-    /// @brief Allocate mapped memory and launch the persistent kernel.
-    void init_persistent_mode();
-
-    /// @brief Compute M1/dM1 using the persistent kernel (mapped memory, doorbell protocol).
-    void compute_M1_dM1_persistent();
-
-    /// @brief Compute M1/dM1 using per-pair kernel launches (fallback when persistent unavailable).
-    void compute_M1_dM1_fallback();
-
-    Eigen::MatrixXd M1_mat_;
-    Eigen::MatrixXd dM1_mat_;
-
-    Eigen::MatrixXd L_total_;
-    Eigen::VectorXd RHS_;
-
-    SimState  state_;
+    GpuBackend backend_;
+    BackendMode explicit_backend_;
+    std::unique_ptr<GpuEngine> engine_;
+    SimState state_;
     SimResult result_;
-    int       step_count_ = 0;
-    StepperPolicy stepper_;
+    int step_count_ = 0;
 };
 
 } // namespace coilgun::simulation::cuda

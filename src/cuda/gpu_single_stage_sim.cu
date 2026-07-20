@@ -1,398 +1,262 @@
 /**
  * @file gpu_single_stage_sim.cu
- * @brief GPU-accelerated single-stage coilgun simulation — implementation.
- * @author Winston Meursault
- *
- * Uses CUDA kernels for the 4D Gauss-Legendre mutual inductance
- * integration. Linear system solve (Eigen LDLT) and kinematic/thermal
- * updates remain on the CPU identically to the single_stage_sim.cpp path.
- *
- * @see single_stage_sim.cpp
+ * @brief GPU single-stage compatibility wrapper over GpuEngine.
  */
 
 #include "coilgun/simulation/cuda/gpu_single_stage_sim.hpp"
-#include "coilgun/physics/mutual_inductance.hpp"
-#include "coilgun/physics/constants.hpp"
-#include <atomic>
-#include <cmath>
-#include <iostream>
-#include <utility>
 
-namespace coilgun::physics {
-    void upload_gl_nodes(int n_nodes);
-    __global__ void mutual_inductance_coil_pair_kernel(
-        double rai, double rae, double la, int na,
-        double rbi, double rbe, double lb, int nb,
-        double separation, int n_nodes,
-        double* out_M, double* out_dM);
-}
+#include "coilgun/physics/constants.hpp"
+
+#include <cuda_runtime_api.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+#include <stdexcept>
 
 namespace coilgun::simulation::cuda {
 
 namespace {
 
-double filament_axial_sep(const components::Armature& arm, int a_idx, int b_idx) {
-    int nr = arm.radial_filaments();
-    int ia = a_idx / nr + 1;
-    int ib = b_idx / nr + 1;
-    return std::abs(arm.filament_axial_position(ia) - arm.filament_axial_position(ib));
+GpuGeometryInput make_geometry(const components::DrivingCoil& coil,
+                               const components::Armature& armature,
+                               bool thermal) {
+    GpuGeometryInput geometry;
+    const auto filament_count = static_cast<std::size_t>(armature.total_filaments());
+    geometry.n_stages = 1;
+    geometry.n_filaments = filament_count;
+    geometry.thermal_enabled = thermal;
+    geometry.stage_geometry = {coil.mean_radius()};
+    geometry.stage_inner_radii = {coil.inner_radius()};
+    geometry.stage_outer_radii = {coil.outer_radius()};
+    geometry.stage_lengths = {coil.length()};
+    geometry.stage_turns = {coil.turns()};
+    geometry.stage_positions = {coil.position()};
+    geometry.filament_geometry.resize(filament_count);
+    geometry.filament_inner_radii.resize(filament_count);
+    geometry.filament_outer_radii.resize(filament_count);
+    geometry.filament_lengths.resize(filament_count);
+    geometry.filament_positions.resize(filament_count);
+    for (std::size_t k = 0; k < filament_count; ++k) {
+        const int radial = static_cast<int>(k % armature.radial_filaments()) + 1;
+        const int axial = static_cast<int>(k / armature.radial_filaments()) + 1;
+        geometry.filament_geometry[k] = armature.filament_mean_radius(radial);
+        geometry.filament_inner_radii[k] = armature.filament_inner_radius(radial);
+        geometry.filament_outer_radii[k] = armature.filament_outer_radius(radial);
+        geometry.filament_lengths[k] = armature.length() / armature.axial_filaments();
+        geometry.filament_positions[k] = armature.filament_axial_position(axial);
+    }
+    geometry.stage_resistances = {coil.resistance()};
+    geometry.stage_inductances = {coil.self_inductance()};
+    geometry.filament_resistances = armature.resistances();
+    geometry.filament_inductances = armature.inductances();
+    return geometry;
 }
 
-} // anonymous namespace
+GpuEngineState make_state(const components::Armature& armature, double dt, bool thermal) {
+    const auto filaments = static_cast<std::size_t>(armature.total_filaments());
+    GpuEngineState state;
+    state.currents.assign(filaments + 1, 0.0);
+    state.m1.assign(filaments, 0.0);
+    state.dm1.assign(filaments, 0.0);
+    state.active_mask = {1};
+    state.trigger_mask = {1};
+    state.velocity = {-armature.velocity()};
+    state.position = {0.0};
+    state.stage_voltages = {0.0};
+    state.dt = dt;
+    state.mass = armature.mass();
+    if (thermal) {
+        state.temperatures.assign(filaments, physics::T_REFERENCE);
+        state.filament_masses = armature.masses();
+        state.reference_resistances = armature.resistances();
+        state.filament_materials.assign(filaments,
+            armature.material() == physics::ArmatureMaterial::Copper ? 1 : 0);
+        state.material_density = physics::ALUMINUM.density;
+        if (armature.material() == physics::ArmatureMaterial::Copper)
+            state.material_density = physics::COPPER.density;
+    }
+    return state;
+}
+
+BackendMode effective_backend(const GpuBackend& backend, BackendMode explicit_backend) {
+    if (explicit_backend != BackendMode::Auto) return explicit_backend;
+    if (backend.backend != BackendMode::Auto) return backend.backend;
+    return backend.use_persistent ? BackendMode::Persistent : BackendMode::Direct;
+}
+
+GpuExecutionConfig make_config(GpuOptLevel opt_level, const GpuBackend& backend,
+                               bool thermal, BackendMode explicit_backend) {
+    switch (opt_level) {
+    case GpuOptLevel::Standard:
+    case GpuOptLevel::Full:
+    case GpuOptLevel::Aggressive:
+        break;
+    default:
+        throw std::invalid_argument("GPU optimization level is invalid");
+    }
+    GpuExecutionConfig config;
+    config.precision = static_cast<PrecisionMode>(static_cast<int>(opt_level));
+    config.thermal = thermal ? ThermalMode::Cpu : ThermalMode::Disabled;
+    config.backend = effective_backend(backend, explicit_backend);
+    config.solver = SolverMode::Eigen;
+    config.deterministic = config.backend != BackendMode::Persistent;
+    config.device_id = backend.device_id;
+    config.threads_per_block = backend.threads_per_block;
+    config.enable_profiling = backend.enable_profiling;
+    return config;
+}
+
+} // namespace
 
 template<typename SP>
 GpuSingleStageSim<SP>::GpuSingleStageSim(
-        components::DrivingCoil coil,
-        components::Armature    armature,
-        std::unique_ptr<Excitation> excitation,
-        double                     dt,
-        bool                       enable_thermal,
-        GpuOptLevel                opt_level,
-        const GpuBackend&          backend)
+    components::DrivingCoil coil,
+    components::Armature armature,
+    std::unique_ptr<Excitation> excitation,
+    double dt,
+    bool enable_thermal,
+    GpuOptLevel opt_level,
+    const GpuBackend& backend,
+    BackendMode explicit_backend)
     : coil_(std::move(coil)), armature_(std::move(armature)),
-      excitation_(std::move(excitation)),
-      dt_(dt), enable_thermal_(enable_thermal),
-      opt_level_(opt_level), backend_(backend)
-{
-    cudaSetDevice(backend_.device_id);
-
-    N_fil_ = armature_.total_filaments();
-    R_d_   = coil_.resistance();
-    L_d_   = coil_.self_inductance();
-
-    int N = N_fil_;
-    R_fil_ref_.resize(N); R_fil_.resize(N);
-    L_fil_.resize(N); mass_fil_.resize(N);
-    const auto& R_arm = armature_.resistances();
-    const auto& L_arm = armature_.inductances();
-    const auto& M_arm = armature_.masses();
-    for (int k = 0; k < N; ++k) {
-        R_fil_ref_(k) = R_arm[k];
-        R_fil_(k)     = R_arm[k];
-        L_fil_(k)     = L_arm[k];
-        mass_fil_(k)  = M_arm[k];
+      excitation_(std::move(excitation)), dt_(dt), enable_thermal_(enable_thermal),
+      opt_level_(opt_level), backend_(backend), explicit_backend_(explicit_backend) {
+    if (!excitation_) throw std::invalid_argument("GPU excitation must not be null");
+    if (!std::isfinite(dt_) || dt_ <= 0.0) {
+        throw std::invalid_argument("GPU dt must be positive and finite");
     }
-
-    build_filament_M_matrix();
-
-    adaptor_.setup({coil_}, armature_, 9);
-    physics::upload_gl_nodes(9);
-
-    init_persistent_mode();
-
-    M1_mat_.resize(1, N);
-    dM1_mat_.resize(1, N);
-    L_total_.resize(N + 1, N + 1);
-    RHS_.resize(N + 1);
-
-    state_.currents.resize(N + 1);
-    state_.arm_position = armature_.position();
-    state_.arm_velocity = armature_.velocity();
-    if (enable_thermal_) {
-        state_.filament_temperatures.resize(N);
-        state_.filament_temperatures.setConstant(physics::T_REFERENCE);
+    backend_.validate();
+    switch (explicit_backend_) {
+    case BackendMode::Auto:
+    case BackendMode::Graph:
+    case BackendMode::Persistent:
+    case BackendMode::Fallback:
+    case BackendMode::Direct:
+        break;
+    default:
+        throw std::invalid_argument("GPU single-stage explicit backend mode is invalid");
     }
+    const double voltage = excitation_->voltage();
+    if (!std::isfinite(voltage)) throw std::invalid_argument("GPU excitation voltage must be finite");
+    auto geometry = make_geometry(coil_, armature_, enable_thermal_);
+    auto initial_state = make_state(armature_, dt_, enable_thermal_);
+    engine_ = std::make_unique<GpuEngine>(
+        std::move(geometry), std::move(initial_state),
+        make_config(opt_level_, backend_, enable_thermal_, explicit_backend_));
+    sync_state_from_engine();
 }
 
 template<typename SP>
-GpuSingleStageSim<SP>::~GpuSingleStageSim() {
-    if (use_persistent_) {
-        *pbuf_.shutdown = 1;
-        cudaDeviceSynchronize();
-        free_persistent_buffers(pbuf_);
-    }
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::init_persistent_mode() {
-    if (backend_.use_persistent) {
-        int N_fil = armature_.total_filaments();
-        use_persistent_ = init_persistent_buffers(pbuf_, N_fil, backend_);
-        if (use_persistent_) {
-            launch_persistent_kernel(pbuf_, adaptor_, N_fil,
-                                      backend_.threads_per_block, 9, opt_level_);
-        }
-    }
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::build_filament_M_matrix() {
-    int N = N_fil_;
-    M_mat_.resize(N, N);
-    M_mat_.setZero();
-    int nr = armature_.radial_filaments();
-    for (int a = 0; a < N; ++a) {
-        int ja = a % nr + 1;
-        double ra = armature_.filament_mean_radius(ja);
-        for (int b = a + 1; b < N; ++b) {
-            int jb = b % nr + 1;
-            double rb = armature_.filament_mean_radius(jb);
-            double sep = filament_axial_sep(armature_, a, b);
-            double m = physics::mutual_inductance_filament(ra, rb, sep, true);
-            M_mat_(a, b) = m;
-            M_mat_(b, a) = m;
-        }
-    }
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::compute_M1_dM1_fallback() {
-    int N = N_fil_;
-    int nr = armature_.radial_filaments();
-    double arm_center = state_.arm_position;
-    double arm_center_init = armature_.position();
-
-    int n_nodes = 9;
-
-    double rai = coil_.inner_radius();
-    double rae = coil_.outer_radius();
-    double la  = coil_.length();
-    int    na  = coil_.turns();
-
-    // Zero device results buffer before kernel writes (prevents stale entries)
-    cudaMemset(adaptor_.d_results_M(),  0, N * sizeof(double));
-    cudaMemset(adaptor_.d_results_dM(), 0, N * sizeof(double));
-
-    for (int k = 0; k < N; ++k) {
-        int i = k / nr + 1;
-        int j = k % nr + 1;
-        double z_rel = armature_.filament_axial_position(i) - arm_center_init;
-        double z_global = arm_center + z_rel;
-        double sep = z_global - coil_.position();
-
-        double fil_ri = armature_.filament_inner_radius(j);
-        double fil_re = armature_.filament_outer_radius(j);
-        double fil_l  = armature_.length() / armature_.axial_filaments();
-
-        physics::mutual_inductance_coil_pair_kernel<<<1, backend_.threads_per_block>>>(
-            rai, rae, la, na, fil_ri, fil_re, fil_l, 1, sep, n_nodes,
-            adaptor_.d_results_M() + k,
-            adaptor_.d_results_dM() + k);
-    }
-    cudaDeviceSynchronize();
-
-    std::vector<double> h_M(N), h_dM(N);
-    adaptor_.download_results(h_M, h_dM, N);
-
-    for (int k = 0; k < N; ++k) {
-        M1_mat_(0, k)  = h_M[k];
-        dM1_mat_(0, k) = h_dM[k];
-    }
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::compute_M1_dM1_persistent() {
-    int F = armature_.total_filaments(), N_b = F;
-    int nr = armature_.radial_filaments();
-    double arm_center_init = armature_.position();
-
-    // Submit one batch and wait for its mapped results before solving the ODE.
-    // The previous double-buffer fields did not advance newly completed data,
-    // which made the solver reuse a stale one-step-old matrix.
-    double arm_center = state_.arm_position;
-    for (int fi = 0; fi < F; ++fi) {
-        int i = fi / nr + 1, j = fi % nr + 1;
-        double z_rel = armature_.filament_axial_position(i) - arm_center_init;
-        pbuf_.seps[fi] = arm_center + z_rel - coil_.position();
-    }
-    *pbuf_.active_pairs = F;
-    __sync_synchronize();
-    for (int i = 0; i < N_b; ++i) pbuf_.doorbell[i] = 1;
-    __sync_synchronize();
-    ++*pbuf_.batch_id;
-
-    for (int i = 0; i < N_b; ++i) {
-        while (pbuf_.doorbell[i] != 0) __sync_synchronize();
-    }
-    __sync_synchronize();
-    M1_mat_.resize(1, F); dM1_mat_.resize(1, F);
-    for (int fi = 0; fi < F; ++fi) {
-        M1_mat_(0, fi)  = pbuf_.out_M[fi];
-        dM1_mat_(0, fi) = pbuf_.out_dM[fi];
-    }
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::compute_M1_dM1() {
-    if (use_persistent_)
-        compute_M1_dM1_persistent();
+void GpuSingleStageSim<SP>::sync_state_from_engine() {
+    const auto& source = engine_->state();
+    state_.currents = Eigen::Map<const Eigen::VectorXd>(source.currents.data(),
+                                                        static_cast<Eigen::Index>(source.currents.size()));
+    state_.arm_position = armature_.position() - source.position[0];
+    state_.arm_velocity = -source.velocity[0];
+    if (enable_thermal_)
+        state_.filament_temperatures = Eigen::Map<const Eigen::VectorXd>(
+            source.temperatures.data(), static_cast<Eigen::Index>(source.temperatures.size()));
     else
-        compute_M1_dM1_fallback();
+        state_.filament_temperatures.resize(0);
 }
 
 template<typename SP>
-SimState GpuSingleStageSim<SP>::compute_derivatives(const SimState& s) {
-    compute_M1_dM1();
-
-    SimState ds;
-    ds.currents.resize(N_fil_ + 1);
-    ds.arm_position = s.arm_velocity;
-    ds.arm_velocity = compute_force(s) / armature_.mass();
-    if (enable_thermal_ && s.filament_temperatures.size() > 0) {
-        ds.filament_temperatures.resize(N_fil_);
-        ds.filament_temperatures.setZero();
-    }
-
-    L_total_.setZero();
-    L_total_(0, 0) = L_d_;
-    for (int k = 0; k < N_fil_; ++k) {
-        L_total_(0, k + 1) = M1_mat_(0, k);
-        L_total_(k + 1, 0) = M1_mat_(0, k);
-    }
-    for (int a = 0; a < N_fil_; ++a) {
-        L_total_(a + 1, a + 1) = L_fil_(a);
-        for (int b = 0; b < N_fil_; ++b) {
-            if (a != b) L_total_(a + 1, b + 1) = M_mat_(a, b);
-        }
-    }
-
-    double U   = excitation_->voltage();
-    double I_d = s.currents(0);
-    double v   = s.arm_velocity;
-
-    double motional_emf = 0.0;
-    for (int k = 0; k < N_fil_; ++k)
-        motional_emf += dM1_mat_(0, k) * s.currents(k + 1);
-
-    RHS_(0) = U - R_d_ * I_d - v * motional_emf;
-    for (int k = 0; k < N_fil_; ++k) {
-        RHS_(k + 1) = -R_fil_(k) * s.currents(k + 1) - v * dM1_mat_(0, k) * I_d;
-    }
-
-    Eigen::LDLT<Eigen::MatrixXd> solver(L_total_);
-    if (solver.info() != Eigen::Success)
-        ds.currents = L_total_.colPivHouseholderQr().solve(RHS_);
-    else
-        ds.currents = solver.solve(RHS_);
-
-    return ds;
+double GpuSingleStageSim<SP>::compute_force() const {
+    const auto& source = engine_->state();
+    double force = 0.0;
+    for (std::size_t k = 0; k < engine_->layout().F; ++k)
+        force -= source.currents[k + 1] * source.currents[0] * source.dm1[k];
+    return force;
 }
 
 template<typename SP>
-double GpuSingleStageSim<SP>::compute_force(const SimState& s) {
-    double F = 0.0, I_d = s.currents(0);
-    for (int k = 0; k < N_fil_; ++k)
-        F += I_d * s.currents(k + 1) * dM1_mat_(0, k);
-    return F;
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::update_temperatures(SimState& s, double dt_sub) {
-    auto mat = armature_.material();
-    double beta = physics::material_beta(mat);
-    for (int k = 0; k < N_fil_; ++k) {
-        double I_k = s.currents(k + 1);
-        double m_k = mass_fil_(k);
-        double T_k = s.filament_temperatures(k);
-        double cp  = physics::material_cp(mat, T_k);
-        double dT  = I_k * I_k * R_fil_(k) * dt_sub / (m_k * cp);
-        T_k += dT;
-        s.filament_temperatures(k) = T_k;
-        R_fil_(k) = R_fil_ref_(k) * (1.0 + beta * (T_k - physics::T_REFERENCE));
-    }
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::record_step(double cap_voltage) {
+void GpuSingleStageSim<SP>::record_step() {
     SimStep entry;
-    entry.time         = step_count_ * dt_;
-    entry.cap_voltage  = cap_voltage;
+    entry.time = step_count_ * dt_;
+    entry.cap_voltage = excitation_->voltage();
     entry.coil_current = state_.currents(0);
     entry.arm_position = state_.arm_position;
     entry.arm_velocity = state_.arm_velocity;
-    entry.force        = compute_force(state_);
-    entry.filament_currents.resize(N_fil_);
-    for (int k = 0; k < N_fil_; ++k)
-        entry.filament_currents[k] = state_.currents(k + 1);
-    if (enable_thermal_ && state_.filament_temperatures.size() > 0) {
-        entry.filament_temperatures.resize(N_fil_);
-        for (int k = 0; k < N_fil_; ++k)
-            entry.filament_temperatures[k] = state_.filament_temperatures(k);
-    }
+    entry.force = compute_force();
+    entry.filament_currents.resize(engine_->layout().F);
+    for (std::size_t k = 0; k < engine_->layout().F; ++k)
+        entry.filament_currents[k] = state_.currents(static_cast<Eigen::Index>(k + 1));
+    if (enable_thermal_)
+        entry.filament_temperatures.assign(state_.filament_temperatures.data(),
+                                           state_.filament_temperatures.data() + state_.filament_temperatures.size());
     result_.history.push_back(std::move(entry));
 }
 
 template<typename SP>
-bool GpuSingleStageSim<SP>::check_termination(const TerminationPolicy& policy) {
-    if (policy.enable_bound_check && state_.arm_position >= policy.barrel_end_position)
-        return true;
+bool GpuSingleStageSim<SP>::check_termination(const TerminationPolicy& policy) const {
+    if (policy.enable_bound_check && state_.arm_position >= policy.barrel_end_position) return true;
     if (step_count_ >= policy.max_steps) return true;
-    if (policy.enable_velocity_check && step_count_ >= policy.velocity_decay_steps) {
-        double accel = compute_force(state_) / armature_.mass();
-        const auto& hist = result_.history;
-        bool decaying = true;
-        auto n = static_cast<int>(hist.size());
-        for (int i = 0; i < policy.velocity_decay_steps; ++i) {
-            if (n - 2 - i < 0 || hist[n - 1 - i].arm_velocity >= hist[n - 2 - i].arm_velocity) {
-                decaying = false; break;
-            }
+    if (!policy.enable_velocity_check || step_count_ < policy.velocity_decay_steps) return false;
+    const auto n = static_cast<int>(result_.history.size());
+    bool decaying = true;
+    for (int i = 0; i < policy.velocity_decay_steps; ++i) {
+        if (n - 2 - i < 0 || result_.history[n - 1 - i].arm_velocity >= result_.history[n - 2 - i].arm_velocity) {
+            decaying = false;
+            break;
         }
-        if (decaying && std::abs(accel) < policy.accel_threshold) return true;
     }
-    return false;
-}
-
-template<typename SP>
-void GpuSingleStageSim<SP>::prepare_summary() {
-    auto& s = result_.summary;
-    s.step_count = step_count_;
-    if (result_.history.empty()) return;
-    const auto& last = result_.history.back();
-    s.total_time      = last.time;
-    s.muzzle_velocity = last.arm_velocity;
-    for (const auto& step : result_.history) {
-        if (step.force > s.max_force) s.max_force = step.force;
-        if (step.coil_current > s.peak_coil_current)
-            s.peak_coil_current = step.coil_current;
-    }
-    auto* cap = dynamic_cast<CapacitorExcitation*>(excitation_.get());
-    if (cap) {
-        double E_in = 0.5 * cap->capacitance()
-                      * cap->initial_voltage()
-                      * cap->initial_voltage();
-        double E_out = 0.5 * armature_.mass() * s.muzzle_velocity * s.muzzle_velocity;
-        s.efficiency = (E_in > 0.0) ? E_out / E_in : 0.0;
-    }
+    return decaying && std::abs(compute_force() / armature_.mass()) < policy.accel_threshold;
 }
 
 template<typename SP>
 const SimStep& GpuSingleStageSim<SP>::step() {
-    state_ = stepper_.advance(dt_, state_,
-        [this](const SimState& s) { return compute_derivatives(s); });
-
+    if constexpr (std::is_same_v<SP, RK4Stepper>) {
+        throw std::logic_error("RK4Stepper is not supported by GpuSingleStageSim");
+    }
+    const bool within_mutual_range = opt_level_ == GpuOptLevel::Standard ||
+        std::abs(state_.arm_position - coil_.position()) <= 10.0 * coil_.length();
+    engine_->set_mutual_stage_mask({static_cast<std::uint8_t>(within_mutual_range ? 1 : 0)});
+    engine_->set_stage_voltage(0, excitation_->voltage());
+    engine_->step();
+    sync_state_from_engine();
     excitation_->advance(dt_, state_.currents(0));
-
-    if (enable_thermal_) update_temperatures(state_, dt_);
-
-    record_step(excitation_->voltage());
+    record_step();
     ++step_count_;
     return result_.history.back();
 }
 
 template<typename SP>
-const SimResult& GpuSingleStageSim<SP>::run() {
-    return run(TerminationPolicy::defaults());
-}
+const SimResult& GpuSingleStageSim<SP>::run() { return run(TerminationPolicy::defaults()); }
 
 template<typename SP>
 const SimResult& GpuSingleStageSim<SP>::run(const TerminationPolicy& policy) {
-    while (!check_termination(policy) && !excitation_->finished())
-        step();
+    while (!check_termination(policy) && !excitation_->finished()) step();
     prepare_summary();
     return result_;
 }
 
 template<typename SP>
+void GpuSingleStageSim<SP>::prepare_summary() {
+    auto& summary = result_.summary;
+    summary.step_count = step_count_;
+    if (result_.history.empty()) return;
+    summary.total_time = result_.history.back().time;
+    summary.muzzle_velocity = result_.history.back().arm_velocity;
+    for (const auto& entry : result_.history) {
+        summary.max_force = std::max(summary.max_force, std::abs(entry.force));
+        summary.peak_coil_current = std::max(summary.peak_coil_current, entry.coil_current);
+    }
+    if (const auto* cap = dynamic_cast<const CapacitorExcitation*>(excitation_.get())) {
+        const double input = 0.5 * cap->capacitance() * cap->initial_voltage() * cap->initial_voltage();
+        const double output = 0.5 * armature_.mass() * summary.muzzle_velocity * summary.muzzle_velocity;
+        summary.efficiency = input > 0.0 ? output / input : 0.0;
+    }
+}
+
+template<typename SP>
 void GpuSingleStageSim<SP>::reset() {
-    state_.currents.setZero();
-    state_.arm_position = armature_.position();
-    state_.arm_velocity = armature_.velocity();
-    if (enable_thermal_ && state_.filament_temperatures.size() > 0)
-        state_.filament_temperatures.setConstant(physics::T_REFERENCE);
-    R_fil_ = R_fil_ref_;
-    result_ = SimResult{};
-    step_count_ = 0;
+    engine_->reset();
     excitation_->reset();
+    result_ = {};
+    step_count_ = 0;
+    sync_state_from_engine();
 }
 
 template class GpuSingleStageSim<EulerStepper>;

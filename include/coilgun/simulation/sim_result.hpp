@@ -21,7 +21,7 @@ struct SimStep {
     std::vector<double> filament_currents;  ///< Current in each armature filament, A.
     double arm_position = 0.0;              ///< Armature centre position, m.
     double arm_velocity = 0.0;              ///< Armature velocity, m/s.
-    double force = 0.0;                     ///< Net axial Lorentz force, N.
+    double force = 0.0;                     ///< Signed instantaneous net axial force, N.
     std::vector<double> filament_temperatures; ///< Filament temperatures, K (thermal mode only).
 };
 
@@ -31,7 +31,7 @@ struct SimStep {
 struct SimSummary {
     double muzzle_velocity   = 0.0;  ///< Final armature velocity, m/s.
     double total_time        = 0.0;  ///< Elapsed simulation time, s.
-    double max_force         = 0.0;  ///< Peak axial force observed, N.
+    double max_force         = 0.0;  ///< Peak magnitude of signed instantaneous force, N.
     double peak_coil_current = 0.0;  ///< Peak driving coil current, A.
     double efficiency        = 0.0;  ///< Kinetic energy / initial stored energy, 0..1.
     int    step_count        = 0;    ///< Total number of steps taken.

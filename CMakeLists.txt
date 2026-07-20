@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(coilgunCalc VERSION 1.2.1 LANGUAGES CXX C)
+project(coilgunCalc VERSION 2.0.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,7 +50,7 @@ if(COILGUN_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "Target CUDA architectures")
-    find_package(CUDAToolkit REQUIRED)
+    find_package(CUDAToolkit REQUIRED COMPONENTS cublas cusolver)
     add_subdirectory(src/cuda)
 endif()
 

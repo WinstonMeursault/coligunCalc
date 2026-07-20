@@ -79,7 +79,10 @@ __host__ __device__ inline float elliptic_e_f32(float k) {
         float an = 0.5f * (a + b);
         float bn = sqrtf(a * b);
         float cn = 0.25f * (a - b) * (a - b);
-        s += c * (1 << i);  // c * 2^i
+        // The AGM expansion uses 2^(i-1) c_i^2, with the initial
+        // coefficient 1/2 for c_0. The previous implementation doubled
+        // this series and materially distorted Aggressive M/dM results.
+        s += c * (i == 0 ? 0.5f : static_cast<float>(1 << (i - 1)));
         if (fabsf(an - bn) < 1e-7f) { a = an; break; }
         a = an; b = bn; c = cn;
     }

@@ -15,6 +15,14 @@ static std::unique_ptr<Excitation> make_crowbar(double U0, double C) {
     return std::make_unique<CrowbarExcitation>(U0, C);
 }
 
+static TerminationPolicy no_velocity_policy(int max_steps = 20000) {
+    TerminationPolicy policy;
+    policy.max_steps = max_steps;
+    policy.enable_velocity_check = false;
+    policy.enable_bound_check = false;
+    return policy;
+}
+
 // Clone an excitation vector by reconstructing from capacitor parameters.
 // Preserves crowbar vs plain-capacitor type.
 static std::vector<std::unique_ptr<Excitation>> clone_excitations(
@@ -141,6 +149,165 @@ TEST_CASE("MultiStageSim — two stages, time delay trigger") {
     CHECK(delay == doctest::Approx(200e-6).epsilon(1e-4));
 }
 
+TEST_CASE("MultiStageSim — completion waits for an eligible delayed stage") {
+    DrivingCoil coil1(0.005, 0.010, 0.010, 10,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil coil2(0.005, 0.010, 0.010, 10,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.03);
+    Armature arm(0.002, 0.008, 0.010,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.005, 2, 1, 0.003);
+
+    std::vector<std::unique_ptr<Excitation>> excitations;
+    excitations.push_back(make_crowbar(0.0, 50e-6));
+    excitations.push_back(make_crowbar(500.0, 500e-6));
+
+    MultiStageSim<EulerStepper> sim(
+        {coil1, coil2}, arm, std::move(excitations),
+        {{TriggerMode::TimeDelay, 5e-6}}, 1e-6);
+    sim.run(no_velocity_policy(200));
+
+    REQUIRE(sim.result().summary.per_stage.size() == 2);
+    CHECK(sim.result().summary.per_stage[1].trigger_time ==
+          doctest::Approx(6e-6).epsilon(1e-12));
+    CHECK(sim.result().summary.per_stage[1].peak_current > 0.0);
+}
+
+TEST_CASE("MultiStageSim — trigger position is captured at the crossed boundary") {
+    DrivingCoil coil1(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil coil2(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.03);
+    Armature arm(0.002, 0.008, 0.010,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.005, 2, 1, 0.003);
+
+    std::vector<std::unique_ptr<Excitation>> excitations;
+    excitations.push_back(make_crowbar(500.0, 500e-6));
+    excitations.push_back(make_crowbar(500.0, 500e-6));
+
+    MultiStageSim<EulerStepper> sim(
+        {coil1, coil2}, arm, std::move(excitations),
+        {{TriggerMode::Position, 0.00301}}, 1e-6);
+
+    bool triggered = false;
+    double pre_step_trigger_position = 0.0;
+    for (int i = 0; i < 100; ++i) {
+        const double pre_step_position = sim.state().arm_position;
+        sim.step();
+        if (sim.result().history.back().coil_currents[1] != 0.0) {
+            triggered = true;
+            pre_step_trigger_position = pre_step_position;
+            break;
+        }
+    }
+    REQUIRE(triggered);
+
+    sim.run(no_velocity_policy(0));
+    REQUIRE(sim.result().summary.per_stage.size() == 2);
+    CHECK(sim.result().summary.per_stage[1].trigger_position ==
+          doctest::Approx(pre_step_trigger_position).epsilon(1e-12));
+    CHECK(pre_step_trigger_position > 0.00301);
+}
+
+TEST_CASE("MultiStageSim — zero-delay trigger captures the pre-step boundary") {
+    DrivingCoil coil1(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil coil2(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.03);
+    Armature arm(0.002, 0.008, 0.010,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.005, 2, 1, 0.003);
+
+    std::vector<std::unique_ptr<Excitation>> excitations;
+    excitations.push_back(make_crowbar(500.0, 500e-6));
+    excitations.push_back(make_crowbar(500.0, 500e-6));
+    MultiStageSim<EulerStepper> sim(
+        {coil1, coil2}, arm, std::move(excitations),
+        {{TriggerMode::TimeDelay, 0.0}}, 1e-6);
+
+    const double pre_step_position = sim.state().arm_position;
+    sim.step();
+    REQUIRE(sim.result().history.back().coil_currents[1] != 0.0);
+
+    sim.run(no_velocity_policy(0));
+    REQUIRE(sim.result().summary.per_stage.size() == 2);
+    CHECK(sim.result().summary.per_stage[1].trigger_position ==
+          doctest::Approx(pre_step_position).epsilon(1e-12));
+}
+
+TEST_CASE("MultiStageSim — energy depletion uses each capacitor's initial energy") {
+    DrivingCoil coil1(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil coil2(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.03);
+    Armature arm(0.002, 0.008, 0.010,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.005, 2, 1, 0.003);
+    constexpr double c0 = 50e-6;
+    constexpr double u0 = 500.0;
+    constexpr double c1 = 500e-6;
+    constexpr double u1 = 320.0;
+
+    std::vector<std::unique_ptr<Excitation>> excitations;
+    excitations.push_back(make_crowbar(u0, c0));
+    excitations.push_back(make_crowbar(u1, c1));
+    MultiStageSim<EulerStepper> sim(
+        {coil1, coil2}, arm, std::move(excitations),
+        {{TriggerMode::TimeDelay, 1e-6}}, 1e-6);
+
+    sim.run(no_velocity_policy(3));
+    REQUIRE(sim.result().summary.per_stage.size() == 2);
+    const auto& stage0 = sim.result().summary.per_stage[0];
+    const auto& stage1 = sim.result().summary.per_stage[1];
+    const double stage0_initial = 0.5 * c0 * u0 * u0;
+    const double stage1_initial = 0.5 * c1 * u1 * u1;
+    const double stage0_final = 0.5 * c0 * sim.result().history.back().cap_voltages[0] *
+        sim.result().history.back().cap_voltages[0];
+    const double stage1_final = 0.5 * c1 * sim.result().history.back().cap_voltages[1] *
+        sim.result().history.back().cap_voltages[1];
+
+    CHECK(stage0.energy_depleted == doctest::Approx(stage0_initial - stage0_final));
+    CHECK(stage1.energy_depleted == doctest::Approx(stage1_initial - stage1_final));
+    CHECK(stage0.energy_depleted > 0.0);
+    CHECK(stage1.energy_depleted > 0.0);
+}
+
+TEST_CASE("MultiStageSim — trigger configuration rejects malformed values") {
+    DrivingCoil coil1(0.005, 0.010, 0.010, 10,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil coil2(0.005, 0.010, 0.010, 10,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.03);
+    Armature arm(0.002, 0.008, 0.010,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.005, 2, 1, 0.003);
+
+    const auto construct = [&](TriggerConfig config) {
+        std::vector<std::unique_ptr<Excitation>> excitations;
+        excitations.push_back(make_crowbar(0.0, 50e-6));
+        excitations.push_back(make_crowbar(100.0, 50e-6));
+        MultiStageSim<EulerStepper> sim(
+            {coil1, coil2}, arm, std::move(excitations),
+            {config}, 1e-6);
+    };
+
+    CHECK_THROWS_AS(construct({TriggerMode::Position,
+                               std::numeric_limits<double>::quiet_NaN()}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(construct({TriggerMode::TimeDelay,
+                               std::numeric_limits<double>::quiet_NaN()}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(construct({TriggerMode::TimeDelay, -1.0}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(construct({static_cast<TriggerMode>(99), 0.0}),
+                    std::invalid_argument);
+
+    CHECK_NOTHROW(construct({TriggerMode::Position,
+                             std::numeric_limits<double>::infinity()}));
+    CHECK_NOTHROW(construct({TriggerMode::TimeDelay,
+                             std::numeric_limits<double>::infinity()}));
+}
+
 TEST_CASE("MultiStageSim — optimization level consistency") {
     DrivingCoil coil1(0.005, 0.010, 0.010, 20,
                       COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
@@ -242,11 +409,45 @@ TEST_CASE("MultiStageSim — reset and re-run") {
     sim.run();
     double v1 = sim.result().summary.muzzle_velocity;
 
+    const auto first_summary = sim.result().summary;
+    sim.run(no_velocity_policy(0));
+    CHECK(sim.result().summary.per_stage.size() == first_summary.per_stage.size());
+    CHECK(sim.result().summary.step_count == first_summary.step_count);
+    CHECK(sim.result().summary.max_force ==
+          doctest::Approx(first_summary.max_force));
+
     sim.reset();
     sim.run();
     double v2 = sim.result().summary.muzzle_velocity;
 
     CHECK(v1 == doctest::Approx(v2).epsilon(1e-6));
+}
+
+TEST_CASE("MultiStageSim — completion boundary records direct CPU force contributions") {
+    DrivingCoil coil1(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
+    DrivingCoil coil2(0.005, 0.010, 0.010, 20,
+                      COPPER.resistivity_ref, 1e-6, 0.7, 0.03);
+    Armature arm(0.002, 0.008, 0.010,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.005, 2, 1, 0.003);
+    auto completed = std::make_unique<WaveformExcitation>(
+        [](double) { return 480.0; });
+    completed->set_end_time(1e-6);
+
+    std::vector<std::unique_ptr<Excitation>> excitations;
+    excitations.push_back(std::move(completed));
+    excitations.push_back(std::make_unique<WaveformExcitation>(
+        [](double) { return 480.0; }));
+    MultiStageSim<EulerStepper> sim(
+        {coil1, coil2}, arm, std::move(excitations),
+        {{TriggerMode::TimeDelay, 0.0}}, 1e-6);
+
+    const auto& step = sim.step();
+    REQUIRE(step.stage_forces.size() == 2);
+    REQUIRE(std::abs(step.stage_forces[1]) > 1e-18);
+    CHECK(step.stage_forces[0] == doctest::Approx(0.0));
+    CHECK(step.state.force == doctest::Approx(step.stage_forces[1]));
 }
 
 TEST_CASE("MultiStageSim — crowbar diode independent per-stage") {

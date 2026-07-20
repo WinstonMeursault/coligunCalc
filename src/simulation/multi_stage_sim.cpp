@@ -69,6 +69,9 @@ MultiStageSim<SP>::MultiStageSim(
     , N_fil_(armature_.total_filaments())
 {
     // ---- validation ----
+    if (n_stages_ <= 0) {
+        throw std::invalid_argument("MultiStageSim: at least one stage is required");
+    }
     if (n_stages_ != static_cast<int>(excitations_.size())) {
         throw std::invalid_argument(
             "MultiStageSim: coils.size() != excitations.size()");
@@ -81,13 +84,22 @@ MultiStageSim<SP>::MultiStageSim(
         throw std::invalid_argument(
             "MultiStageSim: trigger_configs.size() must be n_stages-1");
     }
+    for (const auto& config : trigger_configs_)
+        validate_trigger_config(config);
 
     triggered_.resize(n_stages_, false);
     finished_.resize(n_stages_, false);
     trigger_times_.resize(n_stages_, 0.0);
+    trigger_positions_.resize(n_stages_, armature_.position());
+    initial_stage_energies_.resize(n_stages_, 0.0);
 
     // Stage 0 auto-triggers at t=0
     triggered_[0] = true;
+    for (int i = 0; i < n_stages_; ++i) {
+        if (const auto* capacitor = dynamic_cast<const CapacitorExcitation*>(excitations_[i].get()))
+            initial_stage_energies_[i] = 0.5 * capacitor->capacitance() *
+                capacitor->initial_voltage() * capacitor->initial_voltage();
+    }
 
     // ---- extract coil self-inductances and resistances ----
     R_diag_.resize(n_stages_);
@@ -229,7 +241,6 @@ MultiStageState MultiStageSim<SP>::compute_derivatives(const MultiStageState& s)
     MultiStageState ds;
     ds.currents.resize(dim);
     ds.arm_position = s.arm_velocity;
-    ds.arm_velocity = compute_force(s) / armature_.mass();
     if (enable_thermal_ && s.filament_temperatures.size() > 0) {
         ds.filament_temperatures.resize(F);
         ds.filament_temperatures.setZero();
@@ -284,6 +295,8 @@ MultiStageState MultiStageSim<SP>::compute_derivatives(const MultiStageState& s)
     }
 
     build_system_matrix(s);
+
+    ds.arm_velocity = compute_force(s) / armature_.mass();
 
     double v = s.arm_velocity;
     RHS_.setZero();
@@ -360,6 +373,7 @@ void MultiStageSim<SP>::check_triggers() {
 
     for (int i = 1; i < n_stages_; ++i) {
         if (triggered_[i]) continue;
+        if (!triggered_[i - 1]) continue;
 
         const auto& cfg = trigger_configs_[i - 1];
         bool fire = false;
@@ -374,6 +388,7 @@ void MultiStageSim<SP>::check_triggers() {
         if (fire) {
             triggered_[i] = true;
             trigger_times_[i] = current_time;
+            trigger_positions_[i] = state_.arm_position;
         }
     }
 }
@@ -412,18 +427,36 @@ void MultiStageSim<SP>::record_step() {
 
     entry.cap_voltages.resize(S);
     entry.coil_currents.resize(S);
+    entry.stage_forces.resize(S);
     for (int i = 0; i < S; ++i) {
         entry.cap_voltages[i] = triggered_[i] ? excitations_[i]->voltage() : 0.0;
         entry.coil_currents[i] = triggered_[i] ? state_.currents(i) : 0.0;
+        if (!triggered_[i] || finished_[i]) continue;
+        for (int k = 0; k < F; ++k)
+            entry.stage_forces[i] += state_.currents(i) * state_.currents(S + k) * dM1_mat_(i, k);
     }
+    entry.state.force = 0.0;
+    for (const double force : entry.stage_forces) entry.state.force += force;
 
     result_.history.push_back(std::move(entry));
 }
 
 template<typename SP>
 bool MultiStageSim<SP>::check_all_finished() const {
+    // A finite trigger policy remains eligible even if earlier stages finished;
+    // only completed stages and explicit +infinity policies are terminal.
+    auto terminally_ineligible = [this](int stage_idx) {
+        for (int stage = stage_idx; stage > 0; --stage) {
+            const auto& cfg = trigger_configs_[static_cast<std::size_t>(stage - 1)];
+            if (cfg.value == INFINITY) return true;
+            if (triggered_[stage - 1]) return false;
+        }
+        return false;
+    };
     for (int i = 0; i < n_stages_; ++i) {
-        if (triggered_[i] && !finished_[i]) return false;
+        if (finished_[i]) continue;
+        if (!triggered_[i] && terminally_ineligible(i)) continue;
+        return false;
     }
     return true;
 }
@@ -455,6 +488,7 @@ void MultiStageSim<SP>::prepare_summary() {
     int S = n_stages_;
     int F = N_fil_;
     auto& s = result_.summary;
+    s = MultiStageSummary{};
     s.step_count = step_count_;
     if (result_.history.empty()) return;
 
@@ -469,36 +503,26 @@ void MultiStageSim<SP>::prepare_summary() {
         ps.stage_index = i;
         ps.trigger_time = trigger_times_[i];
 
-        for (const auto& step : result_.history) {
-            if (step.state.time >= ps.trigger_time) {
-                ps.trigger_position = step.state.arm_position;
-                break;
-            }
-        }
+        ps.trigger_position = trigger_positions_[static_cast<std::size_t>(i)];
 
         auto* cap = dynamic_cast<CapacitorExcitation*>(excitations_[i].get());
         bool active = false;
-        double E_init = 0.0;
 
         for (const auto& step : result_.history) {
             if (step.coil_currents[i] > ps.peak_current)
                 ps.peak_current = step.coil_currents[i];
-            if (step.state.force > ps.max_force)
-                ps.max_force = step.state.force;
+            if (i < static_cast<int>(step.stage_forces.size()))
+                ps.max_force = std::max(ps.max_force, std::abs(step.stage_forces[i]));
 
             if (triggered_[i] && step.coil_currents[i] > 1e-6)
                 active = true;
             if (active) ps.step_count_active++;
 
-            if (cap) {
-                if (!active && step.coil_currents[i] > 1e-6 && E_init == 0.0)
-                    E_init = 0.5 * cap->capacitance() * step.cap_voltages[i] * step.cap_voltages[i];
-            }
         }
 
         if (cap) {
             double E_end = 0.5 * cap->capacitance() * cap->capacitor_voltage() * cap->capacitor_voltage();
-            ps.energy_depleted = E_init - E_end;
+            ps.energy_depleted = initial_stage_energies_[static_cast<std::size_t>(i)] - E_end;
         }
 
         s.per_stage.push_back(ps);
@@ -506,7 +530,8 @@ void MultiStageSim<SP>::prepare_summary() {
 
     // global
     for (const auto& step : result_.history) {
-        if (step.state.force > s.max_force) s.max_force = step.state.force;
+        if (std::abs(step.state.force) > s.max_force)
+            s.max_force = std::abs(step.state.force);
     }
     for (int i = 0; i < S; ++i) {
         for (const auto& step : result_.history) {
@@ -576,6 +601,7 @@ void MultiStageSim<SP>::reset() {
         triggered_[i] = (i == 0);
         finished_[i] = false;
         trigger_times_[i] = 0.0;
+        trigger_positions_[i] = armature_.position();
         excitations_[i]->reset();
     }
 }

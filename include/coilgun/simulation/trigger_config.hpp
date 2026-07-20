@@ -6,6 +6,10 @@
 
 #pragma once
 
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+
 namespace coilgun::simulation {
 
 /**
@@ -26,5 +30,33 @@ struct TriggerConfig {
     TriggerMode mode;   ///< Trigger mode.
     double value;       ///< Trigger value: position (m) or time delay (s).
 };
+
+/**
+ * @brief Validate one stage trigger configuration.
+ *
+ * NaN is always malformed.  Positive infinity is an explicit terminal
+ * trigger: it never fires, so the simulator may terminate once no other
+ * stage remains eligible. For Position it represents an unreachable position;
+ * for TimeDelay it represents an unreachable delay. Position triggers accept
+ * any other finite value; time-delay triggers require a non-negative delay.
+ */
+inline void validate_trigger_config(const TriggerConfig& config) {
+    switch (config.mode) {
+    case TriggerMode::Position:
+        if (std::isnan(config.value))
+            throw std::invalid_argument("position trigger value must not be NaN");
+        if (config.value == -std::numeric_limits<double>::infinity())
+            throw std::invalid_argument("position trigger value must not be negative infinity");
+        break;
+    case TriggerMode::TimeDelay:
+        if (std::isnan(config.value) || config.value < 0.0)
+            throw std::invalid_argument("time-delay trigger value must be non-negative and not NaN");
+        if (config.value == -std::numeric_limits<double>::infinity())
+            throw std::invalid_argument("time-delay trigger value must not be negative infinity");
+        break;
+    default:
+        throw std::invalid_argument("trigger mode is invalid");
+    }
+}
 
 } // namespace coilgun::simulation

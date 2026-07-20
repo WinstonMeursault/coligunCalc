@@ -118,7 +118,6 @@ SimState SingleStageSim<SP>::compute_derivatives(const SimState& s) {
     SimState ds;
     ds.currents.resize(N_fil_ + 1);
     ds.arm_position = s.arm_velocity;
-    ds.arm_velocity = compute_force(s) / armature_.mass();
     if (enable_thermal_ && s.filament_temperatures.size() > 0) {
         ds.filament_temperatures.resize(N_fil_);
         ds.filament_temperatures.setZero();
@@ -160,6 +159,8 @@ SimState SingleStageSim<SP>::compute_derivatives(const SimState& s) {
             if (a != b) L_total_(a + 1, b + 1) = M_mat_(a, b);
         }
     }
+
+    ds.arm_velocity = compute_force(s) / armature_.mass();
 
     double U   = excitation_->voltage();
     double I_d = s.currents(0);
@@ -257,7 +258,7 @@ void SingleStageSim<SP>::prepare_summary() {
     s.total_time      = last.time;
     s.muzzle_velocity = last.arm_velocity;
     for (const auto& step : result_.history) {
-        if (step.force > s.max_force) s.max_force = step.force;
+        if (std::abs(step.force) > s.max_force) s.max_force = std::abs(step.force);
         if (step.coil_current > s.peak_coil_current)
             s.peak_coil_current = step.coil_current;
     }

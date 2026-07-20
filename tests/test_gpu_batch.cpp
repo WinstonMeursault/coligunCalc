@@ -6,7 +6,7 @@
 
 #include <doctest/doctest.h>
 #include "coilgun/simulation/multi_stage_sim.hpp"
-#include "coilgun/simulation/cuda/gpu_multi_stage_sim.hpp"
+#include "coilgun/simulation/cuda/sim_batch.hpp"
 #include "coilgun/components/driving_coil.hpp"
 #include "coilgun/components/armature.hpp"
 #include "coilgun/simulation/excitation.hpp"
@@ -22,9 +22,10 @@ using coilgun::simulation::EulerStepper;
 using coilgun::simulation::CrowbarExcitation;
 using coilgun::simulation::TriggerConfig;
 using coilgun::simulation::TriggerMode;
-using coilgun::simulation::cuda::GpuMultiStageSim;
+using coilgun::simulation::cuda::SimBatch;
 using coilgun::simulation::cuda::GpuBackend;
-using coilgun::simulation::cuda::GpuOptLevel;
+using coilgun::simulation::cuda::BackendMode;
+using coilgun::simulation::cuda::SolverMode;
 
 struct SweepPoint { double voltage; };
 
@@ -48,17 +49,8 @@ TEST_CASE("GPU batch — 10 parameter sweep vs CPU") {
 
     std::vector<double> v_cpu(10), v_gpu(10);
 
-    for (int i = 0; i < 10; ++i) {
-        auto coils = make_coils(0.10);
-        auto arm   = make_arm();
-        std::vector<std::unique_ptr<coilgun::simulation::Excitation>> excs;
-        excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
-        excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
-        std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
-        MultiStageSim<EulerStepper> sim(coils, arm, std::move(excs), triggers, 1e-6);
-        sim.run();
-        v_cpu[i] = sim.result().summary.muzzle_velocity;
-    }
+    auto policy = coilgun::simulation::TerminationPolicy::defaults();
+    policy.max_steps = 500;
 
     for (int i = 0; i < 10; ++i) {
         auto coils = make_coils(0.10);
@@ -67,13 +59,36 @@ TEST_CASE("GPU batch — 10 parameter sweep vs CPU") {
         excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
         excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
         std::vector<TriggerConfig> triggers = {{TriggerMode::Position, 0.09}};
-        GpuBackend be;
-        be.use_persistent = false;
-        GpuMultiStageSim<EulerStepper> sim(coils, arm, std::move(excs), triggers, 1e-6,
-                                            false, GpuOptLevel::Full, be);
-        sim.run();
-        v_gpu[i] = sim.result().summary.muzzle_velocity;
+        MultiStageSim<EulerStepper> sim(coils, arm, std::move(excs), triggers, 1e-6);
+        sim.run(policy);
+        v_cpu[i] = sim.result().summary.muzzle_velocity;
     }
+
+    auto coils = make_coils(0.10);
+    auto arm = make_arm();
+    GpuBackend be;
+    be.use_persistent = false;
+    be.backend = coilgun::simulation::cuda::BackendMode::Direct;
+    SimBatch<EulerStepper> batch(std::move(coils), arm, 10, 1e-6, be);
+    for (int i = 0; i < 10; ++i) {
+        std::vector<std::unique_ptr<coilgun::simulation::Excitation>> excs;
+        excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
+        excs.push_back(std::make_unique<CrowbarExcitation>(sweeps[i].voltage, 0.001));
+        batch.set_excitations(i, std::move(excs), {{TriggerMode::Position, 0.09}});
+    }
+    batch.run(policy);
+
+    const auto& report = batch.execution_report();
+    if (report.gpu_executed) {
+        REQUIRE(report.backend == BackendMode::Direct);
+        REQUIRE(report.solver == SolverMode::Batched);
+    } else {
+        REQUIRE(report.backend == BackendMode::Fallback);
+        REQUIRE(report.solver == SolverMode::Eigen);
+        REQUIRE_FALSE(report.fallback_reason.empty());
+    }
+
+    for (int i = 0; i < 10; ++i) v_gpu[i] = batch.result(i).summary.muzzle_velocity;
 
     for (int i = 0; i < 10; ++i) {
         INFO("Sweep " << i << " voltage=" << sweeps[i].voltage);

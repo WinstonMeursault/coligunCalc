@@ -3,9 +3,10 @@
  * @brief GPU-accelerated multi-stage coilgun simulation.
  * @author Winston Meursault
  *
- * Identical public API to MultiStageSim. Internally uses CUDA kernels
- * for the 4D mutual inductance integration and Eigen LDLT for the linear
- * system solve (identical to CPU path).
+ * Identical public API to MultiStageSim. Physical state advancement is
+ * delegated to GpuEngine using its normalized B=1, S-stage layout. The
+ * optional explicit backend mode disambiguates migrated backend selection
+ * from the legacy use_persistent flag.
  */
 
 #pragma once
@@ -18,25 +19,28 @@
 #include "coilgun/simulation/trigger_config.hpp"
 #include "coilgun/components/driving_coil.hpp"
 #include "coilgun/components/armature.hpp"
-#include "coilgun/simulation/cuda/gpu_adaptor.hpp"
+#include "coilgun/simulation/cuda/gpu_engine.hpp"
 #include "coilgun/simulation/cuda/gpu_backend.hpp"
 #include <Eigen/Dense>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
-#include "coilgun/simulation/cuda/persistent_kernel.cuh"
-
 namespace coilgun::simulation::cuda {
+
+inline GpuBackend multi_stage_default_backend() {
+    GpuBackend backend;
+    backend.use_persistent = false;
+    backend.backend = BackendMode::Direct;
+    return backend;
+}
 
 /**
  * @brief GPU-accelerated multi-stage coilgun simulator.
  *
- * Public API is identical to MultiStageSim. Internally, the 4D
- * Gauss-Legendre mutual inductance integration is offloaded to CUDA.
- * The linear system solve (Eigen LDLT) and kinematic/thermal updates
- * remain on CPU. Inter-coil mutual inductance is precomputed at
- * construction and applied to the coil-coil off-diagonal block of the
- * system matrix (identical treatment to CPU MultiStageSim).
+ * Public API is identical to MultiStageSim. Trigger, excitation, result,
+ * and termination policy state remains in this compatibility wrapper while
+ * GpuEngine owns the normalized physical state and execution policy.
  *
  * @tparam SP Time-stepping policy (EulerStepper or RK4Stepper).
  *
@@ -58,10 +62,17 @@ public:
      * @param dt Fixed time step, s.
      * @param enable_thermal Enable adiabatic filament heating.
      * @param opt_level GPU optimisation level (default: Full).
-     * @param backend GPU backend configuration.
+     * @param backend GPU backend configuration. The omitted/default backend
+     *         selects Direct (or its documented CUDA fallback). A caller that
+     *         supplies `use_persistent=true` intentionally still requests the
+     *         legacy Persistent path.
+     * @param explicit_backend Explicit backend selection. When not Auto it
+     *         takes precedence over `use_persistent` and `backend.backend`.
      *
-     * @throws std::invalid_argument if coils.size() != excitations.size()
-     *         or trigger_configs.size() != coils.size()-1 or coils.size() > kMaxStages.
+     * @throws std::invalid_argument if the stage/excitation/trigger counts
+     *         are inconsistent, stage count exceeds kMaxStages, dt is not
+     *         positive and finite, an excitation is null or has a non-finite
+     *         voltage, or the backend configuration is invalid.
      */
     GpuMultiStageSim(
         std::vector<components::DrivingCoil>     coils,
@@ -70,8 +81,9 @@ public:
         std::vector<TriggerConfig>                trigger_configs,
         double                                    dt,
         bool                                      enable_thermal = false,
-        GpuOptLevel                               opt_level = GpuOptLevel::Full,
-        const GpuBackend&                         backend = {});
+         GpuOptLevel                               opt_level = GpuOptLevel::Full,
+          const GpuBackend&                         backend = multi_stage_default_backend(),
+         BackendMode                               explicit_backend = BackendMode::Auto);
 
     ~GpuMultiStageSim();
 
@@ -115,14 +127,30 @@ public:
     int     step_count()  const { return step_count_; }
     /// @brief Number of configured stages.
     int     num_stages()  const { return n_stages_; }
+     /// @brief Resolved backend and execution diagnostics.
+     ///
+    /// For Graph, the report describes graph-assisted execution of the
+    /// mutual-inductance segment only. Matrix assembly, solve, force/state
+    /// orchestration, and thermal updates remain outside the captured graph.
+    const ExecutionReport& execution_report() const { return engine_->report(); }
+    /// @brief True only after a complete CUDA-backed step used the partial Graph path.
+    bool graph_assisted() const {
+        const auto& report = execution_report();
+        return report.backend == BackendMode::Graph && report.gpu_executed;
+    }
+    /// @brief Current per-filament resistances in thermal mode.
+     std::vector<double> filament_resistances() const { return engine_->state().resistances; }
+     /// @brief Snapshot of stage/filament mutual inductances, row-major.
+     std::vector<double> mutual_inductances() const { return engine_->state().m1; }
+     /// @brief Snapshot of stage/filament dM/dx values in engine coordinates.
+     std::vector<double> mutual_gradients() const { return engine_->state().dm1; }
 
 private:
-    void compute_M1_dM1();
-    void build_system_matrix(const MultiStageState& s);
-    void build_filament_M_matrix();
-    MultiStageState compute_derivatives(const MultiStageState& s);
-    double compute_force(const MultiStageState& s);
-    void update_temperatures(MultiStageState& s, double dt_sub);
+    void sync_state_from_engine();
+    void configure_engine_boundary();
+    double compute_force(const std::vector<double>& pre_step_currents) const;
+    std::vector<double> compute_stage_forces(const std::vector<double>& pre_step_currents) const;
+    std::vector<double> compute_recorded_stage_forces() const;
     void check_triggers();
     void extinguish_quiet_stages();
     void record_step();
@@ -140,37 +168,23 @@ private:
     bool enable_thermal_;
     GpuOptLevel opt_level_;
     GpuBackend backend_;
-
+    BackendMode explicit_backend_;
     int N_fil_;
-    Eigen::VectorXd R_diag_, L_diag_;
-    Eigen::VectorXd R_fil_ref_, R_fil_, L_fil_, mass_fil_;
-    Eigen::MatrixXd M_mat_;
-    Eigen::MatrixXd M_cc_;
 
     std::vector<bool> triggered_, finished_;
     std::vector<double> trigger_times_;
+    std::vector<double> trigger_positions_;
+    std::vector<double> initial_stage_energies_;
+    std::vector<std::uint8_t> active_stage_mask_;
+    std::vector<std::uint8_t> mutual_stage_mask_;
+    std::vector<std::vector<double>> recorded_stage_force_history_;
 
-    GpuAdaptor adaptor_;
-
-    bool               use_persistent_ = false;  ///< True if persistent kernel initialised successfully.
-    PersistentBuffers  pbuf_;                    ///< Mapped memory buffers for persistent kernel.
-
-    /// @brief Allocate mapped memory and launch the persistent kernel.
-    void init_persistent_mode();
-
-    /// @brief Compute M1/dM1 using the persistent kernel (mapped memory, doorbell protocol).
-    void compute_M1_dM1_persistent();
-
-    /// @brief Compute M1/dM1 using per-pair kernel launches (fallback when persistent unavailable).
-    void compute_M1_dM1_fallback();
-
-    Eigen::MatrixXd M1_mat_, dM1_mat_;
-    Eigen::MatrixXd L_total_;
-    Eigen::VectorXd RHS_;
-
+    std::unique_ptr<GpuEngine> engine_;
     MultiStageState state_;
     MultiStageResult result_;
     int step_count_ = 0;
+    double applied_force_ = 0.0;
+    double recorded_force_ = 0.0;
     SP stepper_;
 };
 

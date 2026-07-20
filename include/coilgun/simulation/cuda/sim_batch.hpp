@@ -19,12 +19,13 @@
 #include "coilgun/components/armature.hpp"
 #include "coilgun/simulation/cuda/gpu_adaptor.hpp"
 #include "coilgun/simulation/cuda/gpu_backend.hpp"
+#include "coilgun/simulation/cuda/gpu_engine.hpp"
 #include <Eigen/Dense>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <vector>
-
-#include "coilgun/simulation/cuda/persistent_kernel.cuh"
 
 namespace coilgun::simulation::cuda {
 
@@ -34,7 +35,13 @@ namespace coilgun::simulation::cuda {
  * All simulations share identical coil and armature geometry.
  * Use set_excitations() to configure per-simulation excitation
  * and trigger parameters. Batch GPU kernel launches amortise
- * kernel launch overhead across all simulations.
+ * kernel launch overhead across all simulations. The wrapper owns one
+ * GpuEngine with a fixed row-major [B][S][F] state layout; inactive rows are
+ * frozen in place rather than compacted.
+ *
+ * GpuEngine-backed SimBatch supports EulerStepper only. RK4Stepper is
+ * explicitly rejected: construction and run() throw std::logic_error rather
+ * than silently executing Euler.
  *
  * @tparam StepperPolicy Time-stepping policy (EulerStepper or RK4Stepper).
  */
@@ -55,7 +62,8 @@ public:
              components::Armature                  armature,
              int                                   num_sims,
              double                                dt,
-             const GpuBackend&                     backend = {});
+             const GpuBackend&                     backend = {},
+             BackendMode                           explicit_backend = BackendMode::Auto);
 
     ~SimBatch();
     SimBatch(const SimBatch&) = delete;
@@ -71,10 +79,12 @@ public:
         std::vector<std::unique_ptr<Excitation>> excitations,
         std::vector<TriggerConfig>               trigger_configs);
 
-    /// Run all simulations to their respective termination criteria.
+     /// Run all simulations to their respective termination criteria.
+     /// RK4Stepper instantiations throw std::logic_error.
     void run();
 
-    /// Run all simulations with a custom termination policy.
+     /// Run all simulations with a custom termination policy.
+     /// RK4Stepper instantiations throw std::logic_error.
     void run(const TerminationPolicy& policy);
 
     /// @brief Result for a single simulation.
@@ -83,6 +93,21 @@ public:
     /// @brief Number of simulations in the batch.
     int num_sims() const { return num_sims_; }
 
+    /// @brief Resolved execution diagnostics for the shared engine.
+    ///
+    /// The report retains requested/resolved backend and solver modes,
+    /// fallback reasons, and whether CUDA actually executed a step.
+    const ExecutionReport& execution_report() const { return engine_->report(); }
+
+    /// @brief Whether the mutual-inductance graph path has executed.
+    bool graph_assisted() const {
+        const auto& report = execution_report();
+        return report.backend == BackendMode::Graph && report.gpu_executed;
+    }
+
+    /// @brief Snapshot of row-major [B][S][F] mutual-inductance gradients.
+    std::vector<double> mutual_gradients() const { return engine_->state().dm1; }
+
 private:
     struct SimInstance {
         std::vector<std::unique_ptr<Excitation>> excitations;
@@ -90,59 +115,41 @@ private:
         std::vector<bool>                        triggered;
         std::vector<bool>                        finished;
         std::vector<double>                      trigger_times;
+        std::vector<double>                      trigger_positions;
+        std::vector<double>                      initial_stage_energies;
         bool                                     configured = false;
         MultiStageState                          state;
-        Eigen::VectorXd                          R_fil;
-        Eigen::VectorXd                          R_fil_ref;
         MultiStageResult                         result;
+        std::vector<std::vector<double>>         stage_force_history;
         int                                      step_count = 0;
-        bool                                     all_finished = false;
+        bool                                     active = true;
     };
 
-    void step_all();
-    void compute_all_M1_dM1();
-    void build_system_matrix(const SimInstance& sim,
-                              Eigen::MatrixXd& L,
-                              const Eigen::MatrixXd& M1) const;
-    void solve_and_update(SimInstance& sim);
-    double compute_force(const SimInstance& sim,
-                         const Eigen::MatrixXd& dM) const;
+    void configure_engine_boundary();
+    void sync_states_from_engine();
     void check_triggers(SimInstance& sim);
     void extinguish_quiet_stages(SimInstance& sim);
-    void record_step(SimInstance& sim);
+    std::vector<double> compute_stage_forces(std::size_t sim_id,
+                                             const std::vector<double>& currents,
+                                             const std::vector<double>& gradients) const;
+    void record_step(std::size_t sim_id,
+                     const std::vector<double>& stage_forces);
     bool check_termination(SimInstance& sim, const TerminationPolicy& policy) const;
     void prepare_summary(SimInstance& sim);
+    bool terminally_ineligible(const SimInstance& sim, int stage) const;
+    bool is_stage_within_range(int stage, const SimInstance& sim) const;
 
     int n_stages_;
     int N_fil_;
     int num_sims_;
     double dt_;
     GpuBackend backend_;
-    GpuAdaptor adaptor_;
-
+    BackendMode explicit_backend_;
     std::vector<components::DrivingCoil> coils_;
     components::Armature armature_;
 
-    Eigen::VectorXd R_diag_;
-    Eigen::VectorXd L_diag_;
-    Eigen::VectorXd L_fil_;
-    Eigen::VectorXd mass_fil_;
-    Eigen::MatrixXd M_mat_;
-    Eigen::MatrixXd M_cc_;
-
     std::vector<SimInstance> sims_;
-    Eigen::MatrixXd batch_M1_;
-    Eigen::MatrixXd batch_dM1_;
-    Eigen::MatrixXd L_total_;
-    Eigen::VectorXd RHS_;
-    StepperPolicy stepper_;
-
-    bool               use_persistent_ = false;  ///< True if persistent kernel initialised successfully.
-    PersistentBuffers  pbuf_;                    ///< Mapped memory buffers for persistent kernel.
-
-    void init_persistent_mode();
-    void compute_all_M1_dM1_persistent();
-    void compute_all_M1_dM1_fallback();
+    std::unique_ptr<GpuEngine> engine_;
 };
 
 } // namespace coilgun::simulation::cuda
