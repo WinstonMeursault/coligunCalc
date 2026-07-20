@@ -162,6 +162,8 @@ private:
     std::vector<bool> triggered_;
     std::vector<bool> finished_;
     std::vector<double> trigger_times_;
+    std::vector<double> trigger_positions_;
+    std::vector<double> initial_stage_energies_;
 
     double dt_;
     bool   enable_thermal_;

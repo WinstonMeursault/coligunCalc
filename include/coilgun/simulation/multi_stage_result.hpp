@@ -19,7 +19,7 @@ struct StepSnapshot {
     double time = 0.0;                      ///< Elapsed time, s.
     double arm_position = 0.0;              ///< Armature centre position, m.
     double arm_velocity = 0.0;              ///< Armature velocity, m/s.
-    double force = 0.0;                     ///< Net axial Lorentz force, N.
+    double force = 0.0;                     ///< Signed instantaneous net axial force, N.
     std::vector<double> filament_currents;  ///< Current per filament, A.
     std::vector<double> filament_temperatures; ///< Filament temperatures, K (thermal mode only).
 };
@@ -34,6 +34,7 @@ struct MultiStageStep {
     StepSnapshot state;                      ///< Shared physical state.
     std::vector<double> cap_voltages;        ///< [n_stages] capacitor voltages, V.
     std::vector<double> coil_currents;       ///< [n_stages] coil currents, A.
+    std::vector<double> stage_forces;         ///< [n_stages] signed instantaneous post-step contributions, N.
 };
 
 /**
@@ -42,9 +43,9 @@ struct MultiStageStep {
 struct PerStageSummary {
     int    stage_index = 0;         ///< Zero-based stage index.
     double trigger_time = 0.0;      ///< Time at which this stage triggered, s.
-    double trigger_position = 0.0;  ///< Armature position at trigger, m.
+    double trigger_position = 0.0;  ///< Armature position at the pre-step trigger boundary, m.
     double peak_current = 0.0;      ///< Peak coil current in this stage, A.
-    double max_force = 0.0;         ///< Peak force contributed by this stage, N.
+    double max_force = 0.0;         ///< Peak magnitude of this stage's signed force, N.
     double energy_depleted = 0.0;   ///< Capacitor energy lost, J (E_init - E_end).
     int    step_count_active = 0;   ///< Number of steps while this stage was active.
 };
@@ -55,7 +56,7 @@ struct PerStageSummary {
 struct MultiStageSummary {
     double muzzle_velocity = 0.0;           ///< Final armature velocity, m/s.
     double total_time = 0.0;                ///< Elapsed simulation time, s.
-    double max_force = 0.0;                 ///< Peak axial force (any stage), N.
+    double max_force = 0.0;                 ///< Peak magnitude of signed net axial force, N.
     double peak_coil_current = 0.0;         ///< Peak coil current (any stage), A.
     double efficiency = 0.0;                ///< E_kin / Sigma(0.5 * C_i * U0_i^2), 0..1.
     int    step_count = 0;                  ///< Total step count.

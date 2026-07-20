@@ -12,10 +12,11 @@ namespace coilgun::simulation::cuda {
 __global__ void persistent_batch_kernel(
     const CoilGeo* coils, const FilGeo* fils,
     const double* gl_nodes, const double* gl_weights,
-    volatile int* batch_id, volatile int* active_pairs, volatile int* shutdown,
-    volatile double* seps, volatile int* doorbell, volatile double* out_M,
+    volatile int* generation, volatile int* active_pairs, volatile int* shutdown,
+    volatile int* shutdown_ack, volatile double* seps, volatile int* doorbell, volatile double* out_M,
     volatile double* out_dM, int n_s, int n_f, int n_n) {
 
+    (void)active_pairs;
     int idx=blockIdx.x, si=idx/n_f, fi=idx%n_f;
     const auto& c=coils[si]; const auto& f=fils[fi];
     double ra_m=0.5*(c.re+c.ri), ra_h=0.5*(c.re-c.ri);
@@ -23,15 +24,15 @@ __global__ void persistent_batch_kernel(
     double la_h=0.5*c.len, lb_h=0.5*f.len, pref=c.turns/16.0;
     int n2=n_n*n_n, n4=n2*n2, tid=threadIdx.x, tot=blockDim.x;
 
-    int last_batch = 0;
+    int last_generation = 0;
     while(*shutdown==0){
-        while(*batch_id == last_batch && *shutdown == 0) {}
+        while(*generation == last_generation && *shutdown == 0) {}
         if(*shutdown != 0) break;
-        last_batch = *batch_id;
+        last_generation = *generation;
         while(doorbell[idx]==0 && *shutdown==0){}
         if(*shutdown!=0) break;
         double M=0,dM=0;
-        if(idx<*active_pairs){
+        if(idx < n_s * n_f){
             double sep=seps[idx];
             __shared__ double sM[512],sdM[512];
             sM[tid]=0;sdM[tid]=0;
@@ -51,14 +52,18 @@ __global__ void persistent_batch_kernel(
         }
         if(tid==0){ out_M[idx]=M;out_dM[idx]=dM;__threadfence_system();doorbell[idx]=0; }
     }
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *shutdown_ack = 1;
+        __threadfence_system();
+    }
 }
 
 // FP32 variant — uses float integrand with double accumulation
 __global__ void persistent_batch_kernel_f32(
     const CoilGeo* coils, const FilGeo* fils,
     const double* gl_nodes_d, const double* gl_weights_d,
-    volatile int* batch_id, volatile int* active_pairs, volatile int* shutdown,
-    volatile double* seps, volatile int* doorbell, volatile double* out_M,
+    volatile int* generation, volatile int* active_pairs, volatile int* shutdown,
+    volatile int* shutdown_ack, volatile double* seps, volatile int* doorbell, volatile double* out_M,
     volatile double* out_dM, int n_s, int n_f, int n_n) {
 
     int idx=blockIdx.x, si=idx/n_f, fi=idx%n_f;
@@ -72,15 +77,15 @@ __global__ void persistent_batch_kernel_f32(
     float gl_nodes[9], gl_weights[9];
     for(int i=0;i<9;i++){ gl_nodes[i]=(float)gl_nodes_d[i]; gl_weights[i]=(float)gl_weights_d[i]; }
 
-    int last_batch = 0;
+    int last_generation = 0;
     while(*shutdown==0){
-        while(*batch_id == last_batch && *shutdown == 0) {}
+        while(*generation == last_generation && *shutdown == 0) {}
         if(*shutdown != 0) break;
-        last_batch = *batch_id;
+        last_generation = *generation;
         while(doorbell[idx]==0 && *shutdown==0){}
         if(*shutdown!=0) break;
         double M=0,dM=0;
-        if(idx<*active_pairs){
+        if(idx < n_s * n_f){
             float sep=(float)seps[idx];
             __shared__ double sM[512],sdM[512];
             sM[tid]=0;sdM[tid]=0;
@@ -100,6 +105,10 @@ __global__ void persistent_batch_kernel_f32(
         }
         if(tid==0){ out_M[idx]=M;out_dM[idx]=dM;__threadfence_system();doorbell[idx]=0; }
     }
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *shutdown_ack = 1;
+        __threadfence_system();
+    }
 }
 
 void launch_persistent_kernel(const PersistentBuffers& p, const GpuAdaptor& a, int N_b, int tpb, int nn,
@@ -107,11 +116,11 @@ void launch_persistent_kernel(const PersistentBuffers& p, const GpuAdaptor& a, i
     cudaGetLastError(); if(tpb>512)tpb=512;
     if(opt_level == GpuOptLevel::Aggressive) {
         persistent_batch_kernel_f32<<<N_b,tpb>>>(a.d_coils(),a.d_fils(),a.d_nodes(),a.d_weights(),
-            p.d_batch_id,p.d_active_pairs,p.d_shutdown,p.d_seps,p.d_doorbell,p.d_out_M,p.d_out_dM,
+            p.d_generation,p.d_active_pairs,p.d_shutdown,p.d_shutdown_ack,p.d_seps,p.d_doorbell,p.d_out_M,p.d_out_dM,
             a.n_stages(),N_b/a.n_stages(),nn);
     } else {
         persistent_batch_kernel<<<N_b,tpb>>>(a.d_coils(),a.d_fils(),a.d_nodes(),a.d_weights(),
-            p.d_batch_id,p.d_active_pairs,p.d_shutdown,p.d_seps,p.d_doorbell,p.d_out_M,p.d_out_dM,
+            p.d_generation,p.d_active_pairs,p.d_shutdown,p.d_shutdown_ack,p.d_seps,p.d_doorbell,p.d_out_M,p.d_out_dM,
             a.n_stages(),N_b/a.n_stages(),nn);
     }
 }

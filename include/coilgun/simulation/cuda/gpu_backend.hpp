@@ -6,7 +6,10 @@
 
 #pragma once
 
+#include "coilgun/simulation/cuda/gpu_execution_config.hpp"
+
 #include <cstddef>
+#include <stdexcept>
 
 namespace coilgun::simulation::cuda {
 
@@ -33,8 +36,35 @@ struct GpuBackend {
     int     device_id         = 0;    ///< cudaSetDevice target.
     int     threads_per_block = 512;  ///< Threads per block for integration kernel.
     size_t  max_batch_sims    = 256;  ///< Pre-allocated buffer size for batch mode.
-    bool    enable_profiling  = false; ///< Enable NVTX range annotations.
-    bool    use_persistent    = true;  ///< Use persistent kernel (mapped memory). Falls back to per-pair launches if false or if cudaHostAllocMapped fails.
+    bool    enable_profiling  = false; ///< Retain profiling-request metadata; host-wall timing fields are always collected. No NVTX guarantee.
+    // Kept as a request flag for source compatibility. The synchronous engine
+    // cannot host a resident control-stream kernel yet and therefore reports a
+    // safe CPU fallback when this is true.
+    bool    use_persistent    = true;
+    // Graph is the default optimized backend. The current graph captures only
+    // the mutual-inductance segment; the remaining physical step is direct.
+    BackendMode backend = BackendMode::Graph;
+
+    void validate() const {
+        switch (backend) {
+        case BackendMode::Auto:
+        case BackendMode::Graph:
+        case BackendMode::Persistent:
+        case BackendMode::Fallback:
+        case BackendMode::Direct:
+            break;
+        default:
+            throw std::invalid_argument("GPU backend mode is invalid");
+        }
+        if (device_id < 0) throw std::invalid_argument("GPU device_id must not be negative");
+        if (threads_per_block <= 0 || threads_per_block > 512 ||
+            (threads_per_block & (threads_per_block - 1)) != 0) {
+            throw std::invalid_argument("GPU threads_per_block must be a positive power of two no greater than 512");
+        }
+        if (max_batch_sims == 0) {
+            throw std::invalid_argument("GPU max_batch_sims must be positive");
+        }
+    }
 };
 
 } // namespace coilgun::simulation::cuda

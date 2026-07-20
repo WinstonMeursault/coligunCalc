@@ -29,7 +29,7 @@
 - **级间触发** — 位置触发或时间延迟触发，最多 50 级
 - **LRU 缓存** — 丝级 M 和 dM/dz 均有 4096 条缓存
 - **OpenMP 多核并行** — M/dM 计算、力求和、温度更新均已并行化
-- **GPU 加速（CUDA）** — 互感 4D 积分通过 CUDA 13.3+ 卸载到 GPU，API 与 CPU 版完全兼容
+- **GPU 加速（CUDA）** — 同步 Euler 方法接口与 CPU API 对齐；GPU 单级/多级 RK4 实例当前在步进时会抛出 `std::logic_error`，需使用 CPU 实现
 
 ---
 
@@ -38,7 +38,7 @@
 ```
 include/coilgun/   — 公开头文件（核心类型、物理层、组件层、仿真器）
 src/               — 库实现（静态库 libcoilgun.a）
-tests/             — 单元测试与集成测试（doctest，18 个已配置测试）
+tests/             — 单元测试与集成测试（doctest，CUDA 配置下有 28 个 CTest 目标）
 tools/             — T(q,p) 查表生成工具
 docs/              — 文档（API 参考中/英文、数值模型、设计文档）
 .references/       — 参考论文 PDF（gitignored，仅本地）
@@ -66,7 +66,19 @@ cmake --build --preset ninja-cuda-debug  # 构建 CPU + GPU 库
 ctest --preset debug                 # 运行全部测试（CPU + GPU）
 ```
 
-GPU 使用方式与 CPU API 兼容：
+仅用于测量的 CUDA benchmark 同时包含 CPU Reference 行，并记录 Direct、
+Graph、Persistent 请求、Fallback、批量大小、求解器和热路径计时。由于结果
+依赖机器，它不加入默认构建：
+
+```sh
+cmake --build --preset ninja-cuda-debug --target bench_gpu_engine
+./build/ninja-cuda-debug/src/cuda/bench_gpu_engine
+```
+
+RTX 5080 Laptop 的测量结果以及 Persistent 诚实回退状态见
+[benchmark 记录](docs/benchmarks/2026-07-19-unified-gpu-engine.md)。
+
+同步 GPU 方法接口在 Euler 下与 CPU API 对齐。GPU 单级/多级 RK4 实例当前在步进时会抛出 `std::logic_error`；RK4 请使用 CPU 实现。
 
 ```cpp
 #include <coilgun/coilgun_cuda.hpp>
@@ -79,7 +91,7 @@ sim.run();
 double v = sim.result().summary.muzzle_velocity;
 ```
 
-GPU 后端仅加速 4D 互感积分（>95% 运行耗时）。线性系统求解、运动学和温度更新保持在 CPU 上。
+Direct 与 Graph 辅助引擎使用 CUDA 互感和状态更新 kernel。矩阵组装与 Eigen 求解器保留在主机端；热计算可按策略使用 CPU 或 GPU。Graph 当前仅捕获互感计算段。
 
 ### 最小使用示例
 
@@ -141,7 +153,7 @@ g++ -std=c++17 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_b
 
 ---
 
-## 测试套件（18 套）
+## 测试套件（CUDA 配置下 28 个 CTest 目标）
 
 | 套件 | 覆盖范围 | 状态 |
 |-------|----------|:----:|
@@ -156,15 +168,28 @@ g++ -std=c++17 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_b
 | `test_single_stage_sim` | 电容、续流、Euler/RK4、热模式 | ✅ |
 | `test_multi_stage_sim` | 单级等效性、两级、触发、优化等级 | ✅ |
 | `test_integration` | 端到端单级场景 | ✅ |
+| `test_gpu_engine_layout` | GPU 引擎布局与校验 | ✅ |
+| `test_gpu_execution_policy` | 后端、求解器与热策略选择 | ✅ |
+| `test_gpu_engine_physics` | 引擎物理过程与 CPU 回退行为 | ✅ |
+| `test_gpu_thermal_cpu` | CPU 热策略路径 | ✅ |
 | `test_gpu_elliptic` | GPU K(k)、E(k) vs CPU 参考 | ✅ |
 | `test_gpu_filament` | GPU 丝级 M、dM/dz vs CPU | ✅ |
 | `test_gpu_coil_pair` | GPU 线圈-丝 M、dM/dz vs CPU | ✅ |
 | `test_gpu_vs_cpu_single` | GPU 单级端到端 vs CPU (ε < 0.5%) | ✅ |
-| `test_gpu_vs_cpu_multi` | GPU 多级端到端 vs CPU (ε < 0.5%) | ❌ |
+| `test_gpu_vs_cpu_multi` | GPU 多级端到端 vs CPU (ε < 0.5%) | ✅ |
 | `test_gpu_batch` | GPU 批量仿真模式 | ⏱️ |
-| `test_gpu_sim_batch` | SimBatch 持久化 vs 回退一致性 | ✅ |
+| `test_gpu_sim_batch` | SimBatch 集成覆盖 | ⏱️ |
+| `test_gpu_solver` | GPU 求解器路径与回退 | ✅ |
+| `test_gpu_paths` | Direct、Graph 与回退执行路径 | ✅ |
+| `test_gpu_graph` | CUDA Graph 捕获/重放行为 | ✅ |
+| `test_gpu_precision` | Standard/Full/Aggressive M/dM 与 CPU 参考精度 | ✅ |
+| `test_gpu_thermal` | GPU 热策略路径 | ✅ |
+| `test_gpu_context_smoke` | CUDA 执行上下文冒烟覆盖 | ✅ |
 
-> 16 项通过，1 项失败（`test_gpu_vs_cpu_multi` — GPU 持久化 kernel 精度），1 项超时（`test_gpu_batch` — 开发中）。
+`bench_gpu_engine` 不是 CTest 目标，必须显式运行；它会同时报告 CPU 墙钟
+时间和 GPU `ExecutionReport` 的各项计时字段。
+
+> CUDA 配置构建下的全部 28 个 CTest 目标均通过，包括批量目标。测量机器上的 CUDA Debug 完整套件耗时约四分钟。
 
 ---
 

@@ -29,7 +29,7 @@ Licensed under GPLv3.
 - **Stage triggering** — position-based or time-delay, up to 50 stages
 - **LRU caching** — 4096-entry filament-level M and dM/dz caches
 - **OpenMP multicore parallelism** — parallelized M/dM computation, force summation, and thermal updates per time step
-- **GPU acceleration (CUDA)** — mutual inductance 4D integration offloaded to GPU via CUDA 13.3+, with seamless API compatibility
+- **GPU acceleration (CUDA)** — synchronous Euler method surfaces align with the CPU API; stepping GPU single-/multi-stage RK4 instantiations currently throws `std::logic_error` and requires the CPU implementation
 
 ---
 
@@ -38,7 +38,7 @@ Licensed under GPLv3.
 ```
 include/coilgun/   — Public headers (core types, physics, components, simulation)
 src/               — Library implementation (static library libcoilgun.a)
-tests/             — Unit and integration tests (doctest, 18 configured suites)
+tests/             — Unit and integration tests (doctest, 28 CUDA-configured CTest targets)
 tools/             — T(q,p) lookup table generator
 docs/              — Documentation (API reference EN/CN, numerical model, design docs)
 .references/       — Reference papers in PDF (gitignored, local-only)
@@ -66,7 +66,20 @@ cmake --build --preset ninja-cuda-debug  # build CPU + GPU libraries
 ctest --preset debug                 # run all tests (CPU + GPU)
 ```
 
-GPU usage is API-compatible with CPU:
+The measurement-only CUDA benchmark includes CPU Reference rows and records
+Direct, Graph, Persistent-request, Fallback, batch-size, solver, and thermal
+timings. It is excluded from the default build because results are
+machine-dependent:
+
+```sh
+cmake --build --preset ninja-cuda-debug --target bench_gpu_engine
+./build/ninja-cuda-debug/src/cuda/bench_gpu_engine
+```
+
+See [the benchmark record](docs/benchmarks/2026-07-19-unified-gpu-engine.md)
+for the RTX 5080 Laptop measurement and the honest Persistent fallback status.
+
+The synchronous GPU method surface aligns with the CPU API for Euler. Stepping GPU single-/multi-stage RK4 instantiations currently throws `std::logic_error`; use the CPU implementation for RK4.
 
 ```cpp
 #include <coilgun/coilgun_cuda.hpp>
@@ -79,7 +92,7 @@ sim.run();
 double v = sim.result().summary.muzzle_velocity;
 ```
 
-The GPU backend accelerates only the 4D mutual inductance integration (>95% of runtime). Linear system solve, kinematics, and thermal updates remain on CPU.
+The Direct and graph-assisted engines use CUDA mutual-inductance and state-update kernels. Matrix assembly and the Eigen solver remain host-side; thermal execution may use CPU or GPU according to policy. Graph currently captures only the mutual-inductance segment.
 
 ### Minimal Usage Example
 
@@ -141,7 +154,7 @@ The library implements the numerical model described in [NumericalModel.md](docs
 
 ---
 
-## Test Suite (18 suites)
+## Test Suite (28 CUDA-configured CTest targets)
 
 | Suite | Coverage | Status |
 |-------|----------|--------|
@@ -156,15 +169,29 @@ The library implements the numerical model described in [NumericalModel.md](docs
 | `test_single_stage_sim` | Capacitor, crowbar, Euler/RK4, thermal | ✅ |
 | `test_multi_stage_sim` | 1-stage equivalence, 2-stage, triggers, optimization levels | ✅ |
 | `test_integration` | End-to-end single-stage scenarios | ✅ |
+| `test_gpu_engine_layout` | GPU engine layout and validation | ✅ |
+| `test_gpu_execution_policy` | Backend, solver, and thermal policy selection | ✅ |
+| `test_gpu_engine_physics` | Engine physics and CPU fallback behavior | ✅ |
+| `test_gpu_thermal_cpu` | CPU thermal policy path | ✅ |
 | `test_gpu_elliptic` | GPU K(k), E(k) vs CPU reference | ✅ |
 | `test_gpu_filament` | GPU filament-level M, dM/dz vs CPU | ✅ |
 | `test_gpu_coil_pair` | GPU coil-filament M, dM/dz vs CPU | ✅ |
 | `test_gpu_vs_cpu_single` | GPU single-stage end-to-end vs CPU (ε < 0.5%) | ✅ |
-| `test_gpu_vs_cpu_multi` | GPU multi-stage end-to-end vs CPU (ε < 0.5%) | ❌ |
+| `test_gpu_vs_cpu_multi` | GPU multi-stage end-to-end vs CPU (ε < 0.5%) | ✅ |
 | `test_gpu_batch` | GPU batch simulation mode | ⏱️ |
-| `test_gpu_sim_batch` | SimBatch persistent vs fallback consistency | ✅ |
+| `test_gpu_sim_batch` | SimBatch integration coverage | ⏱️ |
+| `test_gpu_solver` | GPU solver paths and fallback | ✅ |
+| `test_gpu_paths` | Direct, Graph, and fallback execution paths | ✅ |
+| `test_gpu_graph` | CUDA Graph capture/replay behavior | ✅ |
+| `test_gpu_precision` | Standard/Full/Aggressive M/dM and CPU-reference precision | ✅ |
+| `test_gpu_thermal` | GPU thermal policy path | ✅ |
+| `test_gpu_context_smoke` | CUDA execution-context smoke coverage | ✅ |
 
-> 16 passing, 1 failing (`test_gpu_vs_cpu_multi` — GPU persistent kernel precision), 1 timing out (`test_gpu_batch` — WIP).
+The benchmark executable `bench_gpu_engine` is not a CTest target. It must be
+run explicitly and reports CPU wall time alongside GPU `ExecutionReport`
+timing categories.
+
+> The CUDA-configured build passes all 28 CTest targets, including the batch targets. The full suite takes approximately four minutes in CUDA Debug on the measurement machine.
 
 ---
 

@@ -661,14 +661,14 @@ struct SimStep {
     std::vector<double> filament_currents; // 各丝电流
     double arm_position;                  // 电枢位置
     double arm_velocity;                  // 电枢速度
-    double force;                         // 电磁力
+    double force;                         // 有符号瞬时合轴向力 (N)
     std::vector<double> filament_temperatures; // 各丝温度（仅启用热耦合时）
 };
 
 struct SimSummary {
     double muzzle_velocity;    // 出口速度 (m/s)
     double total_time;         // 总耗时 (s)
-    double max_force;          // 最大力 (N)
+    double max_force;          // 有符号瞬时力的峰值绝对值 (N)
     double peak_coil_current;  // 峰值线圈电流 (A)
     double efficiency;         // 效率 0–1
     int    step_count;         // 步数
@@ -779,6 +779,8 @@ struct TriggerConfig {
 
 第 0 级（stage 0）在 t=0 自动触发，无需 TriggerConfig。`trigger_configs[i-1]` 对应 stage `i`（i ≥ 1）。
 
+`validate_trigger_config()` 对两种模式均拒绝无效模式和 NaN。`Position` 接受所有有限值，但拒绝负无穷；`TimeDelay` 接受有限非负值，并拒绝负值和负无穷。两种模式都允许正无穷，它是明确的终止性永不触发策略，表示不可到达的位置或延迟，而不是格式错误。有限的未触发 stage 即使在前一级完成后仍具备触发资格，因此会保持仿真运行，直到它触发或其他终止条件生效。只有每一级都已完成，或通过 `+infinity` 策略变为终止性不适用时，才会自动完成。触发位置在该级触发时的步前边界捕获。
+
 ### 多级仿真结果
 
 ```cpp
@@ -788,7 +790,7 @@ struct StepSnapshot {
     double time;                    // 仿真时间 s
     double arm_position;            // 电枢中心位置 m
     double arm_velocity;            // 电枢速度 m/s
-    double force;                   // 轴向力 N
+    double force;                   // 有符号瞬时合轴向力 N
     std::vector<double> filament_currents;       // 各纤维电流 A
     std::vector<double> filament_temperatures;   // 各纤维温度 K（仅热模式）
 };
@@ -797,14 +799,15 @@ struct MultiStageStep {
     StepSnapshot          state;
     std::vector<double>   cap_voltages;     // [n_stages]，未触发级为 0
     std::vector<double>   coil_currents;    // [n_stages]，未触发级为 0
+    std::vector<double>   stage_forces;     // [n_stages]，提交后的有符号瞬时各级力贡献 N
 };
 
 struct PerStageSummary {
     int    stage_index;           // 零基级号
     double trigger_time;          // 触发时刻 s
-    double trigger_position;      // 触发时电枢位置 m
+    double trigger_position;      // 触发步前边界的电枢位置 m
     double peak_current;          // 该级峰值电流 A
-    double max_force;             // 该级贡献的最大力 N
+    double max_force;             // 该级有符号力贡献的峰值绝对值 N
     double energy_depleted;       // 电容消耗能量 J
     int    step_count_active;     // 该级活跃步数
 };
@@ -812,7 +815,7 @@ struct PerStageSummary {
 struct MultiStageSummary {
     double                        muzzle_velocity;      // 出口速度 m/s
     double                        total_time;           // 仿真总时间 s
-    double                        max_force;            // 全局峰值力 N
+    double                        max_force;            // 有符号合力的峰值绝对值 N
     double                        peak_coil_current;    // 全局峰值电流 A
     double                        efficiency;           // 效率 0..1，E_kin / Σ(½C_i·U0_i²)
     int                           step_count;           // 总步数
@@ -1054,8 +1057,9 @@ struct GpuBackend {
     int     device_id         = 0;     ///< cudaSetDevice 目标。
     int     threads_per_block = 512;   ///< 4D 积分 kernel 的每 block 线程数。
     size_t  max_batch_sims    = 256;   ///< 批量仿真缓冲区的预分配上限。
-    bool    enable_profiling  = false; ///< 插入 NVTX 范围标记，用于 nsight 分析。
-    bool    use_persistent    = true;  ///< 使用持久化 kernel（映射内存 + 门铃协议）。false 或 cudaHostAllocMapped 失败时回退到逐对 kernel 启动。
+    bool    enable_profiling  = false; ///< 保留 profiling 请求元数据；主机墙钟计时字段始终采集。不保证 NVTX。
+    bool    use_persistent    = true;  ///< 遗留多级/批量包装器的持久化请求默认值。
+    BackendMode backend        = BackendMode::Graph; ///< 未请求持久化时的后端。
 };
 
 }
@@ -1064,17 +1068,22 @@ struct GpuBackend {
 | 字段 | 说明 | 默认值 |
 |-------|---------|---------|
 | `device_id` | 选择目标物理 GPU（多 GPU 系统相关）。 | `0` |
-| `threads_per_block` | 4D GL 积分 kernel 请求的每 block 线程数。持久化启动器会将大于 512 的值截断；调用方应使用不大于 512 的正数 2 的幂。 | `512` |
+| `threads_per_block` | 4D GL 积分 kernel 请求的每 block 线程数。必须是不大于 512 的正数 2 的幂；1、128、256、512 均有效。 | `512` |
 | `max_batch_sims` | `SimBatch` 中的最大仿真数。`SimBatch` 对超过该值的 `num_sims` 抛出 `std::invalid_argument`；该字段本身不负责分配缓冲区。 | `256` |
-| `enable_profiling` | 为 true 时，在每个 `step()` 周围插入 NVTX push/pop 范围用于 GPU 时间线分析。 | `false` |
-| `use_persistent` | 为 true 时，在构造时启动持久化 kernel，使用映射内存和门铃协议进行 host-device 同步（每步零 kernel launch overhead）。false 或 cudaHostAllocMapped 失败时回退到逐对 kernel 启动。需要计算能力 ≥ 6.0。 | `true` |
+| `enable_profiling` | 为 true 时，在 `ExecutionReport::profiling_enabled` 中保留请求。主机墙钟计时类别独立于此标志始终采集。本构建不承诺 NVTX 标记，也不引入 NVTX 依赖。 | `false` |
+| `use_persistent` | 遗留兼容请求。省略 `GpuMultiStageSim` 后端时使用 `multi_stage_default_backend()` 并选择 `Direct`；调用方显式提供 `use_persistent=true` 时仍有意请求 `Persistent`。在 `SimBatch` 中，只有当 `backend.backend == Auto` 时才读取该标志；显式后端模式对两种标志值保持相同的确定性和能力策略。 | `true` |
+| `backend` | 后端元数据/配置。在 `GpuSingleStageSim` 中，`use_persistent=false` 时可选择 `Graph`、`Direct` 或 `Fallback`。在 `GpuMultiStageSim` 中，应使用构造函数的显式 `BackendMode` 参数，将有意的 `Graph`、`Direct` 或 `Fallback` 请求与遗留标志区分开。Graph 只捕获 mutual segment；CUDA 不可用或运行时失败时报告 `Fallback`。 | `Graph` |
+
+故障注入控制不属于 `GpuExecutionConfig`。聚焦测试通过独立的内部 `detail::GpuEngineFaultInjection` 构造函数 seam 使用它们；普通执行配置只包含运行时策略和经过校验的 launch 设置。
+
+**迁移状态**：`GpuEngine` 是当前执行核心。`GpuSingleStageSim`、`GpuMultiStageSim` 和 `SimBatch` 使用引擎契约进行后端选择、回滚、报告和部分 Graph 捕获。Graph 报告只表示 mutual segment 的图辅助执行，不表示完整多级流水线已捕获。
 
 **示例**：
 
 ```cpp
 coilgun::simulation::cuda::GpuBackend be;
 be.device_id = 0;
-be.threads_per_block = 1024;  // 最大化并行度
+be.threads_per_block = 256;   // 不大于 512 的任意正数 2 的幂
 ```
 
 ---
@@ -1105,6 +1114,109 @@ enum class GpuOptLevel {
 
 ---
 
+### 统一执行配置与规划
+
+以下主机端类型会在创建任何 CUDA 资源前解析请求的执行契约：
+
+```cpp
+enum class BackendMode {
+    Auto = 0, Graph = 1, Persistent = 2, Fallback = 3, Direct = 4
+};
+enum class SolverMode {
+    Auto = 0, Eigen = 1, Batched = 2, CuSolver = Batched
+};
+enum class PrecisionMode { Standard = 0, Full = 1, Aggressive = 2 };
+enum class ThermalMode { Auto = 0, Disabled = 1, Cpu = 2, Gpu = 3 };
+enum class FallbackReason {
+    None = 0, CapabilityUnavailable = 1, DeterminismRequired = 2,
+    RuntimeFailure = 3, MetadataConflict = 4
+};
+
+struct GpuExecutionConfig {
+    BackendMode backend = BackendMode::Auto;
+    SolverMode solver = SolverMode::Auto;
+    PrecisionMode precision = PrecisionMode::Full;
+    ThermalMode thermal = ThermalMode::Auto;
+    bool enable_calibration = false;
+    bool deterministic = false;
+    int device_id = 0;
+    int threads_per_block = 512;
+    bool enable_profiling = false;
+    void validate() const;
+};
+
+struct GpuCapability {
+    bool supports_graph = true;
+    bool supports_persistent = true;
+    bool supports_batched_solver = true;
+    bool supports_gpu_thermal = true;
+    bool persistent_is_deterministic = false;
+};
+
+struct GpuExecutionPolicy {
+    BackendMode requested_backend = BackendMode::Auto;
+    SolverMode requested_solver = SolverMode::Auto;
+    PrecisionMode requested_precision = PrecisionMode::Full;
+    ThermalMode requested_thermal = ThermalMode::Auto;
+    BackendMode backend = BackendMode::Fallback;
+    SolverMode solver = SolverMode::Eigen;
+    PrecisionMode precision = PrecisionMode::Full;
+    ThermalMode thermal = ThermalMode::Disabled;
+    FallbackReason backend_fallback_reason = FallbackReason::None;
+    FallbackReason solver_fallback_reason = FallbackReason::None;
+    FallbackReason thermal_fallback_reason = FallbackReason::None;
+};
+
+class GpuExecutionPlanner {
+public:
+    static constexpr GpuExecutionPolicy plan(
+        std::size_t n_stages, std::size_t n_filaments, std::size_t batch_size,
+        bool thermal_enabled, const GpuCapability&, const GpuExecutionConfig&) noexcept;
+};
+```
+
+约束和静态规则：
+
+- `GpuExecutionPlanner::plan` 是纯主机代码。它使用维度、显式请求、确定性模式和提供的能力快照，不检查 CUDA 或计时。
+- 显式 `Fallback` 是纯 CPU 契约，不应创建 CUDA context。主机规划器为了策略检查会保留独立请求的求解器/热模式；`GpuEngine` 在实际运行时将其归一化为 `Fallback + Eigen`，并在需要时归一化为 CPU 热模式。
+- 当 `supports_graph == false` 时，显式 `Graph` 解析为带 `CapabilityUnavailable` 的 `Fallback`；运行时依据解析后的后端执行，也不会创建 context。当 graph 能力可用时，当前引擎可以在构造时升级请求，但只捕获/重放 mutual segment。矩阵组装、求解、力/状态编排和热更新仍在图外执行。
+- 显式 `Persistent` 当前解析为安全回退，因为同步引擎没有常驻 kernel 所需的独立控制 stream。标记为非确定性的能力也不能满足确定性请求。
+- 在编译 CUDA、目标设备可用且初始化成功时，`Direct` 使用直接 CUDA mutual pipeline。主机规划器对 `Auto` 保守地解析为 `Fallback`；`GpuEngine` 在运行时检测到设备后可以将 `Auto` 升级为 `Direct`。调用方若需要固定的 CUDA 后端，应显式请求 `Direct` 或 `Graph`。
+- `SolverMode::Batched` 需要 `supports_batched_solver`；否则解析为带 `CapabilityUnavailable` 的 Eigen。`SolverMode::Auto` 仅在规划器的大工作负载规则下选择 Batched，否则选择 Eigen。
+- `ThermalMode::Gpu` 需要 `supports_gpu_thermal`；否则解析为带 `CapabilityUnavailable` 的 CPU 热模式。`Auto` 仅在大工作负载且有能力支持时选择 GPU 热模式。
+- 当前大工作负载规则为 `batch_size >= 8 || n_stages + n_filaments >= 128`。这是静态规则，不是性能保证。
+- 当 `enable_calibration` 为 true 时，构造过程在工作区初始化后执行一次单位批次求解器校准。校准不推进物理状态，`reset()` 也不会重复校准；`ExecutionReport::calibrated` 是该一次性操作的元数据。
+- 能力快照不等于设备可用性证明。CUDA 运行时枚举、设备选择、context 创建或分配仍可能失败，并会报告运行时回退。调用方必须检查解析后的报告。
+
+`GpuCapability` 和规划器公开存在是为了支持确定性的主机测试和策略检查；它们不表示 CUDA 运行时检测已经完成。
+
+枚举语义：
+
+| 类型 | 取值 |
+|---|---|
+| `BackendMode` | `Auto` 延迟到运行时选择；`Graph` 请求 mutual segment 的图辅助捕获/重放；`Persistent` 请求常驻协议，但当前 `GpuEngine` 会回退；`Fallback` 为纯 CPU；`Direct` 直接启动 CUDA mutual segment。 |
+| `SolverMode` | `Auto` 应用静态工作负载规则；`Eigen` 为主机 LDLT 路径；`Batched` 请求 CUDA 批量求解器。`CuSolver` 是 `Batched` 的别名。 |
+| `PrecisionMode` | `Standard` 为无距离截断的 FP64，`Full` 为带生产截断的 FP64，`Aggressive` 使用 FP32 integrand 和 FP64 reduction。 |
+| `ThermalMode` | `Auto` 应用工作负载/能力规则；`Disabled` 省略热更新；`Cpu` 和 `Gpu` 在支持时选择对应热路径。 |
+| `FallbackReason` | `None` 表示无回退；`CapabilityUnavailable` 表示静态/运行时能力不支持；`DeterminismRequired` 表示拒绝非确定性选择；`RuntimeFailure` 表示 context/分配/捕获/步执行失败；`MetadataConflict` 表示保守解析或当前未实现的请求。 |
+
+配置与策略字段：
+
+| 类型 | 字段组 | 含义 |
+|---|---|---|
+| `GpuExecutionConfig` | `backend`、`solver`、`precision`、`thermal` | 请求的执行模式。 |
+| `GpuExecutionConfig` | `enable_calibration`、`deterministic` | 请求构造期一次性校准和确定性策略约束。 |
+| `GpuExecutionConfig` | `device_id`、`threads_per_block` | 运行时设备选择和经过校验的 launch 宽度。 |
+| `GpuExecutionConfig` | `enable_profiling` | 复制到报告的元数据；计时独立采集，不表示启用 NVTX。 |
+| `detail::GpuEngineFaultInjection` | `fail_after_mutual`、`fail_allocation`、`fail_device_initialization`、`fail_graph_capture` | 内部/测试专用构造函数 seam；不是普通执行配置。 |
+| `GpuCapability` | `supports_graph`、`supports_persistent`、`supports_batched_solver`、`supports_gpu_thermal` | 仅供静态规划使用的调用方能力快照。 |
+| `GpuCapability` | `persistent_is_deterministic` | Persistent 是否可满足 `deterministic=true`。 |
+| `GpuExecutionPolicy` | `requested_*` | 为审计保留的原始请求模式。 |
+| `GpuExecutionPolicy` | `backend`、`solver`、`precision`、`thermal` | 驱动资源创建和执行的解析后模式。 |
+| `GpuExecutionPolicy` | `*_fallback_reason` | 各维度的静态解析原因。 |
+
+---
+
 ### GpuSingleStageSim
 
 ```cpp
@@ -1120,9 +1232,10 @@ public:
         components::Armature             armature,      // 拷贝
         std::unique_ptr<Excitation>      excitation,    // 移动传入
         double                           dt,
-        bool                             enable_thermal = false,
-        GpuOptLevel                      opt_level = GpuOptLevel::Full,
-        const GpuBackend&                backend = {}
+         bool                             enable_thermal = false,
+         GpuOptLevel                      opt_level = GpuOptLevel::Full,
+         const GpuBackend&                backend = {},
+         BackendMode                      explicit_backend = BackendMode::Auto
     );
 
     const SimStep&   step();
@@ -1134,6 +1247,8 @@ public:
     const SimState&  state()      const;
     double  dt()         const;
     int     step_count() const;
+    const ExecutionReport& execution_report() const;
+    std::vector<double> filament_resistances() const;
 };
 
 } // namespace
@@ -1150,12 +1265,15 @@ public:
 | `enable_thermal` | 启用绝热丝元升温（CPU 侧） | `false` |
 | `opt_level` | GPU 优化等级 | `GpuOptLevel::Full` |
 | `backend` | GPU 后端配置 | `{}`（默认值） |
+| `explicit_backend` | 可选的构造函数级后端覆盖。`Auto` 保留 `backend`；其他值覆盖 `backend.backend` 和 `use_persistent`。 | `BackendMode::Auto` |
+
+当激励源为空、`dt` 非有限或不为正、`device_id` 为负、`threads_per_block` 无效、`max_batch_sims == 0`、激励电压非有限、几何/状态维度无效或 stage 电压非有限时，构造函数抛出 `std::invalid_argument`。启用 CUDA 时还会验证目标设备存在，并在分配资源前确认该设备仍被选中。`GpuSingleStageSim<RK4Stepper>` 为保持源码兼容仍可构造，但由于 RK4 不受支持，`step()` 抛出 `std::logic_error`。
 
 **方法**：
 
 | 方法 | 行为 |
 |--------|-----------|
-| `step()` | 推进一个时间步。对每个丝元对发射 CUDA kernel，通过 Eigen LDLT 求解 ODE，更新运动学，记录诊断信息。返回新记录的 `SimStep`。 |
+| `step()` | 推进一个 Euler 时间步。`Direct` 直接执行现有 CUDA mutual segment；`Graph` 捕获/重放该 mutual segment，然后在图外执行现有同步矩阵、Eigen LDLT、力/状态和热阶段。`Fallback` 在 CPU 上执行完整时间步。在 `Full`/`Aggressive` 模式下，当 `abs(电枢位置 - coil.position()) > 10 * coil.length()` 时，stage-电枢互感和力被截断，但驱动电路仍保持活动。返回新记录的 `SimStep`。 |
 | `run()` | 运行至默认终止条件。阻塞直到激励结束（续流二极管导通且电流衰减完毕）。 |
 | `run(policy)` | 运行至自定义 `TerminationPolicy`。 |
 | `reset()` | 恢复至初始状态。所有电流归零，电枢位置/速度恢复至构造时值，重置激励，清空结果历史。 |
@@ -1163,8 +1281,98 @@ public:
 | `state()` | 当前内部状态——实时引用。 |
 | `dt()` | 固定时间步长。 |
 | `step_count()` | 自构造或上次 `reset()` 以来的步数。 |
+| `execution_report()` | 已解析的后端/求解器/热模型策略及累计诊断。回退时 `gpu_executed` 为 false；只有完整 CUDA 物理步成功提交后才为 true。GPU/求解器/热/传输计时、图重建、回退次数、校准、条件数估计和回退原因在 reset 后仍为累计值。 |
+| `filament_resistances()` | 返回当前丝元电阻向量的值拷贝。启用热模型时，构造过程从电枢参考电阻初始化该向量；焦耳热会更新它，`reset()` 会恢复参考值。拷贝在包装器后续修改后仍有效，不暴露设备指针。 |
 
-**内部实现**：类内部持有一个 `GpuAdaptor`，在构造时将线圈几何、丝元离散化和 GL 积分节点一次性上传到设备内存。每次 `step()` 调用将电枢位置传至设备，为每个（线圈，丝元）对发射 4D 积分 kernel，并回读 `M1`/`dM1` 矩阵。
+`SimStep::force` 是使用提交后的电流和在步前位置边界计算并缓存的互感梯度记录的有符号力。位置更新不会再次计算梯度；这是单级、多级和批量包装器共同采用的“步后电流/步前位置”约定。Euler 速度更新使用从步前电流计算的力。
+
+`ExecutionReport` 字段语义：
+
+| 字段 | 含义 |
+|---|---|
+| `requested_backend`、`requested_solver`、`requested_precision`、`requested_thermal` | 为审计保留的原始请求。 |
+| `backend`、`solver`、`precision`、`thermal` | 当前解析后的执行模式。 |
+| `gpu_executed` | 至少一个完整 CUDA 后端物理步成功提交的累计证明；不是能力/请求标志。 |
+| `calibrated`、`precision_fallback`、`metadata_conflict` | 一次性校准完成状态及累计策略/报告诊断。 |
+| `graph_rebuild_count`、`fallback_count` | `graph_rebuild_count` 只统计成功捕获的新 CUDA Graph 变体；主机变体选择、Direct/Fallback 构造、缓存命中和失败捕获都不增加该值。`fallback_count` 统计回退事件。 |
+| `gpu_time_ms` | 成功 CUDA 后端物理流水线的累计主机墙钟时间，包括传输、CPU 矩阵组装/Eigen 求解和主机编排；绝不是仅设备 kernel 时间。 |
+| `solver_time_ms`、`thermal_time_ms` | 实际 CPU 或 CUDA 后端路径中对应阶段的累计主机墙钟时间。 |
+| `transfer_time_ms` | 同步主机/设备拷贝消耗的累计主机墙钟时间。 |
+| `max_condition_estimate` | 已记录的最大求解器条件数估计/校准诊断。 |
+| `fallback_reason` | 保留的最新人类可读回退消息。 |
+| `static_fallback_reason`、`runtime_fallback_reason` | 机器可读的规划期和运行时原因。 |
+| `device_id`、`threads_per_block` | 从配置复制的已校验执行设置。 |
+| `profiling_enabled` | 仅为 profiling 请求元数据。计时独立采集，不表示存在 NVTX。 |
+
+**所有权与回退**：包装器通过 RAII 持有一个 `GpuEngine`。`Excitation` 仍是移动传入的 `std::unique_ptr`；公开包装器不持有裸设备指针。`GpuEngine` 负责 CUDA context、求解器、图、热工作区和设备缓冲区的生命周期，并在初始化失败时释放已经部分分配的资源。CUDA 运行时枚举或设备选择失败、CUDA 不可用、context/分配失败或运行时流水线失败时，引擎在需要时恢复完整步前状态，初始化 Eigen 求解器，在 CPU 上执行完整时间步，并锁定后续步骤继续 CPU 回退。枚举/选择/context/分配/流水线错误会保留非空原因并设置 `runtime_fallback_reason=RuntimeFailure`；无设备/驱动不足使用 `CapabilityUnavailable`。成功 CUDA 步和 CPU 回退使用同一 Euler 物理流水线；但互感计算中的 CPU/GPU 浮点差异仍可能影响长时间运行结果。
+
+**积分契约**：支持 `GpuSingleStageSim<EulerStepper>`。本次迁移中明确不支持 `GpuSingleStageSim<RK4Stepper>`：`step()` 会抛出 `std::logic_error`，不会静默改用 Euler。真正的四阶段 RK4 GPU 对齐被推迟，本 API 不宣称 RK4 一致性。
+
+**重置与诊断**：`reset()` 清除仿真状态、激励状态、已完成步数和结果历史，然后在步边界重新选择图变体。`ExecutionReport` 是执行审计信息：回退次数、计时、图重建次数、校准状态、最大条件数估计、回退原因和 `gpu_executed` 均为累计字段，reset 后保留。启用校准时，构造过程会在工作区初始化后执行一次单位批次求解器校准；校准不会推进物理状态，reset 也不会重复校准。
+
+**从 HEAD 迁移**：
+
+HEAD 中的旧声明和默认值：
+
+```cpp
+struct GpuBackend {
+    int device_id = 0;
+    int threads_per_block = 512;
+    size_t max_batch_sims = 256;
+    bool enable_profiling = false; // 声称 NVTX range 标记
+    bool use_persistent = true;
+};
+```
+
+当前声明和默认值：
+
+```cpp
+struct GpuBackend {
+    int device_id = 0;
+    int threads_per_block = 512;
+    size_t max_batch_sims = 256;
+    bool enable_profiling = false; // 元数据和主机计时；不保证 NVTX
+    bool use_persistent = true;
+    BackendMode backend = BackendMode::Graph;
+};
+```
+
+| 契约 | HEAD | 当前 E2 契约 |
+|---|---|---|
+| `GpuBackend` 声明/默认值 | `device_id=0`、`threads_per_block=512`、`max_batch_sims=256`、`enable_profiling=false`、`use_persistent=true`；没有 `backend` 字段 | 共享 `GpuBackend` 保留 `use_persistent=true`，并新增 `backend=BackendMode::Graph`。省略 `GpuMultiStageSim` 后端时使用 `multi_stage_default_backend()` 并请求 `Direct`；显式提供 `use_persistent=true` 仍表示有意请求 `Persistent`。显式构造模式覆盖该映射，可请求 `Graph`、`Direct`、`Fallback` 或 `Persistent`。`enable_profiling` 是元数据/计时请求，不再声称 NVTX。 |
+| profiling/计时 | `enable_profiling` 声称 NVTX range，`gpu_time_ms` 容易被理解为设备时间 | `profiling_enabled` 只记录元数据。`gpu_time_ms` 是成功 CUDA 后端物理流水线的主机墙钟时间，包括传输和主机编排，不是仅设备时间。 |
+| RK4 | 包装器执行所选的 `StepperPolicy`，包括遗留的 RK4 模板实例 | `GpuSingleStageSim<RK4Stepper>` 仍可构造，但 `step()` 抛出 `std::logic_error`，不会静默执行 Euler。 |
+| 报告访问 | 没有统一包装器报告访问器 | `execution_report()` 返回累计 `ExecutionReport`，包括请求/解析模式、回退原因、计时、校准元数据和 `gpu_executed`。 |
+| 热电阻访问 | 包装器没有更新后丝元电阻的访问器 | `filament_resistances()` 返回物理电阻向量的值拷贝；构造/重置时使用电枢参考值，焦耳热后更新；不暴露裸设备指针。 |
+| 校验 | 遗留构造可能延后或遗漏边界校验 | 无效公开配置、空激励源、无效维度/几何/状态、非有限电压、无效 launch 设置以及负数/越界的配置设备 ID 抛出 `std::invalid_argument`。真实 CUDA 枚举/设备选择失败、无设备/驱动不足检测以及 context/分配/流水线失败则使用诚实且锁定的 CPU 回退；运行时错误设置 `runtime_fallback_reason=RuntimeFailure`，运行时能力不可用则使用 `CapabilityUnavailable`。 |
+| 所有权 | 遗留包装器直接持有 adaptor/持久化资源 | 包装器通过 `std::unique_ptr` 持有 `GpuEngine`；`Excitation` 仍移动传入；公共包装器不暴露裸设备指针。引擎使用 RAII，包括部分分配清理。 |
+| 回退 | 持久化和设备失败可能从请求或遗留路径推断 | 应检查解析后的 `backend`、`solver`、`gpu_executed`、`static_fallback_reason`、`runtime_fallback_reason` 和 `fallback_reason`。显式 Fallback 和能力不支持的 Graph 都是 CPU-only，且不创建 CUDA context。运行时可用性仍可能在能力快照后强制回退；配置了无效设备时则会在分配前拒绝。 |
+| CPU/GPU 对齐 | 遗留 GPU 行为没有暴露迁移后的引擎契约 | 成功 GPU 路径和 CPU 回退共享 Euler 物理流水线，并由聚焦测试比较，但 CUDA/CPU 浮点差异仍可能存在。Graph 当前只捕获 mutual；矩阵、Eigen 求解器、力/状态和热阶段仍在图外。 |
+
+迁移示例：
+
+```cpp
+// HEAD：persistent 是隐式默认值。
+GpuBackend old_style{};
+
+// E1：Graph 是显式默认值；构造/步进后检查报告。
+GpuBackend graph;
+graph.backend = BackendMode::Graph;
+graph.use_persistent = false;
+GpuSingleStageSim<EulerStepper> sim(coil, arm, std::move(excitation), 1e-6,
+                                   false, GpuOptLevel::Full, graph);
+sim.step();
+const auto& report = sim.execution_report();
+if (report.gpu_executed) {
+    // report.gpu_time_ms 是已提交 CUDA 流水线的主机墙钟时间。
+}
+
+// 显式 CPU-only 迁移。
+GpuBackend cpu;
+cpu.backend = BackendMode::Fallback;
+GpuSingleStageSim<EulerStepper> cpu_sim(coil, arm, std::move(cpu_excitation), 1e-6,
+                                        false, GpuOptLevel::Full, cpu);
+```
 
 **完整示例**：
 
@@ -1196,7 +1404,7 @@ int main() {
 }
 ```
 
-公开 API 与 `SingleStageSim` 完全一致。从 CPU 迁移到 GPU 仅需修改类名和 include 路径。
+构造和步进接口有意保持接近 `SingleStageSim`，但 GPU 包装器额外提供 `execution_report()`，并且当前只支持 Euler。CPU RK4 仿真在真正 GPU RK4 加入前必须继续使用 CPU 实现；GPU 包装器不宣称 RK4 对齐。
 
 ---
 
@@ -1220,8 +1428,14 @@ public:
         double                                    dt,
         bool                                      enable_thermal = false,
         GpuOptLevel                               opt_level = GpuOptLevel::Full,
-        const GpuBackend&                         backend = {}
+         const GpuBackend&                         backend = multi_stage_default_backend(),
+        BackendMode                               explicit_backend = BackendMode::Auto
     );
+
+    ~GpuMultiStageSim();
+
+    GpuMultiStageSim(const GpuMultiStageSim&) = delete;
+    GpuMultiStageSim& operator=(const GpuMultiStageSim&) = delete;
 
     const MultiStageStep&  step();
     const MultiStageResult& run();
@@ -1233,12 +1447,17 @@ public:
     double  dt()              const;
     int     step_count()      const;
     int     num_stages()      const;
+    const ExecutionReport& execution_report() const;
+    bool                    graph_assisted() const;
+    std::vector<double> filament_resistances() const;
+    std::vector<double> mutual_inductances() const;
+    std::vector<double> mutual_gradients() const;
 };
 
 } // namespace
 ```
 
-**构造约束**：`coils.size() == excitations.size()`，`trigger_configs.size() == coils.size() - 1`，`coils.size() ≤ kMaxStages (50)`。违反任一则抛出 `std::invalid_argument`。
+**构造约束**：`coils.size() == excitations.size()`，`trigger_configs.size() == coils.size() - 1`，`coils.size() ≤ kMaxStages (50)`，`dt` 为有限正数，每个激励源非空且电压有限，每个触发配置均通过 `validate_trigger_config()`，后端设置有效。违反任一则抛出 `std::invalid_argument`，包括无效的显式后端枚举值。有限位置和有限非负延迟始终保持触发资格；`+infinity` 是唯一有效的终止性永不触发值。
 
 **构造参数**：
 
@@ -1251,18 +1470,64 @@ public:
 | `dt` | 固定时间步长（s） | `1e-6` |
 | `enable_thermal` | 启用绝热丝元升温（CPU 侧） | `false` |
 | `opt_level` | GPU 优化等级 | `GpuOptLevel::Full` |
-| `backend` | GPU 后端配置 | `{}`（默认值） |
+| `backend` | GPU 后端配置。省略时使用 `multi_stage_default_backend()`（`use_persistent=false`、`backend=Direct`）。显式提供 `use_persistent=true` 仍表示有意请求 Persistent。 | `multi_stage_default_backend()` |
+| `explicit_backend` | 可选的显式后端覆盖。`Auto` 保留所提供的遗留 `use_persistent` 行为；其他值覆盖 `use_persistent` 和 `backend.backend`。 | `BackendMode::Auto` |
 
 **方法**——签名与 CPU 版 `MultiStageSim` 完全一致：
 
 | 方法 | 行为 |
 |--------|-----------|
-| `step()` | 推进一个时间步。检查触发器、静默已结束的 stage、为所有活跃的 (stage, filament) 对发射 CUDA kernel、求解 ODE、更新运动学。 |
-| `run()` / `run(policy)` | 运行至终止条件。 |
+| `step()` | 推进一个 Euler 时间步。已触发且未完成的 stage 始终参与线圈电路求解。在 `Full`/`Aggressive` 模式下，距离截断只作用于 stage-电枢互感项和力；stage 回到范围内前这些项为零。`Direct` 发射 CUDA mutual segment；`Graph` 仅捕获/重放该 mutual segment，并在图外执行矩阵组装、Eigen 求解、力/状态更新和热更新；`Fallback` 在 CPU 上执行完整步。`GpuMultiStageSim<RK4Stepper>::step()` 抛出 `std::logic_error`，不会静默执行 Euler。 |
+| `run()` / `run(policy)` | 运行至终止条件。只有当每一级都已完成或通过 `+infinity` 变为终止性不适用时才会自动完成；有限的延时/位置触发级会保持运行，直到触发。显式最大步数、速度衰减和可选位置边界仍可终止具有可触发 stage 的运行。速度衰减判定使用最新提交的步后记录力计算加速度，与 CPU `compute_force(state_)` 一致，而不是积分时施加的步前力。 |
 | `reset()` | 恢复所有状态至初始条件。 |
 | `result()` / `state()` / `dt()` / `step_count()` / `num_stages()` | 查询。 |
+| `execution_report()` | 读取请求/解析后的后端、`gpu_executed`、部分 Graph 计数、回退原因、计时和累计诊断。`gpu_executed` 是完整 CUDA 物理步已提交的证明，不只是请求或能力标志。 |
+| `graph_assisted()` | 只有在完整 CUDA 后端步解析为 `BackendMode::Graph` 后才为 true；它表示 mutual segment 的图辅助，不表示完整流水线捕获。 |
+| `filament_resistances()` | 返回当前丝元电阻向量的值拷贝。热模式构造时使用电枢参考值，热更新会改变它，`reset()` 恢复参考值。拷贝独立于包装器后续修改。 |
+| `mutual_inductances()` / `mutual_gradients()` | 返回当前 stage/丝元 M1 和 dM1 缓冲区的值拷贝，使用引擎坐标。用于数值对齐检查，不暴露原始设备指针。 |
 
-**内部实现**：使用 CUDA kernel 计算所有活跃 stage-丝元对的 M1/dM1 矩阵。丝元间互感矩阵 `[M]` 在构造时由 CPU 预计算（仿真过程中不变）。线圈间互感 `M_cc` 同样在构造时由 CPU 预计算，填充系统矩阵的 coil-coil 非对角块。LDLT 线性求解、力计算和运动学更新保持在 CPU 上。ODE 维度为 `n_stages + N_filaments`。未激活的 stage 的行/列设为单位矩阵。
+`MultiStageStep::state.force` 是状态更新后记录的有符号瞬时合轴向力。`stage_forces` 是对应的有符号瞬时各级力贡献，使用提交后的电流和在步前位置边界计算并缓存的互感梯度。如果激励在该步推进时完成某一级，则该级提交的力贡献为零，与 CPU 参考实现一致。用于推进速度的是单独保留的步前施加力，不是公开记录力；速度衰减终止判定会明确使用已提交的记录力。`PerStageSummary::max_force` 是该 stage 自身有符号记录力贡献的峰值绝对值；`MultiStageSummary::max_force` 是有符号记录合力历史的峰值绝对值。触发位置在实际触发的步前边界捕获，不再从后续带时间戳的历史样本反推。
+
+**内部实现**：通过 `GpuEngine` 计算所有活跃 stage-丝元对的 M1/dM1 矩阵。Graph 模式只捕获/重放该 mutual-inductance segment；丝元/级间矩阵组装、Eigen LDLT 求解、力/状态编排、位置/速度更新、激励推进、触发处理和热更新均在图外执行。ODE 维度为 `n_stages + N_filaments`；未激活 stage 使用 mask/单位矩阵语义。必须检查 `execution_report().backend` 和 `gpu_executed`，以区分 Graph 辅助 CUDA 执行与 CPU 回退。
+
+**E2 迁移契约**：
+
+| 关注点 | 遗留/当前行为 | E2 行为 |
+|---|---|---|
+| `use_persistent` | `GpuBackend` 默认值仍为 `true` 以保持源码兼容；旧多级调用方使用 `false` 选择逐对 direct/fallback 路径。 | 省略 `GpuMultiStageSim` 后端时使用 `multi_stage_default_backend()` 并请求 `Direct`。显式提供 `use_persistent=false` 时请求 `Direct`（除非 `backend=Fallback`）；显式提供 `use_persistent=true` 时请求 `Persistent`，并可诚实回退。提供 `explicit_backend=Graph`、`Direct`、`Fallback` 或 `Persistent` 时显式覆盖且在 `requested_backend` 中可见。 |
+| Graph | Graph 请求可能被理解为完整流水线。 | Graph 明确是图辅助：CUDA Graph 只捕获 mutual-inductance。`graph_assisted()` 和 `execution_report()` 标识实际成功的部分 Graph 执行；CPU 矩阵/求解/力/状态/热处理仍在图外。解析为 `Fallback` 且 `gpu_executed=false` 不算 GPU 执行。 |
+| RK4 | CPU `MultiStageSim<RK4Stepper>` 执行真正的四阶段 RK4。 | `GpuMultiStageSim<RK4Stepper>` 为保持源码兼容仍可构造，但 `step()` 抛出 `std::logic_error`。不会实现伪 RK4，也不会静默替换为 Euler。存在真正的分阶段引擎 API 前，应迁移到 CPU `MultiStageSim<RK4Stepper>`。 |
+| 生命周期 | 遗留 adaptor/持久化资源由包装器专门管理。 | `GpuEngine` 通过 RAII 管理 CUDA context、图/cache、求解器、热缓冲区和状态。`execution_report()` 仍是包装器持有的引用；`filament_resistances()` 返回独立值拷贝。reset 恢复仿真状态但保留累计报告诊断。 |
+| 异常 | 一些无效输入可能延迟到下层才发现。 | 构造函数对级数/激励/触发数量不一致、空或过大的级数、非正/非有限 `dt`、空/非有限激励、无效后端模式或 launch 设置、无效几何/状态维度抛出 `std::invalid_argument`。CUDA 运行时不可用/失败则报告锁定的 CPU 回退，不与参数校验混淆。 |
+| 对齐 | GPU-vs-CPU 测试可能在两条路径都是 CPU 回退时通过。 | CUDA 运行时可用时，主要非退化对比必须要求 `gpu_executed=true` 和预期解析后端，并比较电流、位置、速度、力、stage 输出以及热/电阻状态。另有独立显式 fallback 测试断言 CPU-only 执行。 |
+
+**E2 迁移示例**：
+
+```cpp
+// 遗留多级语义：false 选择 direct/逐对路径。
+GpuBackend legacy_direct;
+legacy_direct.use_persistent = false;
+GpuMultiStageSim<EulerStepper> direct(
+    coils, armature, std::move(excitations), triggers, 1e-6,
+    false, GpuOptLevel::Standard, legacy_direct); // requested Direct
+
+// 有意请求 Graph：必须使用显式模式与遗留 false 标志区分。
+// 它仅是图辅助执行。
+GpuBackend graph_backend;
+graph_backend.use_persistent = false;
+GpuMultiStageSim<EulerStepper> graph(
+    coils, armature, std::move(graph_excitations), triggers, 1e-6,
+    false, GpuOptLevel::Standard, graph_backend, BackendMode::Graph);
+graph.step();
+const auto& report = graph.execution_report();
+if (report.gpu_executed && graph.graph_assisted()) {
+    // 只有 mutual-inductance segment 被捕获/重放。
+}
+
+// RK4 迁移仍使用 CPU。
+MultiStageSim<RK4Stepper> cpu_rk4(
+    coils, armature, std::move(rk4_excitations), triggers, 1e-6);
+```
 
 **完整示例**：
 
@@ -1336,9 +1601,10 @@ public:
     SimBatch(
         std::vector<components::DrivingCoil> coils,
         components::Armature                  armature,
-        int                                   num_sims,
-        double                                dt,
-        const GpuBackend&                     backend = {});
+         int                                   num_sims,
+         double                                dt,
+         const GpuBackend&                     backend = {},
+         BackendMode                           explicit_backend = BackendMode::Auto);
 
     ~SimBatch();
 
@@ -1355,6 +1621,8 @@ public:
 
     const MultiStageResult& result(int sim_id) const;
     int num_sims() const;
+    const ExecutionReport& execution_report() const;
+    bool graph_assisted() const;
 };
 
 } // namespace
@@ -1362,7 +1630,11 @@ public:
 
 `SimBatch` 是**参数扫描**的容器——运行共享相同线圈和电枢几何但激励参数（电压、电容）和/或触发位置不同的多组仿真。
 
-**约束**：所有仿真必须共享**完全相同**的线圈几何和丝元离散化（`m × n`）。传入构造函数的 `coils` 和 `armature` 为所有仿真共享。每个仿真的激励源和触发配置通过 `set_excitations()` 设置。
+**执行契约**：`SimBatch` 是由 `GpuEngine` 驱动的包装器。一个引擎以 `B = num_sims` 构造；所有物理缓冲区都使用固定的行主序布局，包括 `[B][S][F]` 的互感/梯度数组和 `[B][S+F]` 的电流行。active mask 会原地冻结已完成的行。行不会压缩或重新编号，因此较短的仿真先结束时，`result(sim_id)` 仍保持稳定索引。这个固定容量策略是有意设计的：步骤之间不会压缩活跃行。活跃列表压缩阈值在 E3 中明确推迟且尚未实现；物理索引和结果索引保持稳定。
+
+所有仿真必须共享**完全相同**的线圈几何和丝元离散化（`m × n`）。每个仿真的激励源、触发配置和 stage 电压通过 `set_excitations()` 提供。电路 mask 选择 stage 是否参与；互感 mask 还选择 stage-电枢互感和力。无论最终解析为何种后端（包括 `Fallback`），远距离 stage 都使用统一截断规则 `abs(armature_position - coil.position()) <= 10 * coil.length()`；超出范围时其互感和记录力项为零。
+
+`SimBatch` 仅支持 `EulerStepper`。`SimBatch<RK4Stepper>` 会被明确拒绝：构造和 `run()` 抛出 `std::logic_error`，不宣称 RK4 对齐，也不会静默替换为 Euler。
 
 **构造参数**：
 
@@ -1372,18 +1644,25 @@ public:
 | `armature` | 共享电枢几何和丝元离散化（拷贝）。 |
 | `num_sims` | 仿真数量。必须为正数且 ≤ `GpuBackend` 中的 `max_batch_sims`。 |
 | `dt` | 固定时间步长（s），所有仿真共享。 |
-| `backend` | GPU 后端配置。 |
+ | `backend` | GPU 后端配置。构造函数的显式 `explicit_backend` 优先级最高；否则显式 `backend.backend` 对 `Graph`、`Direct`、`Fallback` 和 `Persistent` 生效；只有两者都为 `Auto` 时才读取遗留标志。解析后的模式和回退原因可从 `execution_report()` 获取。 |
+ | `explicit_backend` | 可选的构造函数级后端覆盖。`Auto` 保留 `GpuBackend` 的解析结果；其他值覆盖 `backend.backend` 和 `use_persistent`。 |
 
 **方法**：
 
 | 方法 | 行为 |
 |--------|-----------|
 | `set_excitations(sim_id, excitations, triggers)` | 为仿真 `sim_id` 配置激励源和触发设置。必须在 `run()` 之前对每个仿真调用。 |
-| `run()` / `run(policy)` | 同时运行所有仿真。每个仿真独立运行——最先到达终止条件的仿真不阻塞其他仿真。 |
+| `run()` / `run(policy)` | 同时运行所有仿真。每个仿真独立运行——最先到达终止条件的仿真不阻塞其他仿真。首次调用前必须配置每一行：`SimBatch` 的一次运行是单次使用的，后续调用不会重置或继续已完成的历史。 |
 | `result(sim_id)` | 获取特定仿真的 `MultiStageResult`。 |
 | `num_sims()` | 本批次中的仿真数。 |
+| `execution_report()` | 返回共享引擎请求/解析后的后端和求解器、回退诊断、计时元数据以及 `gpu_executed`。 |
+| `graph_assisted()` | 只有在完整 CUDA 步解析为 `Graph` 且实际执行 CUDA 后才为 true。Graph 辅助仅覆盖互感 segment。 |
 
-**执行模型**：`SimBatch` 内部管理一个 `GpuAdaptor` 和一个 per-sim 状态对象数组。当 `GpuBackend::use_persistent=true`（默认值）时，一个持久化 CUDA kernel 服务固定的 `(stage, filament)` 对索引空间，通过映射主机缓冲区传递每个仿真的分离值和结果。主机侧仍负责检查触发器、求解 ODE、更新运动学，并串行处理各仿真。当 `use_persistent=false` 时回退到逐对 kernel 启动路径。
+**求解器和回退**：包装器请求 `SolverMode::Auto`，允许 `GpuExecutionPlanner` 在批量较大或维度较大时选择 `Batched`。如果 CUDA context 或批量能力不可用，引擎报告 `Eigen` 并执行 CPU 回退。`SimBatch` 不会因为请求了 `Batched` 就声称 cuSOLVER 已完成；应检查 `execution_report().solver`、`backend`、`gpu_executed` 和回退字段。
+
+**步进和历史语义**：每一步引擎执行前，`SimBatch` 处理异构触发器、更新电路/互感 mask，并保存步前电流以及步前位置边界的互感梯度缓存。引擎使用这些值进行物理 Euler 更新。步进后，各激励源推进，已完成 stage 被 mask；记录的每-stage 力使用 post-step 电流和该步前位置边界的梯度缓存重新计算。这与 `GpuMultiStageSim` 的历史语义一致。历史为每个实际执行的步保存一行；活跃列表压缩在 E3 中明确推迟且尚未实现。
+
+**后端模型**：CUDA 可用时，`Direct` 使用直接互感流水线。`Graph` 仅是图辅助：可捕获/重放互感 segment，而矩阵组装、求解器、力/状态编排和热处理仍在图外。`Persistent` 是一个请求；当前同步引擎没有常驻 control stream，因此它可能解析为 `Fallback`，多行 batch 也不能解析为 persistent。显式 `Fallback` 只使用 CPU，且不创建 CUDA context。
 
 **示例——电容电压参数扫描**：
 
@@ -1438,11 +1717,9 @@ int main() {
 }
 ```
 
-**注意**：回退实现会在每个 step 为每个仿真的每个 (stage, filament) 对发射一个 CUDA kernel。默认的持久化路径在构造时只启动一次 worker kernel，之后通过映射内存门铃通信，避免每步启动 kernel。持久化模式仍属实验性功能，可通过 `GpuBackend::use_persistent` 禁用。
-
 ---
 
-### GpuAdaptor（高级）
+### GpuAdaptor（遗留/内部兼容）
 
 ```cpp
 #include <coilgun/simulation/cuda/gpu_adaptor.hpp>
@@ -1486,11 +1763,13 @@ public:
 }
 ```
 
-`GpuAdaptor` 管理 GPU 加速仿真的设备内存。被 `GpuSingleStageSim`、`GpuMultiStageSim` 和 `SimBatch` 内部使用。大多数用户不需要直接与之交互。
+`GpuAdaptor` 是保留用于内部兼容的遗留、仅移动设备内存辅助类。当前的 `GpuSingleStageSim` 和 `GpuMultiStageSim` 都通过 `GpuEngine` 执行；只有 `SimBatch` 和引擎内部的遗留持久化后端实现仍使用 `GpuAdaptor`。大多数用户不应直接使用它。
+
+下面的 `setup()`/上传契约只记录历史 adaptor 架构。它不是当前 `GpuEngine` 契约，也不保证当前单级引擎只上传一次不变数据或暴露这些设备缓冲区。
 
 **`CoilGeo` / `FilGeo`** 是用于设备传输的紧凑 POD 结构体。它们分别镜像 `DrivingCoil` 和 `Armature` 的几何字段，展平后用于 GPU kernel 参数空间。
 
-**`setup()`** 分配并将不变几何（线圈、丝元、GL 节点/权重）上传到设备内存。必须在任何 per-step 操作之前调用一次。
+**遗留 `setup()`** 在历史 adaptor 架构中分配并将不变几何（线圈、丝元、GL 节点/权重）上传到设备内存，并在 per-step 操作前调用一次；这不是当前 `GpuEngine` 的保证。
 
 **`setup_batch()`** 扩展 `setup()`，增加 `SimBatch` 所需的 per-sim 批量缓冲区。分配 `num_sims` 宽的分离和结果数组。
 
@@ -1500,7 +1779,7 @@ public:
 
 设备指针访问器（`d_*()`）返回已分配的设备内存指针——由 CUDA kernel 直接使用。注意 `d_batch_*()` 指针仅在调用 `setup_batch()` 后有效。
 
-**注意**：`GpuAdaptor` 是仅移动类型（删除拷贝）。析构函数通过 `cudaFree()` 释放所有设备分配。
+**注意**：`GpuAdaptor` 是仅移动类型（删除拷贝）。析构函数通过 `cudaFree()` 释放所有设备分配。本节仅为遗留/内部兼容保留，不是当前单级 API 的权威说明。
 
 ---
 
@@ -1517,7 +1796,9 @@ public:
 
 ---
 
-### 架构
+### 遗留架构参考
+
+下面的图和传输表描述历史 `GpuAdaptor` 路径，仅为兼容文档保留，不是当前 `GpuEngine` 的执行流程。当前单级和多级权威流程见上文：`Graph` 只捕获/重放 mutual-inductance segment，矩阵组装、Eigen 求解、力/状态更新和热处理仍在图外同步直接执行；`Fallback` 在 CPU 上执行完整物理步。
 
 **每时间步的计算流程**：
 
@@ -1544,7 +1825,7 @@ public:
 └─────────────────────────────────────────────┘
 ```
 
-**构造时一次性上传的数据**（通过 `GpuAdaptor`）：
+**历史上构造时一次性上传的数据**（通过遗留 `GpuAdaptor`）：
 
 | 缓冲区 | 大小 | 内容 |
 |--------|------|---------|
@@ -1553,7 +1834,7 @@ public:
 | `d_nodes_` | `9 × sizeof(double)` | Gauss-Legendre 积分节点 |
 | `d_weights_` | `9 × sizeof(double)` | GL 积分权重 |
 
-**每步传输的数据**：
+**历史上每步传输的数据**：
 
 | 方向 | 大小 | 内容 |
 |-----------|------|---------|
@@ -1582,10 +1863,14 @@ GPU 类是**单线程**的——不支持在同一实例上并发调用 `step()`
 | 限制 | 详情 |
 |---|---|
 | 自适应 GL 阶数（n_nodes=4/9） | 已移除。GPU 上使用 4 个 GL 节点会导致非确定性浮点漂移（B1）。 |
-| 热模式 | 温度更新在 CPU 上运行（单线程）。该计算 <1% 运行时间。 |
-| 持久化 kernel | 实验性。使用映射内存和门铃协议进行 host-device 同步。三个 GPU 仿真类默认使用；`use_persistent=false` 时选择回退路径。分配失败时回退到逐对 kernel 启动。 |
-| CUDA Graphs | 未实现。需要每步固定 n_active（无动态触发/终止分支）。 |
+| 热模式 | `ThermalMode::Cpu` 使用 CPU 材料表更新；支持时 `ThermalMode::Gpu` 使用 GPU thermal workspace。解析后的模式和 `thermal_time_ms` 会记录在 `ExecutionReport` 中。 |
+| 持久化 kernel | `GpuSingleStageSim`、`GpuMultiStageSim` 和 `SimBatch` 通过 `GpuEngine` 解析后端；只有在引擎能力和确定性策略允许时才尝试持久化执行，否则报告会标识 CPU 回退。 |
+| CUDA Graphs | 仅实现 mutual-inductance segment 的捕获。矩阵组装、Eigen 求解、力/状态更新和热处理仍在图外执行；报告会标识实际 Graph 路径，但不宣称完整流水线已被捕获。 |
 | 双缓冲 | 未实现。持久化结果在 CPU LDLT 求解前同步，不承诺 CPU/GPU 重叠执行。 |
+
+测量目标 `bench_gpu_engine` 同时包含 CPU Reference 基线，并记录依赖机器的
+墙钟、求解器、热路径、传输和 Graph 捕获观测值。结果见
+`docs/benchmarks/2026-07-19-unified-gpu-engine.md`。
 
 ---
 

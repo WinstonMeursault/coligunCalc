@@ -147,6 +147,7 @@ Notes/
 # Agent
 .ckb/
 .depwire/
+.reflex/
 
 # C++ build artifacts
 *.o

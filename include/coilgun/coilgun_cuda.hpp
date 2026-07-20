@@ -11,6 +11,10 @@
 
 #include "coilgun/coilgun.hpp"
 #include "coilgun/simulation/cuda/gpu_backend.hpp"
+#include "coilgun/simulation/cuda/gpu_execution_config.hpp"
+#include "coilgun/simulation/cuda/gpu_execution_report.hpp"
+#include "coilgun/simulation/cuda/gpu_state_layout.hpp"
+#include "coilgun/simulation/cuda/gpu_engine.hpp"
 #include "coilgun/simulation/cuda/gpu_single_stage_sim.hpp"
 #include "coilgun/simulation/cuda/gpu_multi_stage_sim.hpp"
 #include "coilgun/simulation/cuda/sim_batch.hpp"

@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 #include "coilgun/coilgun.hpp"
+#include <algorithm>
 #include <cmath>
 #include <memory>
 
@@ -71,6 +72,27 @@ TEST_CASE("SingleStageSim — convergence (Euler)") {
 
     double rel_diff = std::abs(v_coarse - v_fine) / v_fine;
     CHECK(rel_diff < 0.02);
+}
+
+TEST_CASE("SingleStageSim — summary max_force is the peak absolute force") {
+    DrivingCoil coil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7);
+    Armature arm(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.120, 5, 2, -0.1);
+    auto exc = std::make_unique<CrowbarExcitation>(450.0, 0.001);
+    SingleStageSim<EulerStepper> sim(coil, arm, std::move(exc), 1e-6, false);
+    TerminationPolicy policy;
+    policy.max_steps = 3;
+    policy.enable_velocity_check = false;
+    sim.run(policy);
+
+    double expected_max_force = 0.0;
+    bool saw_negative_force = false;
+    for (const auto& step : sim.result().history) {
+        expected_max_force = std::max(expected_max_force, std::abs(step.force));
+        saw_negative_force = saw_negative_force || step.force < 0.0;
+    }
+    CHECK(saw_negative_force);
+    CHECK(sim.result().summary.max_force == doctest::Approx(expected_max_force));
 }
 
 TEST_CASE("SingleStageSim — inductance benchmark (Paper 4 Ex.1)") {
