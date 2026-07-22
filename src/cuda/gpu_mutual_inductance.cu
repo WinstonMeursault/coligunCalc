@@ -102,9 +102,9 @@ __global__ void mutual_inductance_coil_pair_kernel(
         double za = map_coord_device(0.0, la_half, d_gl_nodes[j1]);
         double zb = map_coord_device(separation, lb_half, d_gl_nodes[j2]);
 
-        double abs_sep = fabs(zb - za);
-        sM[tid]  += w * mutual_inductance_filament_device(ra, rb, abs_sep);
-        sdM[tid] += w * mutual_inductance_gradient_filament_device(ra, rb, zb - za);
+        const auto pair = mutual_inductance_filament_pair_device(ra, rb, zb - za);
+        sM[tid] += w * pair.mutual;
+        sdM[tid] += w * pair.gradient;
     }
 
     __syncthreads();
@@ -184,9 +184,9 @@ __global__ void mutual_inductance_coil_pair_batch_kernel(
         double za = map_coord_device(0.0, la_half, d_gl_nodes[j1]);
         double zb = map_coord_device(separation, lb_half, d_gl_nodes[j2]);
 
-        double abs_sep = fabs(zb - za);
-        sM[tid]  += w * mutual_inductance_filament_device(ra, rb, abs_sep);
-        sdM[tid] += w * mutual_inductance_gradient_filament_device(ra, rb, zb - za);
+        const auto pair = mutual_inductance_filament_pair_device(ra, rb, zb - za);
+        sM[tid] += w * pair.mutual;
+        sdM[tid] += w * pair.gradient;
     }
 
     __syncthreads();

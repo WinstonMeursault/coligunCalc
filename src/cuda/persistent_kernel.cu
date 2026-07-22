@@ -43,8 +43,9 @@ __global__ void persistent_batch_kernel(
                 double w=gl_weights[i1]*gl_weights[j1]*gl_weights[i2]*gl_weights[j2];
                 double ra=ra_m+ra_h*gl_nodes[i1],rb=rb_m+rb_h*gl_nodes[i2];
                 double za=la_h*gl_nodes[j1],zb=sep+lb_h*gl_nodes[j2];
-                sM[tid]+=w*physics::mutual_inductance_filament_device(ra,rb,fabs(zb-za));
-                sdM[tid]+=w*physics::mutual_inductance_gradient_filament_device(ra,rb,zb-za);
+                const auto pair=physics::mutual_inductance_filament_pair_device(ra,rb,zb-za);
+                sM[tid]+=w*pair.mutual;
+                sdM[tid]+=w*pair.gradient;
             }
             __syncthreads();
             for(int s=tot/2;s>0;s/=2){ if(tid<s){ sM[tid]+=sM[tid+s];sdM[tid]+=sdM[tid+s]; } __syncthreads(); }
@@ -96,8 +97,9 @@ __global__ void persistent_batch_kernel_f32(
                 float w=gl_weights[i1]*gl_weights[j1]*gl_weights[i2]*gl_weights[j2];
                 float ra=ra_m+ra_h*gl_nodes[i1],rb=rb_m+rb_h*gl_nodes[i2];
                 float za=la_h*gl_nodes[j1],zb=sep+lb_h*gl_nodes[j2];
-                sM[tid]+=w*physics::mutual_inductance_filament_f32(ra,rb,fabsf(zb-za));
-                sdM[tid]+=w*physics::mutual_inductance_gradient_filament_f32(ra,rb,zb-za);
+                const auto pair=physics::mutual_inductance_filament_pair_f32(ra,rb,zb-za);
+                sM[tid]+=w*pair.mutual;
+                sdM[tid]+=w*pair.gradient;
             }
             __syncthreads();
             for(int s=tot/2;s>0;s/=2){ if(tid<s){ sM[tid]+=sM[tid+s];sdM[tid]+=sdM[tid+s]; } __syncthreads(); }
