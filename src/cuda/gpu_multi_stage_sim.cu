@@ -203,13 +203,7 @@ GpuMultiStageSim<SP>::GpuMultiStageSim(
 }
 
 template<typename SP>
-GpuMultiStageSim<SP>::~GpuMultiStageSim() {
-    if (use_persistent_) {
-        *pbuf_.shutdown = 1;
-        cudaDeviceSynchronize();
-        free_persistent_buffers(pbuf_);
-    }
-}
+GpuMultiStageSim<SP>::~GpuMultiStageSim() = default;
 
 template<typename SP>
 void GpuMultiStageSim<SP>::sync_state_from_engine() {

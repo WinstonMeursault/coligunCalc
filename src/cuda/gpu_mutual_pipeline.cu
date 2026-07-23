@@ -96,18 +96,15 @@ __global__ void mutual_pipeline_kernel(
             const float frb = static_cast<float>(rb);
             const float fdz = static_cast<float>(zb - za);
             const float fw = static_cast<float>(weight);
-            sum_m[tid] += static_cast<double>(fw *
-                coilgun::physics::mutual_inductance_filament_f32(
-                    fra, frb, fabsf(fdz)));
-            sum_gradient[tid] += static_cast<double>(fw *
-                coilgun::physics::mutual_inductance_gradient_filament_f32(
-                    fra, frb, fdz));
+            const auto pair = coilgun::physics::mutual_inductance_filament_pair_f32(
+                fra, frb, fdz);
+            sum_m[tid] += static_cast<double>(fw * pair.mutual);
+            sum_gradient[tid] += static_cast<double>(fw * pair.gradient);
         } else {
-            sum_m[tid] += weight * coilgun::physics::mutual_inductance_filament_device(
-                ra, rb, fabs(zb - za));
-            sum_gradient[tid] += weight *
-                coilgun::physics::mutual_inductance_gradient_filament_device(
-                    ra, rb, zb - za);
+            const auto pair = coilgun::physics::mutual_inductance_filament_pair_device(
+                ra, rb, zb - za);
+            sum_m[tid] += weight * pair.mutual;
+            sum_gradient[tid] += weight * pair.gradient;
         }
     }
     __syncthreads();
