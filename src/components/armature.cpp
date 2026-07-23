@@ -10,6 +10,8 @@
 #include "coilgun/physics/self_inductance.hpp"
 
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace coilgun::components {
 
@@ -29,10 +31,33 @@ Armature::Armature(double inner_radius, double outer_radius, double length,
     , v_(velocity)
     , ma_(mass)
     , material_(material)
-    , dr_((outer_radius - inner_radius) / n_radial)
-    , dl_(length / m_axial)
-    , nc_fil_(1.0 / (dr_ * dl_))
+    , dr_(0.0)
+    , dl_(0.0)
+    , nc_fil_(0.0)
 {
+    if (!std::isfinite(ri_) || ri_ < 0.0)
+        throw std::invalid_argument("Armature inner_radius must be finite and non-negative");
+    if (!std::isfinite(re_) || re_ <= ri_)
+        throw std::invalid_argument("Armature outer_radius must exceed inner_radius");
+    if (!std::isfinite(l_) || l_ <= 0.0)
+        throw std::invalid_argument("Armature length must be positive");
+    if (!std::isfinite(rho_) || rho_ <= 0.0)
+        throw std::invalid_argument("Armature resistivity must be positive");
+    if (!std::isfinite(material_density) || material_density <= 0.0)
+        throw std::invalid_argument("Armature material_density must be positive");
+    if (!std::isfinite(v_)) throw std::invalid_argument("Armature velocity must be finite");
+    if (!std::isfinite(ma_) || ma_ <= 0.0)
+        throw std::invalid_argument("Armature mass must be positive");
+    if (!std::isfinite(x_)) throw std::invalid_argument("Armature position must be finite");
+    if (m_ <= 0) throw std::invalid_argument("Armature m_axial must be positive");
+    if (n_ <= 0) throw std::invalid_argument("Armature n_radial must be positive");
+    if (static_cast<std::size_t>(m_) > std::numeric_limits<std::size_t>::max() /
+                                      static_cast<std::size_t>(n_))
+        throw std::invalid_argument("Armature filament count overflows");
+
+    dr_ = (re_ - ri_) / static_cast<double>(n_);
+    dl_ = l_ / static_cast<double>(m_);
+    nc_fil_ = 1.0 / (dr_ * dl_);
     int total = m_ * n_;
     R_.reserve(total);
     L_.reserve(total);
@@ -56,6 +81,12 @@ Armature::Armature(double inner_radius, double outer_radius, double length,
                                                               force_exact_self_inductance);
 
         mass_layer[j - 1] = material_density * M_PI * (r_outer * r_outer - r_inner * r_inner) * dl_;
+        if (!std::isfinite(R_layer[j - 1]) || R_layer[j - 1] <= 0.0)
+            throw std::invalid_argument("Armature derived filament resistance must be positive");
+        if (!std::isfinite(L_layer[j - 1]) || L_layer[j - 1] <= 0.0)
+            throw std::invalid_argument("Armature derived filament inductance must be positive");
+        if (!std::isfinite(mass_layer[j - 1]) || mass_layer[j - 1] <= 0.0)
+            throw std::invalid_argument("Armature derived filament mass must be positive");
     }
 
     // Expand to row-major flat array: repeat each entry m times
@@ -100,7 +131,13 @@ double Armature::velocity() const { return v_; }
 double Armature::mass() const { return ma_; }
 physics::ArmatureMaterial Armature::material() const { return material_; }
 
-void Armature::update_position(double dx) { x_ += dx; }
-void Armature::set_velocity(double v) { v_ = v; }
+void Armature::update_position(double dx) {
+    if (!std::isfinite(dx)) throw std::invalid_argument("Armature displacement must be finite");
+    x_ += dx;
+}
+void Armature::set_velocity(double v) {
+    if (!std::isfinite(v)) throw std::invalid_argument("Armature velocity must be finite");
+    v_ = v;
+}
 
 } // namespace coilgun::components

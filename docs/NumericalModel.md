@@ -629,62 +629,45 @@ $$
 
 where $m_{\mathrm{a}}$ is the total accelerated mass (armature + payload).
 
-### 5.3 Numerical Integration — Forward Difference Method
+### 5.3 Numerical Integration — Explicit Euler Time Layers
 
-The system of circuit equations (Eq. 3.8) and motion equations (Eqs. 5.2–5.3) forms a coupled ODE system. The forward-difference (explicit Euler) method is employed for time-stepping [2]:
+The circuit, motion, excitation, and thermal equations form one coupled state. Let the complete committed state at $t_n$ be the **pre-state** $Y_n$. One explicit Euler macro-step produces a **post-state** $Y_{n+1}$; no subsystem may consume a value already advanced by another subsystem in the same macro-step.
 
-**Step 1 — Initialize** ($t = t_0$):
-- $[I]_0 = 0$, $v_0 = 0$ (or given initial velocity)
-- $[U]_0 = [U_{\mathrm{C}}(0), 0, \ldots, 0]^{\mathsf{T}}$
-- Compute initial current derivatives:
+At the beginning of the step, snapshot currents, position, velocity, temperatures, excitation runtime state, and stage lifecycle state. Evaluate $M$, $\mathrm{d}M/\mathrm{d}x$, temperature-derived resistance, voltage, current derivative, and applied force from this same pre-state:
 
 $$
-[\dot{I}]_0 = \bigl([L]_0 - [M_{\mathrm{I}}]_0\bigr)^{-1} \, [U]_0 \tag{5.4}
+\boxed{[\dot{I}]_n = \bigl([L]_n - [M_{\mathrm{I}}]_n\bigr)^{-1}
+\Bigl([U_{\mathrm{eff}}]_n + v_n [\dot{M}_{\mathrm{I}}]_n[I]_n
+- [R(T_n)][I]_n - [M][I]_n\Bigr)} \tag{5.4}
 $$
 
-**Step 2 — Time step $n$** ($t_n = t_{n-1} + \Delta t$):
+The continuous Euler updates are:
 
-Update capacitor voltage (**with crowbar diode check**, see §3.4):
 $$
 \begin{aligned}
-&\text{If diode OFF } (s_i = 0): \quad U_{\mathrm{C},n}^{(i)} = U_{\mathrm{C},n-1}^{(i)} - \frac{\Delta t}{C_i} I_{\mathrm{d},n-1}^{(i)} \\
-&\text{If } U_{\mathrm{C},n}^{(i)} < 0 \text{ (diode turns ON)}: \quad s_i \leftarrow 1, \; U_{\mathrm{C},n}^{(i)} \leftarrow 0 \\
-&\text{If diode ON } (s_i = 1): \quad U_{\mathrm{C},n}^{(i)} = 0
+[I]_{n+1} &= [I]_n + \Delta t\,[\dot{I}]_n \\
+v_{n+1} &= v_n + \Delta t\,F_n/m_{\mathrm{a}} \\
+x_{n+1} &= x_n + \Delta t\,v_n \\
+U_{\mathrm{C},n+1}^{(i)} &= U_{\mathrm{C},n}^{(i)}
+- \frac{\Delta t}{C_i}I_{\mathrm{d},n}^{(i)} \quad \text{(diode OFF)}
 \end{aligned} \tag{5.5}
 $$
-Set $[U_{\mathrm{eff}}]_n$: entries for diode-OFF stages use the capacitor voltage from (5.5); diode-ON stages use $0$.
 
-Compute current derivatives with motional EMF [2]:
-$$
-\boxed{[\dot{I}]_n = \bigl([L]_n - [M_{\mathrm{I}}]_n\bigr)^{-1} \Bigl([U_{\mathrm{eff}}]_n + v_{n-1} [\dot{M}_{\mathrm{I}}]_n [I]_{n-1} - [R] [I]_{n-1} - [M] [I]_{n-1}\Bigr)} \tag{5.6}
-$$
+Joule heating likewise consumes the pre-step filament current, pre-step temperature, and pre-step resistance exactly as Eq. (6.10). The newly computed current or resistance must not be reused for capacitor discharge or heating in the same macro-step.
 
-Update currents:
-$$
-[I]_n = [I]_{n-1} + \Delta t \, [\dot{I}]_{n-1} \tag{5.7}
-$$
+After the continuous post-state is formed, apply discrete events in deterministic order: capacitor clamp, crowbar transition, waveform end, excitation completion, stage trigger, current decay, and stage completion. `ExcitationFinished` does not mean the circuit is complete: a stage with residual current remains in the coupled matrix and force calculation. Only `StageCompleted` enables an identity row/column, and the corresponding stage current is explicitly cleared before that matrix mode is selected.
 
-Compute force:
-$$
-F_n = \sum_{i=1}^{n_{\mathrm{active}}} \sum_{j=1}^{m \times n} I_{\mathrm{d}i,n} \, I_{aj,n} \, \left(\frac{\mathrm{d}M_{\mathrm{d}i, aj}}{\mathrm{d}z}\right)_n \tag{5.8}
-$$
+History stores the committed post-state at $(n+1)\Delta t$. Therefore the first history record has timestamp $\Delta t$, not zero. Public recorded force uses committed post-step currents with the mutual-gradient cache evaluated at the pre-position boundary; the force used to advance velocity is the pre-step applied force.
 
-Compute acceleration, velocity, position:
-$$
-\begin{aligned}
-a_n &= F_n / m_{\mathrm{a}} \\
-v_n &= v_{n-1} + a_{n-1} \Delta t \\
-z_n &= z_{n-1} + v_{n-1} \Delta t
-\end{aligned} \tag{5.9}
-$$
+### 5.4 Event-Aware Coupled RK4
 
-**Step 3 — Update geometry**: Recompute $[M_{\mathrm{I}}]_n$, $[\dot{M}_{\mathrm{I}}]_n$, and $[M]$ at the new position $z_n$.
+CPU `RK4Stepper` integrates currents, position, velocity, filament temperature, and excitation continuous state with four derivative evaluations. Every $k_1\ldots k_4$ trial is cloned from the same segment start and owns independent excitation snapshots; derivative evaluation is read-only and derives resistance from the trial temperature.
 
-**Step 4 — Trigger check**: If the armature reaches the trigger position of the next driving coil, activate it ($I_{\mathrm{d},n+1}$ begins conducting).
+Discrete events are not approximated as ordinary continuous derivatives. For capacitor zero, crowbar transition, waveform end, position/time-delay trigger, current threshold, and stage completion, the solver brackets a crossing over the current segment and uses protected bisection. Each trial is recomputed from the segment start. Bisection has finite iteration and tolerance limits; repeated zero-duration events and excessive event batches are rejected rather than looping indefinitely. Simultaneous events use the same deterministic priority stated above, with stage triggers ordered by ascending stage index. After applying an event, RK4 integrates the remaining portion of the macro-step under the new discrete mode.
 
-**Step 5 — Repeat** until $I_{\mathrm{d}}$ decays below a threshold or the armature exits the last coil.
+GPU single-stage, multi-stage, and batch wrappers do not implement this four-stage/event-localization state machine. An RK4 GPU request throws `std::logic_error`; it never silently executes Euler.
 
-### 5.4 Trigger Position
+### 5.5 Trigger Position
 
 The optimal trigger position is where the armature center is at a distance such that the mutual inductance gradient is near maximum when the driving coil current reaches its peak [2,3]. Typically this is when the armature tail is near the driving coil's rear edge. The exact optimal position depends on the specific geometry and can be determined by parametric sweep simulation [3].
 
@@ -891,20 +874,19 @@ where $W_{\mathrm{da}}^{\mathrm{p} + \mathrm{b}}$ is the total ohmic loss (armat
 
 ### 8.3 Per-Timestep Computation
 
-At each time step $n$:
+At each macro-step, use one immutable pre-step snapshot and commit one post-step state:
 
-1. **Update armature position**: $x_n = x_{n-1} + v_{n-1} \Delta t$
-2. **Recompute** $[M_{\mathrm{I}}]_n$ and $[\dot{M}_{\mathrm{I}}]_n$ for all driving coil–armature filament pairs (Eqs. 4.13, 4.17)
-3. **Solve circuit**: Compute $[\dot{I}]_n$ from Eq. (5.6), update $[I]_n$ (Eq. 5.7)
-4. **Compute force**: $F_n$ from Eq. (5.8)
-5. **Compute motion**: $a_n$, $v_n$, $z_n$ from Eq. (5.9)
-6. **Compute temperature**: For each filament, update $T_{ij}$ from Eq. (6.7), then update $c_{\mathrm{p}}$, $\rho$, $R$ using Eqs. (6.2)–(6.6)
-7. **Update capacitor voltages** (with crowbar diode per §3.4):
-   - Diode-OFF stages: $U_{\mathrm{C},n}^{(i)} = U_{\mathrm{C},n-1}^{(i)} - (\Delta t / C_i) \cdot I_{\mathrm{d},n-1}^{(i)}$
-   - If $U_{\mathrm{C},n}^{(i)} < 0$: set $U_{\mathrm{C},n}^{(i)} = 0$ and mark stage $i$ as diode-ON
-   - Diode-ON stages: $U_{\mathrm{C},n}^{(i)} = 0$ (clamped)
-8. **Trigger check**: If the armature center reaches the next coil's trigger position, activate the next stage (capacitor begins discharging). The optimal trigger position corresponds to the point where the mutual inductance gradient $\mathrm{d}M/\mathrm{d}x$ is near its maximum when the driving coil current peaks. In practice, this is approximately when the armature tail coincides with the driving coil's rear edge. The exact optimal position depends on armature velocity and circuit parameters — for a first implementation, place the trigger at $x_{\mathrm{trigger}}^{(i+1)} = x_{\mathrm{center}}^{(i+1)} - 0.5 l_{\mathrm{a}}$ (armature tail at driving coil center plane), then refine via parametric sweep.
-9. **Termination check**: Stop the simulation when **either** (a) the current in all active driving coils drops below $I_{\mathrm{threshold}}$ (e.g., $10^{-3} \times I_{\mathrm{peak}}$) **and** the acceleration $|a| < a_{\mathrm{threshold}}$ (e.g., $10^{-3} \; \mathrm{m/s^2}$), **or** (b) the armature center position exceeds the barrel length (last coil center + coil length/2 + armature length/2). For multi-stage simulations, also terminate if no stages remain to be triggered and all active stage currents have decayed.
+1. **Capture the pre-state**: currents, position, velocity, temperatures, temperature-derived resistances, excitation snapshots, and stage lifecycle flags.
+2. **Evaluate geometry and circuit** at the pre-step position and with pre-step voltages/currents. Compute $[M_{\mathrm{I}}]$, $[\dot{M}_{\mathrm{I}}]$, $[\dot{I}]$, and the applied force from that same snapshot.
+3. **Commit Euler continuous state** using Eqs. (5.4)–(5.5): current uses the pre-step derivative, position uses the pre-step velocity, and velocity uses the pre-step applied force.
+4. **Advance excitation and thermal state** from pre-step currents and resistances. The capacitor and Joule-heating updates must not consume post-step current in the same macro-step.
+5. **Apply discrete events** in deterministic order: capacitor clamp, crowbar transition, waveform end, excitation completion, stage trigger, current decay, and stage completion. `ExcitationFinished` does not remove residual circuit current. When `StageCompleted` becomes true, clear that stage current before enabling its identity row/column.
+6. **Record history** as the committed post-step state at $(n+1)\Delta t$. The first history record is at $\Delta t$. Public force history uses post-step currents with the pre-position gradient cache; the force used for velocity integration remains the applied pre-step force.
+7. **Check termination** after the commit. A finite trigger remains eligible until it fires; only completed stages and explicit $+\infty$ trigger policies are terminally ineligible.
+
+CPU `RK4Stepper` replaces steps 2–4 with four coupled trial evaluations over currents, motion, temperature, and excitation continuous state. Each trial owns cloned excitation snapshots. Discrete crossings are bracketed and located by protected bisection from the segment start, with finite iteration/event-batch limits and the same deterministic event priority. GPU wrappers explicitly reject RK4 and do not substitute Euler.
+
+CPU `OptimizationLevel::Reference`, `LookupTable`, and `Full` describe the CPU mutual-inductance path: `Reference` and `LookupTable` use fixed 9-point quadrature at runtime, while `Full` adds the distance cutoff and adaptive near/far order. CUDA `GpuOptLevel::Standard`, `Full`, and `Aggressive` use fixed 9-node integration; `Full` adds the cutoff and `Aggressive` changes the integrand precision. These levels are not interchangeable performance or tolerance claims.
 
 ### 8.4 Computational Complexity
 

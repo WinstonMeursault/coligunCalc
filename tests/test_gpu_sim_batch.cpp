@@ -415,8 +415,10 @@ TEST_CASE("SimBatch — heterogeneous rows finish independently without compacti
     SimBatch<EulerStepper> batch(std::move(coils), arm, 2, 1e-6, direct_backend());
 
     std::vector<std::unique_ptr<coilgun::simulation::Excitation>> short_excitations;
-    short_excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
-    short_excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
+    short_excitations.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
+    short_excitations.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
     batch.set_excitations(0, std::move(short_excitations),
                           {{TriggerMode::TimeDelay, std::numeric_limits<double>::infinity()}});
 
@@ -447,8 +449,10 @@ TEST_CASE("SimBatch — heterogeneous rows finish independently without compacti
 TEST_CASE("SimBatch — E3 fixed-capacity active_mask rows never compact or reindex") {
     SimBatch<EulerStepper> batch(make_coils(), make_arm(), 2, 1e-6, direct_backend());
     std::vector<std::unique_ptr<coilgun::simulation::Excitation>> early;
-    early.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
-    early.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
+    early.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
+    early.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
     batch.set_excitations(0, std::move(early), {{TriggerMode::TimeDelay, INFINITY}});
 
     std::vector<std::unique_ptr<coilgun::simulation::Excitation>> continuing;
@@ -471,8 +475,10 @@ TEST_CASE("SimBatch — E3 fixed-capacity active_mask rows never compact or rein
 
     SimBatch<EulerStepper> standalone(make_coils(), make_arm(), 1, 1e-6, direct_backend());
     std::vector<std::unique_ptr<coilgun::simulation::Excitation>> standalone_excitations;
-    standalone_excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
-    standalone_excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
+    standalone_excitations.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
+    standalone_excitations.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
     standalone.set_excitations(0, std::move(standalone_excitations),
                                {{TriggerMode::TimeDelay, INFINITY}});
     standalone.run(policy);
@@ -514,8 +520,10 @@ TEST_CASE("SimBatch — heterogeneous triggers and excitation classes stay per-r
     SimBatch<EulerStepper> batch(coils, arm, 2, 1e-6, direct_backend());
 
     std::vector<std::unique_ptr<coilgun::simulation::Excitation>> early;
-    early.push_back(std::make_unique<coilgun::simulation::CapacitorExcitation>(0.0, 1e-3));
-    early.push_back(std::make_unique<CrowbarExcitation>(0.0, 2e-3));
+    early.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
+    early.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
     early.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
         [](double) { return 0.0; }));
     batch.set_excitations(0, std::move(early),

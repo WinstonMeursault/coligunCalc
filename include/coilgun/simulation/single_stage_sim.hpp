@@ -12,33 +12,14 @@
 #include "coilgun/simulation/sim_result.hpp"
 #include "coilgun/simulation/termination.hpp"
 #include "coilgun/simulation/time_stepper.hpp"
+#include "coilgun/simulation/integration_state.hpp"
+#include "coilgun/simulation/derivative_workspace.hpp"
 #include "coilgun/components/driving_coil.hpp"
 #include "coilgun/components/armature.hpp"
 #include <Eigen/Dense>
 #include <memory>
 
 namespace coilgun::simulation {
-
-/**
- * @brief Internal state vector for the ODE system.
- *
- * Layout: @p currents[0] = driving coil current @f$ I_d @f$,
- * @p currents[1..N_fil] = filament currents @f$ I_{ij} @f$.
- */
-struct SimState {
-    Eigen::VectorXd currents;              ///< [N_fil+1] current vector, A.
-    double arm_position = 0.0;             ///< Armature centre position, m.
-    double arm_velocity = 0.0;             ///< Armature velocity, m/s.
-    Eigen::VectorXd filament_temperatures; ///< [N_fil] filament temperatures, K.
-
-    SimState& operator+=(const SimState& rhs);
-    SimState& operator*=(double scalar);
-};
-
-/// @related SimState
-SimState operator+(SimState lhs, const SimState& rhs);
-/// @related SimState
-SimState operator*(double scalar, SimState s);
 
 /**
  * @brief Single-stage synchronous induction coilgun simulation engine.
@@ -91,7 +72,8 @@ public:
     /// @brief Result after the last run().
     const SimResult& result()  const { return result_; }
     /// @brief Current internal state.
-    const SimState&  state()   const { return state_; }
+    const SimState& state() const { return integration_state_.physical; }
+    const StageRuntimeState& stage_state() const { return integration_state_.stages.front(); }
     /// @brief Fixed time step, s.
     double  dt()          const { return dt_; }
     /// @brief Step count since construction or last reset().
@@ -106,11 +88,23 @@ public:
     void    reset();
 
 private:
-    SimState compute_derivatives(const SimState& s);
+    DerivativeResult evaluate_derivatives(const SimState& state,
+                                          const ExcitationSnapshot& excitation,
+                                          DerivativeWorkspace& workspace,
+                                          bool circuit_active) const;
+    IntegrationState advance_euler(const IntegrationState& pre, double dt);
+    IntegrationState advance_rk4_segment(const IntegrationState& pre, double dt);
+    IntegrationState advance_rk4_event_aware(const IntegrationState& pre, double dt);
+    IntegrationState make_trial(const IntegrationState& initial,
+                                const DerivativeResult& derivative,
+                                double scale) const;
+    void apply_excitation_events(IntegrationState& state, double coil_current) const;
+    double excitation_event_value(const ExcitationSnapshot& snapshot) const;
+    double compute_force(const SimState& state,
+                         const Eigen::VectorXd& mutual_gradient) const;
+    Eigen::VectorXd derive_resistance(const SimState& state) const;
     void     build_filament_M_matrix();
-    double   compute_force(const SimState& s);
-    void     update_temperatures(SimState& s, double dt_sub);
-    void     record_step(double cap_voltage);
+    void     record_step(double post_time);
     bool     check_termination(const TerminationPolicy& policy);
     void     prepare_summary();
 
@@ -126,16 +120,12 @@ private:
     Eigen::MatrixXd M_mat_;
     Eigen::VectorXd L_fil_;
     Eigen::VectorXd R_fil_ref_;
-    Eigen::VectorXd R_fil_;
     Eigen::VectorXd mass_fil_;
 
-    Eigen::VectorXd M1_;
-    Eigen::VectorXd dM1_;
-
-    Eigen::MatrixXd L_total_;
-    Eigen::VectorXd RHS_;
-
-    SimState  state_;
+    IntegrationState integration_state_;
+    IntegrationState initial_integration_state_;
+    DerivativeWorkspace workspace_;
+    Eigen::VectorXd pre_step_mutual_gradient_;
     SimResult result_;
     int       step_count_ = 0;
     StepperPolicy stepper_;

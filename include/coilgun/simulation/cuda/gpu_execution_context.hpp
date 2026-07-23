@@ -46,6 +46,8 @@ public:
     void synchronize() const;
     void record_start() const;
     void record_stop() const;
+    void ensure_quadrature9_loaded();
+    bool quadrature9_loaded() const noexcept;
     bool valid() const noexcept { return impl_ != nullptr; }
 
 private:

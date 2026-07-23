@@ -56,6 +56,16 @@ struct RK4Stepper {
         State k4 = f(state + dt * k3);
         return state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
     }
+
+    template<typename State, typename Derivative, typename Ops>
+    State advance_coupled(double dt, const State& initial,
+                          Derivative&& derivative, Ops&& ops) const {
+        const auto k1 = derivative(initial);
+        const auto k2 = derivative(ops.add_scaled(initial, k1, 0.5 * dt));
+        const auto k3 = derivative(ops.add_scaled(initial, k2, 0.5 * dt));
+        const auto k4 = derivative(ops.add_scaled(initial, k3, dt));
+        return ops.weighted_sum(initial, dt, k1, k2, k3, k4);
+    }
 };
 
 } // namespace coilgun::simulation

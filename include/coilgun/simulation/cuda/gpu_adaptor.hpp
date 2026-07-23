@@ -16,6 +16,7 @@
 #include "coilgun/simulation/cuda/gpu_backend.hpp"
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <cstddef>
 #include <vector>
 
 namespace coilgun::simulation::cuda {
@@ -102,6 +103,10 @@ public:
     int n_fil()    const { return n_fil_; }
     int n_nodes()  const { return n_nodes_; }
     int batch_size() const { return batch_size_; }
+    bool configured() const noexcept { return configured_; }
+    int device_id() const noexcept { return device_id_; }
+    std::size_t single_pair_capacity() const noexcept { return single_pair_capacity_; }
+    std::size_t batch_pair_capacity() const noexcept { return batch_pair_capacity_; }
     /// @}
 
 private:
@@ -123,6 +128,10 @@ private:
     int n_fil_     = 0;
     int n_nodes_   = 9;
     int batch_size_ = 1;
+    bool configured_ = false;
+    int device_id_ = -1;
+    std::size_t single_pair_capacity_ = 0;
+    std::size_t batch_pair_capacity_ = 0;
 };
 
 } // namespace coilgun::simulation::cuda

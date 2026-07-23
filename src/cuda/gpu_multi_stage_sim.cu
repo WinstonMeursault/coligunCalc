@@ -174,7 +174,8 @@ GpuMultiStageSim<SP>::GpuMultiStageSim(
     }
 
     triggered_.assign(n_stages_, false);
-    finished_.assign(n_stages_, false);
+    excitation_finished_.assign(n_stages_, false);
+    stage_completed_.assign(n_stages_, false);
     active_stage_mask_.assign(n_stages_, 0);
     mutual_stage_mask_.assign(n_stages_, 0);
     trigger_times_.assign(n_stages_, 0.0);
@@ -223,17 +224,23 @@ template<typename SP>
 void GpuMultiStageSim<SP>::configure_engine_boundary() {
     active_stage_mask_.assign(static_cast<std::size_t>(n_stages_), 0);
     mutual_stage_mask_.assign(static_cast<std::size_t>(n_stages_), 0);
+    std::vector<std::uint8_t> trigger_mask(static_cast<std::size_t>(n_stages_), 0);
+    std::vector<double> voltages(static_cast<std::size_t>(n_stages_), 0.0);
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (triggered_[stage] && !finished_[stage]) {
+        trigger_mask[static_cast<std::size_t>(stage)] = triggered_[stage] ? 1 : 0;
+        if (triggered_[stage] && !stage_completed_[stage]) {
             active_stage_mask_[static_cast<std::size_t>(stage)] = 1;
             if (is_stage_within_range(stage))
                 mutual_stage_mask_[static_cast<std::size_t>(stage)] = 1;
         }
-        engine_->set_stage_voltage(static_cast<std::size_t>(stage),
-                                   triggered_[stage] ? excitations_[stage]->voltage() : 0.0);
+        voltages[static_cast<std::size_t>(stage)] =
+            triggered_[stage] && !excitation_finished_[stage]
+                ? excitations_[stage]->voltage() : 0.0;
     }
-    engine_->set_stage_mask(active_stage_mask_);
-    engine_->set_mutual_stage_mask(mutual_stage_mask_);
+    engine_->set_step_boundary_state(
+        {1}, std::move(trigger_mask), active_stage_mask_, mutual_stage_mask_,
+        std::move(voltages));
+
 }
 
 template<typename SP>
@@ -258,7 +265,7 @@ std::vector<double> GpuMultiStageSim<SP>::compute_stage_forces(
     const auto& source = engine_->state();
     std::vector<double> stage_forces(static_cast<std::size_t>(n_stages_), 0.0);
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (!triggered_[stage] || finished_[stage] ||
+        if (!triggered_[stage] || stage_completed_[stage] ||
             mutual_stage_mask_[static_cast<std::size_t>(stage)] == 0) continue;
         for (int filament = 0; filament < N_fil_; ++filament) {
             const auto pair = static_cast<std::size_t>(stage) *
@@ -275,11 +282,44 @@ std::vector<double> GpuMultiStageSim<SP>::compute_stage_forces(
 }
 
 template<typename SP>
-std::vector<double> GpuMultiStageSim<SP>::compute_recorded_stage_forces() const {
+std::vector<double> GpuMultiStageSim<SP>::compute_pre_step_gradients() const {
+    std::vector<double> gradients(static_cast<std::size_t>(n_stages_) * N_fil_, 0.0);
+    const double initial_center = armature_.position();
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (!triggered_[stage] || stage_completed_[stage] ||
+            mutual_stage_mask_[static_cast<std::size_t>(stage)] == 0)
+            continue;
+        for (int filament = 0; filament < N_fil_; ++filament) {
+            const int radial = armature_.radial_filaments();
+            const int axial = filament / radial + 1;
+            const int radial_index = filament % radial + 1;
+            const double relative =
+                armature_.filament_axial_position(axial) - initial_center;
+            const double separation = coils_[static_cast<std::size_t>(stage)].position() -
+                (relative + state_.arm_position);
+            const auto pair = static_cast<std::size_t>(stage) * N_fil_ +
+                              static_cast<std::size_t>(filament);
+            gradients[pair] = physics::mutual_inductance_gradient_coil(
+                coils_[static_cast<std::size_t>(stage)].inner_radius(),
+                coils_[static_cast<std::size_t>(stage)].outer_radius(),
+                coils_[static_cast<std::size_t>(stage)].length(),
+                coils_[static_cast<std::size_t>(stage)].turns(),
+                armature_.filament_inner_radius(radial_index),
+                armature_.filament_outer_radius(radial_index),
+                armature_.length() / armature_.axial_filaments(), 1,
+                separation, 9, false);
+        }
+    }
+    return gradients;
+}
+
+template<typename SP>
+std::vector<double> GpuMultiStageSim<SP>::compute_recorded_stage_forces(
+        const std::vector<double>& gradients) const {
     const auto& source = engine_->state();
     std::vector<double> stage_forces(static_cast<std::size_t>(n_stages_), 0.0);
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (!triggered_[stage] || finished_[stage] ||
+        if (!triggered_[stage] || stage_completed_[stage] ||
             mutual_stage_mask_[static_cast<std::size_t>(stage)] == 0) continue;
         for (int filament = 0; filament < N_fil_; ++filament) {
             const auto pair = static_cast<std::size_t>(stage) *
@@ -288,26 +328,31 @@ std::vector<double> GpuMultiStageSim<SP>::compute_recorded_stage_forces() const 
             stage_forces[static_cast<std::size_t>(stage)] -=
                 source.currents[static_cast<std::size_t>(stage)] *
                 source.currents[static_cast<std::size_t>(n_stages_ + filament)] *
-                source.dm1[pair];
+                gradients[pair];
         }
     }
     return stage_forces;
 }
 
 template<typename SP>
-void GpuMultiStageSim<SP>::check_triggers() {
-    const double current_time = step_count_ * dt_;
+void GpuMultiStageSim<SP>::check_triggers(
+        double pre_position, double post_position, double next_time) {
+    const double current_time = next_time - dt_;
     for (int stage = 1; stage < n_stages_; ++stage) {
         if (triggered_[stage]) continue;
         if (!triggered_[stage - 1]) continue;
         const auto& config = trigger_configs_[static_cast<std::size_t>(stage - 1)];
+        const auto index = static_cast<std::size_t>(stage);
         const bool fire = config.mode == TriggerMode::Position
-            ? state_.arm_position >= config.value
-            : current_time >= trigger_times_[static_cast<std::size_t>(stage - 1)] + config.value;
+            ? pre_position >= config.value ||
+              (pre_position < config.value && post_position >= config.value)
+            : next_time >= trigger_times_[static_cast<std::size_t>(stage - 1)] + config.value;
         if (fire) {
             triggered_[stage] = true;
-            trigger_times_[stage] = current_time;
-            trigger_positions_[stage] = state_.arm_position;
+            const double target = trigger_times_[static_cast<std::size_t>(stage - 1)] + config.value;
+            trigger_times_[index] = config.mode == TriggerMode::Position
+                ? current_time : std::max(current_time, target);
+            trigger_positions_[index] = pre_position;
         }
     }
 }
@@ -316,10 +361,14 @@ template<typename SP>
 void GpuMultiStageSim<SP>::extinguish_quiet_stages() {
     static constexpr double kQuietThreshold = 1e-6;
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (!triggered_[stage] || finished_[stage]) continue;
+        if (!triggered_[stage] || stage_completed_[stage]) continue;
         if (excitations_[stage]->voltage() == 0.0 &&
-            std::abs(state_.currents(stage)) < kQuietThreshold)
-            finished_[stage] = true;
+            std::abs(state_.currents(stage)) < kQuietThreshold) {
+            excitation_finished_[stage] = true;
+            stage_completed_[stage] = true;
+            state_.currents(stage) = 0.0;
+            engine_->complete_stage(0, static_cast<std::size_t>(stage));
+        }
     }
 }
 
@@ -361,7 +410,7 @@ bool GpuMultiStageSim<SP>::check_all_finished() const {
         return false;
     };
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (finished_[stage]) continue;
+        if (stage_completed_[stage]) continue;
         if (!triggered_[stage] && terminally_ineligible(stage)) continue;
         return false;
     }
@@ -374,6 +423,9 @@ bool GpuMultiStageSim<SP>::check_termination(const TerminationPolicy& policy) {
         return true;
     if (step_count_ >= policy.max_steps) return true;
     if (check_all_finished()) return true;
+    for (int stage = 0; stage < n_stages_; ++stage)
+        if (triggered_[stage] && !stage_completed_[stage] && !excitation_finished_[stage])
+            return false;
     if (policy.enable_velocity_check && step_count_ >= policy.velocity_decay_steps) {
         const double acceleration = recorded_force_ / armature_.mass();
         const auto n = static_cast<int>(result_.history.size());
@@ -423,8 +475,10 @@ void GpuMultiStageSim<SP>::prepare_summary() {
             if (active) ++per_stage.step_count_active;
         }
         if (capacitor) {
+            const double final_voltage = result_.history.back().cap_voltages[
+                static_cast<std::size_t>(stage)];
             const double final_energy = 0.5 * capacitor->capacitance() *
-                capacitor->capacitor_voltage() * capacitor->capacitor_voltage();
+                final_voltage * final_voltage;
             per_stage.energy_depleted =
                 initial_stage_energies_[static_cast<std::size_t>(stage)] - final_energy;
         }
@@ -452,22 +506,33 @@ const MultiStageStep& GpuMultiStageSim<SP>::step() {
     if constexpr (std::is_same_v<SP, RK4Stepper>)
         throw std::logic_error("RK4Stepper is not supported by GpuMultiStageSim");
 
-    check_triggers();
+    const double pre_position = state_.arm_position;
+    check_triggers(pre_position, pre_position, step_count_ * dt_);
     extinguish_quiet_stages();
+    const auto triggered_at_step_start = triggered_;
     configure_engine_boundary();
     const auto pre_step_currents = engine_->state().currents;
+    const auto pre_step_gradients = compute_pre_step_gradients();
     engine_->step();
     const auto stage_forces = compute_stage_forces(pre_step_currents);
     applied_force_ = 0.0;
     for (const double stage_force : stage_forces) applied_force_ += stage_force;
     sync_state_from_engine();
+    check_triggers(pre_position, state_.arm_position, (step_count_ + 1) * dt_);
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (triggered_[stage] && !finished_[stage]) {
-            excitations_[stage]->advance(dt_, state_.currents(stage));
-            if (excitations_[stage]->finished()) finished_[stage] = true;
+        if (triggered_at_step_start[stage] && !excitation_finished_[stage]) {
+            excitations_[stage]->advance(
+                dt_, pre_step_currents[static_cast<std::size_t>(stage)]);
+            if (excitations_[stage]->finished()) excitation_finished_[stage] = true;
+        }
+        if (triggered_[stage] && excitation_finished_[stage] &&
+            std::abs(state_.currents(stage)) < 1e-6) {
+            stage_completed_[stage] = true;
+            state_.currents(stage) = 0.0;
+            engine_->complete_stage(0, static_cast<std::size_t>(stage));
         }
     }
-    const auto recorded_stage_forces = compute_recorded_stage_forces();
+    const auto recorded_stage_forces = compute_recorded_stage_forces(pre_step_gradients);
     recorded_force_ = 0.0;
     for (const double stage_force : recorded_stage_forces) recorded_force_ += stage_force;
     recorded_stage_force_history_.push_back(recorded_stage_forces);
@@ -498,7 +563,8 @@ void GpuMultiStageSim<SP>::reset() {
     recorded_stage_force_history_.clear();
     for (int stage = 0; stage < n_stages_; ++stage) {
         triggered_[stage] = stage == 0;
-        finished_[stage] = false;
+        excitation_finished_[stage] = false;
+        stage_completed_[stage] = false;
         trigger_times_[stage] = 0.0;
         trigger_positions_[stage] = armature_.position();
         excitations_[stage]->reset();

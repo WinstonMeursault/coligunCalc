@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <optional>
+
 namespace coilgun::components {
 
 /**
@@ -32,7 +34,8 @@ public:
      */
     DrivingCoil(double inner_radius, double outer_radius, double length,
                 int turns, double resistivity, double wire_area,
-                double fill_factor, double position = -1.0,
+                 double fill_factor,
+                 std::optional<double> position = std::nullopt,
                 bool force_exact_self_inductance = false);
 
     /// @brief Inner winding radius (m).

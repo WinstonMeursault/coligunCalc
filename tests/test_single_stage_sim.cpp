@@ -2,7 +2,9 @@
 #include "coilgun/coilgun.hpp"
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <memory>
+#include <vector>
 
 using namespace coilgun::simulation;
 using coilgun::components::DrivingCoil;
@@ -12,11 +14,11 @@ using coilgun::physics::ALUMINUM;
 
 struct FastConfig {
     DrivingCoil coil{0.005, 0.010, 0.010, 10,
-                     COPPER.resistivity_ref, 1e-6, 0.7};
+                     10.0 * COPPER.resistivity_ref, 1e-6, 0.7};
     Armature arm{0.002, 0.008, 0.010,
-                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 10.0 * ALUMINUM.resistivity_ref, ALUMINUM.density,
                  0.0, 0.005, 1, 1, 0.008};
-    double dt  = 1e-6;
+    double dt  = 1e-7;
     double U0  = 100.0;
     double C   = 100e-6;
 };
@@ -29,25 +31,40 @@ static double integrate_joules(const SimResult& r,
     double Q_a = 0.0;
     double R_d = coil.resistance();
     const auto& R_fil = arm.resistances();
+    double coil_current = 0.0;
+    std::vector<double> filament_currents(R_fil.size(), 0.0);
     for (const auto& s : r.history) {
-        Q_d += s.coil_current * s.coil_current * R_d * dt;
-        for (std::size_t k = 0; k < s.filament_currents.size(); ++k)
-            Q_a += s.filament_currents[k] * s.filament_currents[k] * R_fil[k] * dt;
+        Q_d += coil_current * coil_current * R_d * dt;
+        for (std::size_t k = 0; k < filament_currents.size(); ++k)
+            Q_a += filament_currents[k] * filament_currents[k] * R_fil[k] * dt;
+        coil_current = s.coil_current;
+        filament_currents = s.filament_currents;
     }
     return Q_d + Q_a;
 }
 
 TEST_CASE("SingleStageSim — energy conservation") {
     FastConfig cfg;
+    cfg.dt = 1e-7;
     auto exc = std::make_unique<CrowbarExcitation>(cfg.U0, cfg.C);
     SingleStageSim<EulerStepper> sim(cfg.coil, cfg.arm, std::move(exc), cfg.dt, false);
-    sim.run();
+    TerminationPolicy policy;
+    policy.max_steps = 20000;
+    sim.run(policy);
 
     double E_cap = 0.5 * cfg.C * cfg.U0 * cfg.U0;
     double Q_joule = integrate_joules(sim.result(), cfg.coil, cfg.arm, cfg.dt);
     double v = sim.result().summary.muzzle_velocity;
     double E_kin = 0.5 * cfg.arm.mass() * v * v;
     double closure = (Q_joule + E_kin) / E_cap;
+    INFO(std::setprecision(17) << "E_cap=" << E_cap << " Q_joule=" << Q_joule
+         << " E_kin=" << E_kin << " closure=" << closure
+         << " final_voltage=" << sim.result().history.back().cap_voltage
+         << " final_coil_current=" << sim.result().history.back().coil_current
+         << " final_filament_current=" << sim.result().history.back().filament_currents.front()
+         << " stage_completed=" << sim.stage_state().stage_completed
+         << " steps=" << sim.step_count());
+    CHECK(sim.result().history.back().coil_current == doctest::Approx(0.0));
 
     CHECK(closure > 0.99);
     CHECK(closure < 1.01);
@@ -59,18 +76,20 @@ TEST_CASE("SingleStageSim — convergence (Euler)") {
 
     {
         auto exc = std::make_unique<CrowbarExcitation>(cfg.U0, cfg.C);
-        SingleStageSim<EulerStepper> sim(cfg.coil, cfg.arm, std::move(exc), 1e-6, false);
+        SingleStageSim<EulerStepper> sim(cfg.coil, cfg.arm, std::move(exc), cfg.dt, false);
         sim.run();
         v_coarse = sim.result().summary.muzzle_velocity;
     }
     {
         auto exc = std::make_unique<CrowbarExcitation>(cfg.U0, cfg.C);
-        SingleStageSim<EulerStepper> sim(cfg.coil, cfg.arm, std::move(exc), 5e-7, false);
+        SingleStageSim<EulerStepper> sim(cfg.coil, cfg.arm, std::move(exc), cfg.dt / 2.0, false);
         sim.run();
         v_fine = sim.result().summary.muzzle_velocity;
     }
 
     double rel_diff = std::abs(v_coarse - v_fine) / v_fine;
+    INFO("v_coarse=" << v_coarse << " v_fine=" << v_fine
+         << " rel_diff=" << rel_diff);
     CHECK(rel_diff < 0.02);
 }
 
@@ -93,6 +112,27 @@ TEST_CASE("SingleStageSim — summary max_force is the peak absolute force") {
     }
     CHECK(saw_negative_force);
     CHECK(sim.result().summary.max_force == doctest::Approx(expected_max_force));
+}
+
+TEST_CASE("SingleStageSim — history force uses post currents at pre-step position") {
+    DrivingCoil coil(0.005, 0.010, 0.010, 10,
+                     COPPER.resistivity_ref, 1e-6, 0.7);
+    Armature arm(0.002, 0.008, 0.010,
+                 ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 100.0, 0.005, 1, 1, 0.008);
+    auto excitation = std::make_unique<CrowbarExcitation>(100.0, 100e-6);
+    SingleStageSim<EulerStepper> sim(coil, arm, std::move(excitation), 1e-4, false);
+
+    const double pre_position = sim.state().arm_position;
+    const auto& step = sim.step();
+    const double relative = arm.filament_axial_position(1) - pre_position;
+    const double gradient = coilgun::physics::mutual_inductance_gradient_coil(
+        coil.inner_radius(), coil.outer_radius(), coil.length(), coil.turns(),
+        arm.filament_inner_radius(1), arm.filament_outer_radius(1),
+        arm.length(), 1, pre_position + relative - coil.position(), 9, false);
+    const double expected = step.coil_current * step.filament_currents.front() * gradient;
+
+    CHECK(step.force == doctest::Approx(expected).epsilon(1e-10));
 }
 
 TEST_CASE("SingleStageSim — inductance benchmark (Paper 4 Ex.1)") {

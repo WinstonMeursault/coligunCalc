@@ -4,6 +4,7 @@
 #include "coilgun/components/driving_coil.hpp"
 #include "coilgun/physics/constants.hpp"
 #include "coilgun/simulation/cuda/gpu_execution_report.hpp"
+#include "coilgun/simulation/cuda/gpu_execution_context.hpp"
 #include "coilgun/simulation/cuda/gpu_mutual_pipeline.hpp"
 #include "coilgun/simulation/cuda/gpu_single_stage_sim.hpp"
 #include "coilgun/simulation/excitation.hpp"
@@ -106,6 +107,8 @@ TEST_CASE("GPU mutual pipeline uses fixed B-S-F indexing and active masks") {
         MESSAGE("CUDA device unavailable; skipping mutual-kernel test");
         return;
     }
+    coilgun::simulation::cuda::GpuExecutionContext context;
+    context.ensure_quadrature9_loaded();
 
     const CoilGeo coils[] = {{0.01, 0.03, 0.05, 0.0, 150},
                              {0.01, 0.03, 0.05, 0.0, 150}};
@@ -160,6 +163,8 @@ TEST_CASE("GPU mutual pipeline exposes all precision modes") {
 
 TEST_CASE("GPU mutual pipeline matches CPU M and dM for every precision mode" *
           doctest::skip(!coilgun::simulation::cuda::cuda_device_available())) {
+    coilgun::simulation::cuda::GpuExecutionContext context;
+    context.ensure_quadrature9_loaded();
     const CoilGeo coils[] = {{0.01, 0.03, 0.05, 0.0, 150}};
     const FilGeo filaments[] = {{0.005, 0.01, 0.016}};
     const double separations[] = {0.03};

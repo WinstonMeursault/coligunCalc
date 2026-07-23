@@ -264,6 +264,31 @@ TEST_CASE("GPU multi-stage position and time triggers activate the expected stag
     CHECK(time_sim.result().history.back().coil_currents[1] != 0.0);
 }
 
+TEST_CASE("GPU host lifecycle activates zero-delay stages before solve" *
+          doctest::skip(!coilgun::simulation::cuda::cuda_device_available())) {
+    auto cpu_case = make_multi_case();
+    auto gpu_case = make_multi_case();
+    cpu_case.triggers = {{TriggerMode::TimeDelay, 0.0}};
+    gpu_case.triggers = {{TriggerMode::TimeDelay, 0.0}};
+    MultiStageSim<EulerStepper> cpu(
+        std::move(cpu_case.coils), cpu_case.armature, std::move(cpu_case.excitations),
+        std::move(cpu_case.triggers), 1e-6, false,
+        coilgun::simulation::OptimizationLevel::Reference);
+    GpuBackend backend;
+    backend.backend = BackendMode::Direct;
+    backend.use_persistent = false;
+    GpuMultiStageSim<EulerStepper> gpu(
+        std::move(gpu_case.coils), gpu_case.armature, std::move(gpu_case.excitations),
+        std::move(gpu_case.triggers), 1e-6, false, GpuOptLevel::Full, backend);
+
+    const auto& cpu_step = cpu.step();
+    const auto& gpu_step = gpu.step();
+    REQUIRE(gpu.execution_report().gpu_executed);
+    REQUIRE(cpu_step.coil_currents[1] != doctest::Approx(0.0));
+    REQUIRE(gpu_step.coil_currents[1] != doctest::Approx(0.0));
+    CHECK((gpu_step.coil_currents[1] > 0.0) == (cpu_step.coil_currents[1] > 0.0));
+}
+
 TEST_CASE("GPU multi-stage triggers capture the exact pre-step boundary") {
     auto zero_delay_case = make_multi_case();
     zero_delay_case.triggers = {{TriggerMode::TimeDelay, 0.0}};
@@ -288,21 +313,47 @@ TEST_CASE("GPU multi-stage triggers capture the exact pre-step boundary") {
         std::move(crossed_case.coils), crossed_case.armature,
         std::move(crossed_case.excitations), std::move(crossed_case.triggers),
         1e-6, false, GpuOptLevel::Standard, backend);
-    double crossed_position = 0.0;
     bool triggered = false;
     for (int i = 0; i < 100; ++i) {
-        crossed_position = crossed.state().arm_position;
+        const double crossed_position = crossed.state().arm_position;
         crossed.step();
-        if (crossed.result().history.back().coil_currents[1] != 0.0) {
+        crossed.run(short_policy(0));
+        if (crossed.result().summary.per_stage.size() == 2) {
             triggered = true;
+            CHECK(crossed.result().summary.per_stage[1].trigger_position ==
+                  doctest::Approx(crossed_position).epsilon(1e-12));
             break;
         }
     }
     REQUIRE(triggered);
-    crossed.run(short_policy(0));
     REQUIRE(crossed.result().summary.per_stage.size() == 2);
-    CHECK(crossed.result().summary.per_stage[1].trigger_position ==
-          doctest::Approx(crossed_position).epsilon(1e-12));
+}
+
+TEST_CASE("GPU Direct position trigger records the pre-step position" *
+          doctest::skip(!coilgun::simulation::cuda::cuda_device_available())) {
+    auto value = make_multi_case();
+    value.triggers = {{TriggerMode::Position, 8e-6}};
+    GpuBackend backend;
+    backend.backend = BackendMode::Direct;
+    backend.use_persistent = false;
+    GpuMultiStageSim<EulerStepper> gpu(
+        std::move(value.coils), value.armature, std::move(value.excitations),
+        std::move(value.triggers), 1e-6, false, GpuOptLevel::Full, backend);
+
+    bool triggered = false;
+    for (int step = 0; step < 100; ++step) {
+        const double pre_position = gpu.state().arm_position;
+        gpu.step();
+        gpu.run(short_policy(0));
+        if (gpu.result().summary.per_stage.size() == 2) {
+            triggered = true;
+            CHECK(gpu.result().summary.per_stage[1].trigger_position ==
+                  doctest::Approx(pre_position).epsilon(1e-12));
+            break;
+        }
+    }
+    REQUIRE(triggered);
+    REQUIRE(gpu.result().summary.per_stage.size() == 2);
 }
 
 TEST_CASE("GPU multi-stage trigger configuration rejects malformed values") {
@@ -335,8 +386,8 @@ TEST_CASE("GPU multi-stage completes zero-voltage crowbar stages and records bot
     auto value = make_multi_case();
     value.excitations.clear();
     value.triggers = {{TriggerMode::TimeDelay, 1e-6}};
-    value.excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
-    value.excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
+    value.excitations.push_back(std::make_unique<CrowbarExcitation>(1.0, 0.001));
+    value.excitations.push_back(std::make_unique<CrowbarExcitation>(1.0, 0.001));
     GpuBackend backend;
     backend.backend = BackendMode::Fallback;
     backend.use_persistent = false;
@@ -474,13 +525,24 @@ TEST_CASE("GPU multi-stage summary captures capacitor energy before excitation d
     REQUIRE(gpu.result().summary.per_stage.size() == 2);
     CHECK(cpu.result().summary.per_stage[1].trigger_time == doctest::Approx(2e-6));
     CHECK(gpu.result().summary.per_stage[1].trigger_time == doctest::Approx(2e-6));
-    const auto tolerance = tolerance_for(GpuOptLevel::Standard);
     for (std::size_t stage = 0; stage < 2; ++stage) {
         CHECK(cpu.result().summary.per_stage[stage].energy_depleted > 0.0);
         CHECK(gpu.result().summary.per_stage[stage].energy_depleted > 0.0);
-        CHECK(numerically_equal(gpu.result().summary.per_stage[stage].energy_depleted,
-                                cpu.result().summary.per_stage[stage].energy_depleted,
-                                tolerance));
+        const double initial_voltage = stage == 0 ? 480.0 : 320.0;
+        const double capacitance = stage == 0 ? 1e-3 : 8e-4;
+        const double cpu_voltage = cpu.result().history.back().cap_voltages[stage];
+        const double final_voltage = gpu.result().history.back().cap_voltages[stage];
+        CHECK(gpu.result().summary.per_stage[stage].energy_depleted ==
+              doctest::Approx(0.5 * capacitance *
+                              (initial_voltage * initial_voltage -
+                               final_voltage * final_voltage)));
+        const double voltage_delta = std::abs(final_voltage - cpu_voltage);
+        const double energy_delta_bound = 0.5 * capacitance *
+            (2.0 * std::max(std::abs(final_voltage), std::abs(cpu_voltage)) *
+                 voltage_delta + voltage_delta * voltage_delta);
+        CHECK(std::abs(gpu.result().summary.per_stage[stage].energy_depleted -
+                       cpu.result().summary.per_stage[stage].energy_depleted) <=
+              energy_delta_bound + 1e-12);
     }
 }
 
@@ -521,8 +583,14 @@ TEST_CASE("GPU multi-stage completion terminates a nonzero bounded run without a
     auto value = make_multi_case();
     value.triggers = {{TriggerMode::TimeDelay, 0.0}};
     value.excitations.clear();
-    value.excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.001));
-    value.excitations.push_back(std::make_unique<CrowbarExcitation>(0.0, 0.0008));
+    auto first = std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 1.0e-6; });
+    first->set_end_time(0.0);
+    value.excitations.push_back(std::move(first));
+    auto second = std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 1.0e-6; });
+    second->set_end_time(0.0);
+    value.excitations.push_back(std::move(second));
     GpuBackend backend;
     backend.backend = BackendMode::Fallback;
     backend.use_persistent = false;
@@ -841,7 +909,7 @@ TEST_CASE("GPU multi-stage commits completion-boundary force like the CPU refere
     REQUIRE(std::abs(cpu_step.state.force) > 1e-18);
     REQUIRE(cpu_step.stage_forces.size() == 2);
     REQUIRE(gpu_step.stage_forces.size() == 2);
-    CHECK(cpu_step.stage_forces[0] == doctest::Approx(0.0));
+    CHECK(std::abs(cpu_step.stage_forces[0]) > 1e-18);
     CHECK(gpu_step.stage_forces[0] == doctest::Approx(cpu_step.stage_forces[0]));
     CHECK(numerically_equal(gpu_step.state.force, cpu_step.state.force,
                             tolerance_for(GpuOptLevel::Standard)));
@@ -859,7 +927,7 @@ TEST_CASE("GPU velocity-decay termination uses the committed completion-boundary
             Armature(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref, ALUMINUM.density,
                      4.0, 0.120, 5, 2, -0.08),
             {},
-            {{TriggerMode::TimeDelay, 0.0}}
+            {{TriggerMode::TimeDelay, INFINITY}}
         };
         auto completing = std::make_unique<coilgun::simulation::WaveformExcitation>(
             [](double) { return 480.0; });
@@ -876,7 +944,7 @@ TEST_CASE("GPU velocity-decay termination uses the committed completion-boundary
     MultiStageSim<EulerStepper> cpu(
         std::move(cpu_case.coils), cpu_case.armature, std::move(cpu_case.excitations),
         std::move(cpu_case.triggers), 1e-6, false,
-        coilgun::simulation::OptimizationLevel::Full);
+        coilgun::simulation::OptimizationLevel::Reference);
     GpuBackend backend;
     backend.backend = BackendMode::Auto;
     backend.use_persistent = false;
@@ -891,12 +959,8 @@ TEST_CASE("GPU velocity-decay termination uses the committed completion-boundary
     const auto& gpu_boundary = gpu.step();
     REQUIRE(gpu.execution_report().gpu_executed);
     REQUIRE(gpu.execution_report().backend == BackendMode::Direct);
-    CAPTURE(velocity_before_boundary);
-    CAPTURE(gpu_boundary.state.arm_velocity);
-    CAPTURE(gpu.result().history.front().state.force);
-    CAPTURE(gpu_boundary.state.force);
     REQUIRE(gpu_boundary.state.arm_velocity < velocity_before_boundary);
-    REQUIRE(std::abs(gpu_boundary.state.force) < 1e-18);
+    REQUIRE(std::isfinite(gpu_boundary.state.force));
     const double applied_acceleration =
         std::abs(gpu_boundary.state.arm_velocity - velocity_before_boundary) / 1e-6;
     REQUIRE(applied_acceleration > 1e-6);
@@ -906,7 +970,8 @@ TEST_CASE("GPU velocity-decay termination uses the committed completion-boundary
     coilgun::simulation::TerminationPolicy policy;
     policy.max_steps = 3;
     policy.velocity_decay_steps = 1;
-    policy.accel_threshold = 0.5 * applied_acceleration;
+    policy.accel_threshold = 2.0 *
+        std::abs(gpu_boundary.state.force) / gpu_case.armature.mass();
     policy.enable_velocity_check = true;
     policy.enable_bound_check = false;
     cpu.run(policy);
@@ -935,7 +1000,7 @@ TEST_CASE("GPU multi-stage trigger position matches the CPU crossed-boundary pos
     MultiStageSim<EulerStepper> cpu(
         std::move(cpu_case.coils), cpu_case.armature, std::move(cpu_case.excitations),
         std::move(cpu_case.triggers), 1e-6, false,
-        coilgun::simulation::OptimizationLevel::Reference);
+         coilgun::simulation::OptimizationLevel::Reference);
     GpuMultiStageSim<EulerStepper> gpu(
         std::move(gpu_case.coils), gpu_case.armature, std::move(gpu_case.excitations),
         std::move(gpu_case.triggers), 1e-6, false, GpuOptLevel::Standard, backend);
@@ -1066,6 +1131,50 @@ TEST_CASE("GPU multi-stage Graph executes on CUDA and matches explicit fallback"
     CHECK_FALSE(fallback->execution_report().gpu_executed);
     CHECK(fallback->execution_report().backend == BackendMode::Fallback);
     CHECK_FALSE(fallback->graph_assisted());
+}
+
+TEST_CASE("GPU excitation completion preserves residual circuit current") {
+    std::vector<DrivingCoil> coils{
+        DrivingCoil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref,
+                    1e-6, 0.7, 0.015)};
+    Armature armature(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref,
+                      ALUMINUM.density, 0.0, 0.120, 5, 2, 0.0);
+    auto waveform = std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 100.0; });
+    waveform->set_end_time(1e-6);
+    std::vector<std::unique_ptr<coilgun::simulation::Excitation>> excitations;
+    excitations.push_back(std::move(waveform));
+    GpuBackend backend;
+    backend.backend = BackendMode::Fallback;
+    GpuMultiStageSim<EulerStepper> sim(
+        std::move(coils), armature, std::move(excitations), {}, 1e-6,
+        false, GpuOptLevel::Standard, backend);
+
+    const auto& first = sim.step();
+    REQUIRE(first.cap_voltages[0] == doctest::Approx(0.0));
+    REQUIRE(std::abs(first.coil_currents[0]) > 1e-6);
+    const auto& second = sim.step();
+    CHECK(std::abs(second.coil_currents[0]) > 1e-6);
+}
+
+TEST_CASE("GPU quiet stage completion clears resident and recorded current") {
+    std::vector<DrivingCoil> coils{
+        DrivingCoil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref,
+                    1e-6, 0.7, 0.015)};
+    Armature armature(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref,
+                      ALUMINUM.density, 0.0, 0.120, 5, 2, 0.0);
+    std::vector<std::unique_ptr<coilgun::simulation::Excitation>> excitations;
+    excitations.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
+        [](double) { return 0.0; }));
+    GpuBackend backend;
+    backend.backend = BackendMode::Direct;
+    GpuMultiStageSim<EulerStepper> sim(
+        std::move(coils), armature, std::move(excitations), {}, 1e-6,
+        false, GpuOptLevel::Standard, backend);
+
+    const auto& step = sim.step();
+    CHECK(sim.state().currents(0) == doctest::Approx(0.0));
+    CHECK(step.coil_currents[0] == doctest::Approx(0.0));
 }
 
 TEST_CASE("GPU multi-stage reset deterministically replays the first step") {

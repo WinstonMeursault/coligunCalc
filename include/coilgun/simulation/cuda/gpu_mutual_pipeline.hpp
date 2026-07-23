@@ -25,6 +25,8 @@ void launch_mutual_pipeline(const MutualPipelineView& view,
                             int threads_per_block = 256,
                             cudaStream_t stream = nullptr);
 
+void initialize_mutual_pipeline_constants(cudaStream_t stream = nullptr);
+
 std::size_t mutual_pipeline_index(std::size_t simulation,
                                   std::size_t stage,
                                   std::size_t filament,

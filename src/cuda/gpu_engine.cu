@@ -21,6 +21,50 @@ namespace coilgun::simulation::cuda {
 
 namespace {
 
+enum DeviceBufferIndex : std::size_t {
+    Coils = 0,
+    Filaments,
+    Separations,
+    PairActive,
+    BatchActive,
+    TriggerMask,
+    Mutual,
+    Gradient,
+    Currents,
+    PreStepCurrents,
+    Derivative,
+    Acceleration,
+    Velocity,
+    Position,
+    Force,
+    StageInductance,
+    StageResistance,
+    StageMutual,
+    FilamentInductance,
+    FilamentReferenceResistance,
+    FilamentMutual,
+    StageMask,
+    MutualStageMask,
+    StageVoltage,
+    DynamicResistance,
+    Matrix,
+    Rhs,
+    Solution,
+    Residual,
+    CompactStatus,
+    TriggerMode,
+    TriggerValue,
+    ExcitationFinished,
+    StageCompleted,
+    TriggerTime,
+    TriggerPosition,
+    PositionOffset,
+    ControlTime,
+    StagePosition,
+    FilamentPosition,
+    BufferCount,
+};
+
 class ScopedCudaDevice {
 public:
     explicit ScopedCudaDevice(int target) : target_(target) {
@@ -91,6 +135,32 @@ void GpuEngine::release_runtime_resources() noexcept {
         (void)cudaSetDevice(previous_device);
 }
 
+void GpuEngine::sync_runtime_state_after_reset() {
+    if (!context_available() || resources_->buffers.size() < BufferCount) return;
+    ScopedCudaDevice device(config_.device_id);
+    const auto B = layout_.B;
+    const auto D = layout_.D;
+    const auto copy = [](void* destination, const void* source, std::size_t bytes,
+                         const char* operation) {
+        const auto status = cudaMemcpy(destination, source, bytes, cudaMemcpyHostToDevice);
+        if (status != cudaSuccess)
+            throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
+    };
+    copy(resources_->buffers[Currents], state_.currents.data(), B * D * sizeof(double),
+         "reset current upload");
+    copy(resources_->buffers[Velocity], state_.velocity.data(), B * sizeof(double),
+         "reset velocity upload");
+    copy(resources_->buffers[Position], state_.position.data(), B * sizeof(double),
+         "reset position upload");
+    if (policy_.thermal == ThermalMode::Gpu && resources_->thermal_workspace) {
+        resources_->thermal_workspace->initialize_device_state(
+            material_tables_, B, layout_.F, state_.filament_masses.data(),
+            state_.reference_resistances.data(), state_.filament_materials.data(),
+            state_.temperatures.data(), state_.resistances.data(), context_->stream());
+        context_->synchronize();
+    }
+}
+
 std::vector<std::uintptr_t> GpuEngine::device_buffer_addresses() const {
     if (!resources_) return {};
     std::vector<std::uintptr_t> result;
@@ -101,6 +171,106 @@ std::vector<std::uintptr_t> GpuEngine::device_buffer_addresses() const {
         const auto thermal = resources_->thermal_workspace->device_addresses();
         result.insert(result.end(), thermal.begin(), thermal.end());
     }
+    return result;
+}
+
+GpuAssemblySnapshot GpuEngine::assemble_reference_for_test() {
+    ensure_running();
+    assemble_physical_system(false);
+    return {matrices_, rhs_};
+}
+
+void GpuEngine::complete_stage(std::size_t batch, std::size_t stage) {
+    ensure_running();
+    if (batch >= layout_.B || stage >= layout_.S)
+        throw std::out_of_range("completed stage index is outside GPU layout");
+    state_.currents[batch * layout_.D + stage] = 0.0;
+    state_.stage_mask[batch * layout_.S + stage] = 0;
+    state_.mutual_stage_mask[batch * layout_.S + stage] = 0;
+    stage_mask_[batch * layout_.S + stage] = 0;
+    mutual_stage_mask_[batch * layout_.S + stage] = 0;
+    select_graph_variant_at_boundary();
+    if (!context_available() || resources_->buffers.size() < BufferCount) return;
+    ScopedCudaDevice device(config_.device_id);
+    const auto error = cudaMemsetAsync(
+        static_cast<double*>(resources_->buffers[Currents]) + batch * layout_.D + stage,
+        0, sizeof(double), context_->stream());
+    if (error != cudaSuccess)
+        throw std::runtime_error(std::string("completed stage current clear: ") +
+                                 cudaGetErrorString(error));
+    context_->synchronize();
+}
+
+GpuAssemblySnapshot GpuEngine::assemble_device_for_test() {
+    ensure_running();
+    if (!context_available())
+        throw std::logic_error("device assembly requires an initialized CUDA context");
+    ScopedCudaDevice device(config_.device_id);
+    const auto B = layout_.B;
+    const auto S = layout_.S;
+    const auto F = layout_.F;
+    const auto D = layout_.D;
+    auto copy = [](void* destination, const void* source, std::size_t bytes,
+                   cudaMemcpyKind kind, const char* operation) {
+        const auto status = cudaMemcpy(destination, source, bytes, kind);
+        if (status != cudaSuccess)
+            throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
+    };
+    std::vector<double> voltages = state_.stage_voltages;
+    if (voltages.empty()) voltages.assign(B * S, 0.0);
+    copy(resources_->buffers[Currents], state_.currents.data(), B * D * sizeof(double),
+         cudaMemcpyHostToDevice, "test current upload");
+    copy(resources_->buffers[Velocity], state_.velocity.data(), B * sizeof(double),
+         cudaMemcpyHostToDevice, "test velocity upload");
+    copy(resources_->buffers[BatchActive], state_.active_mask.data(), B * sizeof(std::uint8_t),
+         cudaMemcpyHostToDevice, "test active upload");
+    copy(resources_->buffers[TriggerMask], state_.trigger_mask.data(), B * S * sizeof(std::uint8_t),
+         cudaMemcpyHostToDevice, "test trigger upload");
+    copy(resources_->buffers[StageMask], stage_mask_.data(), B * S * sizeof(std::uint8_t),
+         cudaMemcpyHostToDevice, "test stage mask upload");
+    copy(resources_->buffers[MutualStageMask], mutual_stage_mask_.data(), B * S * sizeof(std::uint8_t),
+         cudaMemcpyHostToDevice, "test mutual mask upload");
+    copy(resources_->buffers[StageVoltage], voltages.data(), B * S * sizeof(double),
+         cudaMemcpyHostToDevice, "test voltage upload");
+    copy(resources_->buffers[Mutual], state_.m1.data(), B * S * F * sizeof(double),
+         cudaMemcpyHostToDevice, "test mutual upload");
+    copy(resources_->buffers[Gradient], state_.dm1.data(), B * S * F * sizeof(double),
+         cudaMemcpyHostToDevice, "test gradient upload");
+    if (state_.resistances.size() == B * F)
+        copy(resources_->buffers[DynamicResistance], state_.resistances.data(),
+             B * F * sizeof(double), cudaMemcpyHostToDevice,
+             "test dynamic resistance upload");
+    const auto launch = launch_device_assembly(DeviceAssemblyView{
+        B, S, F,
+        static_cast<double*>(resources_->buffers[StageInductance]),
+        static_cast<double*>(resources_->buffers[StageResistance]),
+        static_cast<double*>(resources_->buffers[StageMutual]),
+        static_cast<double*>(resources_->buffers[FilamentInductance]),
+        static_cast<double*>(resources_->buffers[FilamentReferenceResistance]),
+        static_cast<double*>(resources_->buffers[FilamentMutual]),
+        state_.resistances.size() == B * F
+            ? static_cast<double*>(resources_->buffers[DynamicResistance]) : nullptr,
+        static_cast<double*>(resources_->buffers[Mutual]),
+        static_cast<double*>(resources_->buffers[Gradient]),
+        static_cast<double*>(resources_->buffers[Currents]),
+        static_cast<double*>(resources_->buffers[Velocity]),
+        static_cast<double*>(resources_->buffers[StageVoltage]),
+        static_cast<std::uint8_t*>(resources_->buffers[BatchActive]),
+        static_cast<std::uint8_t*>(resources_->buffers[TriggerMask]),
+        static_cast<std::uint8_t*>(resources_->buffers[StageMask]),
+        static_cast<std::uint8_t*>(resources_->buffers[MutualStageMask]),
+        static_cast<double*>(resources_->buffers[Matrix]),
+        static_cast<double*>(resources_->buffers[Rhs])}, context_->stream());
+    if (launch != cudaSuccess)
+        throw std::runtime_error(std::string("test device assembly: ") + cudaGetErrorString(launch));
+    context_->synchronize();
+    GpuAssemblySnapshot result;
+    result.matrix.resize(B * D * D);
+    result.rhs.resize(B * D);
+    copy(result.matrix.data(), resources_->buffers[Matrix], result.matrix.size() * sizeof(double),
+         cudaMemcpyDeviceToHost, "test matrix download");
+    copy(result.rhs.data(), resources_->buffers[Rhs], result.rhs.size() * sizeof(double),
+         cudaMemcpyDeviceToHost, "test rhs download");
     return result;
 }
 
@@ -207,6 +377,7 @@ void GpuEngine::initialize_runtime() {
         try {
             context_ = std::make_unique<GpuExecutionContext>(GpuExecutionContextConfig{
                 config_.device_id, cudaStreamNonBlocking, 0, config_.enable_profiling});
+            context_->ensure_quadrature9_loaded();
         } catch (const std::exception& error) {
             record_runtime_failure(SolverStatus::failure_status(
                 SolverFailure::InvalidArgument,
@@ -234,6 +405,10 @@ void GpuEngine::initialize_runtime() {
         solver_ = std::make_unique<GpuSolver>(SolverMode::Eigen,
                                               SolverBatchLayout{layout_.B, layout_.D});
     } else if (context_available()) {
+        if (policy_.backend == BackendMode::Graph && policy_.solver != SolverMode::Batched) {
+            policy_.solver = SolverMode::Batched;
+            report_.solver = SolverMode::Batched;
+        }
         solver_ = std::make_unique<GpuSolver>(*context_, policy_,
                                               SolverBatchLayout{layout_.B, layout_.D});
     } else {
@@ -261,6 +436,7 @@ void GpuEngine::initialize_runtime() {
         const auto S = layout_.S;
         const auto F = layout_.F;
         try {
+            // Keep this allocation order synchronized with DeviceBufferIndex.
             allocate(sizeof(CoilGeo) * S);
             allocate(sizeof(FilGeo) * F);
             allocate(sizeof(double) * B * S * F);
@@ -271,16 +447,108 @@ void GpuEngine::initialize_runtime() {
             allocate(sizeof(double) * B * S * F);
             allocate(sizeof(double) * B * (S + F));
             allocate(sizeof(double) * B * (S + F));
+            allocate(sizeof(double) * B * (S + F));
             allocate(sizeof(double) * B);
             allocate(sizeof(double) * B);
             allocate(sizeof(double) * B);
             allocate(sizeof(double) * B);
+            allocate(sizeof(double) * S);
+            allocate(sizeof(double) * S);
+            allocate(sizeof(double) * S * S);
+            allocate(sizeof(double) * F);
+            allocate(sizeof(double) * F);
+            allocate(sizeof(double) * F * F);
+            allocate(sizeof(std::uint8_t) * B * S);
+            allocate(sizeof(std::uint8_t) * B * S);
+            allocate(sizeof(double) * B * S);
+            allocate(sizeof(double) * B * F);
+            allocate(sizeof(double) * B * (S + F) * (S + F));
+            allocate(sizeof(double) * B * (S + F));
+            allocate(sizeof(double) * B * (S + F));
+            allocate(sizeof(double) * B);
+            allocate(sizeof(DeviceStepStatus) * B);
+            allocate(sizeof(std::uint8_t) * B * S);
+            allocate(sizeof(double) * B * S);
+            allocate(sizeof(std::uint8_t) * B * S);
+            allocate(sizeof(std::uint8_t) * B * S);
+            allocate(sizeof(double) * B * S);
+            allocate(sizeof(double) * B * S);
+            allocate(sizeof(double) * B);
+            allocate(sizeof(double));
+            allocate(sizeof(double) * S);
+            allocate(sizeof(double) * F);
+
+            auto copy_to_device = [](void* destination, const void* source,
+                                     std::size_t bytes, const char* operation) {
+                const auto status = cudaMemcpy(destination, source, bytes,
+                                               cudaMemcpyHostToDevice);
+                if (status != cudaSuccess)
+                    throw std::runtime_error(std::string(operation) + ": " +
+                                             cudaGetErrorString(status));
+            };
+            std::vector<CoilGeo> host_coils(S);
+            std::vector<FilGeo> host_filaments(F);
+            std::vector<double> stage_inductances(S);
+            std::vector<double> stage_resistances(S);
+            std::vector<double> filament_inductances(F);
+            std::vector<double> filament_resistances(F);
+            for (std::size_t stage = 0; stage < S; ++stage) {
+                host_coils[stage] = {geometry_.stage_inner_radii[stage],
+                    geometry_.stage_outer_radii[stage], geometry_.stage_lengths[stage],
+                    geometry_.stage_positions[stage], geometry_.stage_turns[stage]};
+                stage_inductances[stage] = stage_inductance(stage);
+                stage_resistances[stage] = stage_resistance(stage);
+            }
+            for (std::size_t filament = 0; filament < F; ++filament) {
+                host_filaments[filament] = {geometry_.filament_inner_radii[filament],
+                    geometry_.filament_outer_radii[filament],
+                    geometry_.filament_lengths[filament]};
+                filament_inductances[filament] = filament_inductance(filament);
+                filament_resistances[filament] = filament_resistance(filament);
+            }
+            copy_to_device(resources_->buffers[Coils], host_coils.data(),
+                           sizeof(CoilGeo) * S, "immutable coil upload");
+            copy_to_device(resources_->buffers[Filaments], host_filaments.data(),
+                           sizeof(FilGeo) * F, "immutable filament upload");
+            copy_to_device(resources_->buffers[StageInductance], stage_inductances.data(),
+                           sizeof(double) * S, "stage inductance upload");
+            copy_to_device(resources_->buffers[StageResistance], stage_resistances.data(),
+                           sizeof(double) * S, "stage resistance upload");
+            copy_to_device(resources_->buffers[StageMutual],
+                           geometry_.stage_mutual_inductances.data(),
+                           sizeof(double) * S * S, "stage mutual upload");
+            copy_to_device(resources_->buffers[FilamentInductance],
+                           filament_inductances.data(), sizeof(double) * F,
+                           "filament inductance upload");
+            copy_to_device(resources_->buffers[FilamentReferenceResistance],
+                           filament_resistances.data(), sizeof(double) * F,
+                           "filament resistance upload");
+            copy_to_device(resources_->buffers[FilamentMutual],
+                           geometry_.filament_mutual_inductances.data(),
+                           sizeof(double) * F * F, "filament mutual upload");
+            copy_to_device(resources_->buffers[StagePosition],
+                           geometry_.stage_positions.data(), sizeof(double) * S,
+                           "stage position upload");
+            copy_to_device(resources_->buffers[FilamentPosition],
+                           geometry_.filament_positions.data(), sizeof(double) * F,
+                           "filament position upload");
+            copy_to_device(resources_->buffers[Currents], state_.currents.data(),
+                           sizeof(double) * B * (S + F), "initial current upload");
+            copy_to_device(resources_->buffers[Velocity], state_.velocity.data(),
+                           sizeof(double) * B, "initial velocity upload");
+            copy_to_device(resources_->buffers[Position], state_.position.data(),
+                           sizeof(double) * B, "initial position upload");
             if (policy_.thermal != ThermalMode::Disabled) {
                 material_tables_ = generate_material_tables();
             }
             if (policy_.thermal == ThermalMode::Gpu) {
                 resources_->thermal_workspace = std::make_unique<ThermalWorkspace>(
                     material_tables_, B * F);
+                resources_->thermal_workspace->initialize_device_state(
+                    material_tables_, B, F, state_.filament_masses.data(),
+                    state_.reference_resistances.data(), state_.filament_materials.data(),
+                    state_.temperatures.data(), state_.resistances.data(), context_->stream());
+                context_->synchronize();
             }
 
             if (policy_.backend == BackendMode::Graph) {
@@ -378,46 +646,50 @@ void GpuEngine::execute_physical_pipeline() {
     const std::size_t F = layout_.F;
     const auto state_snapshot = state_;
     bool solver_done = false;
-    std::vector<double> separations(B * S * F, 0.0);
     std::vector<std::uint8_t> active(B * S * F, 0);
-    std::vector<CoilGeo> coils(S);
-    std::vector<FilGeo> filaments(F);
-    for (std::size_t s = 0; s < S; ++s) {
-        coils[s] = CoilGeo{geometry_.stage_inner_radii[s], geometry_.stage_outer_radii[s],
-                           geometry_.stage_lengths[s], geometry_.stage_positions[s],
-                           geometry_.stage_turns[s]};
-    }
-    for (std::size_t f = 0; f < F; ++f) {
-        filaments[f] = FilGeo{geometry_.filament_inner_radii[f], geometry_.filament_outer_radii[f],
-                              geometry_.filament_lengths[f]};
-    }
     for (std::size_t b = 0; b < B; ++b) {
         for (std::size_t s = 0; s < S; ++s) {
             for (std::size_t f = 0; f < F; ++f) {
                 const auto index = mutual_pipeline_index(b, s, f, S, F);
                 active[index] = state_.active_mask[b] != 0 && mutual_stage_mask_[b * S + s] != 0;
-                separations[index] = geometry_.stage_positions[s] -
-                    (geometry_.filament_positions[f] - state_.position[b]);
             }
         }
     }
 
 #if defined(COILGUN_CUDA_AVAILABLE)
     if (context_available()) {
-        auto* d_coils = static_cast<CoilGeo*>(resources_->buffers[0]);
-        auto* d_filaments = static_cast<FilGeo*>(resources_->buffers[1]);
-        auto* d_separations = static_cast<double*>(resources_->buffers[2]);
-        auto* d_active = static_cast<std::uint8_t*>(resources_->buffers[3]);
-        auto* d_batch_active = static_cast<std::uint8_t*>(resources_->buffers[4]);
-        auto* d_trigger = static_cast<std::uint8_t*>(resources_->buffers[5]);
-        auto* d_mutual = static_cast<double*>(resources_->buffers[6]);
-        auto* d_gradient = static_cast<double*>(resources_->buffers[7]);
-        auto* d_currents = static_cast<double*>(resources_->buffers[8]);
-        auto* d_derivative = static_cast<double*>(resources_->buffers[9]);
-        auto* d_acceleration = static_cast<double*>(resources_->buffers[10]);
-        auto* d_velocity = static_cast<double*>(resources_->buffers[11]);
-        auto* d_position = static_cast<double*>(resources_->buffers[12]);
-        auto* d_force = static_cast<double*>(resources_->buffers[13]);
+        auto* d_coils = static_cast<CoilGeo*>(resources_->buffers[Coils]);
+        auto* d_filaments = static_cast<FilGeo*>(resources_->buffers[Filaments]);
+        auto* d_separations = static_cast<double*>(resources_->buffers[Separations]);
+        auto* d_active = static_cast<std::uint8_t*>(resources_->buffers[PairActive]);
+        auto* d_batch_active = static_cast<std::uint8_t*>(resources_->buffers[BatchActive]);
+        auto* d_trigger = static_cast<std::uint8_t*>(resources_->buffers[TriggerMask]);
+        auto* d_mutual = static_cast<double*>(resources_->buffers[Mutual]);
+        auto* d_gradient = static_cast<double*>(resources_->buffers[Gradient]);
+        auto* d_currents = static_cast<double*>(resources_->buffers[Currents]);
+        auto* d_pre_step_currents = static_cast<double*>(resources_->buffers[PreStepCurrents]);
+        auto* d_derivative = static_cast<double*>(resources_->buffers[Derivative]);
+        auto* d_acceleration = static_cast<double*>(resources_->buffers[Acceleration]);
+        auto* d_velocity = static_cast<double*>(resources_->buffers[Velocity]);
+        auto* d_position = static_cast<double*>(resources_->buffers[Position]);
+        auto* d_force = static_cast<double*>(resources_->buffers[Force]);
+        auto* d_stage_mask = static_cast<std::uint8_t*>(resources_->buffers[StageMask]);
+        auto* d_mutual_stage_mask = static_cast<std::uint8_t*>(resources_->buffers[MutualStageMask]);
+        auto* d_stage_voltage = static_cast<double*>(resources_->buffers[StageVoltage]);
+        auto* d_dynamic_resistance = static_cast<double*>(resources_->buffers[DynamicResistance]);
+        auto* d_matrix = static_cast<double*>(resources_->buffers[Matrix]);
+        auto* d_rhs = static_cast<double*>(resources_->buffers[Rhs]);
+        auto* d_solution = static_cast<double*>(resources_->buffers[Solution]);
+        auto* d_residual = static_cast<double*>(resources_->buffers[Residual]);
+        auto* d_status = static_cast<DeviceStepStatus*>(resources_->buffers[CompactStatus]);
+        auto* d_trigger_modes = static_cast<std::uint8_t*>(resources_->buffers[TriggerMode]);
+        auto* d_trigger_values = static_cast<double*>(resources_->buffers[TriggerValue]);
+        auto* d_excitation_finished = static_cast<std::uint8_t*>(resources_->buffers[ExcitationFinished]);
+        auto* d_stage_completed = static_cast<std::uint8_t*>(resources_->buffers[StageCompleted]);
+        auto* d_trigger_times = static_cast<double*>(resources_->buffers[TriggerTime]);
+        auto* d_trigger_positions = static_cast<double*>(resources_->buffers[TriggerPosition]);
+        auto* d_position_offsets = static_cast<double*>(resources_->buffers[PositionOffset]);
+        auto* d_control_time = static_cast<double*>(resources_->buffers[ControlTime]);
         try {
             const auto copy = [&](void* destination, const void* source, std::size_t bytes,
                                   cudaMemcpyKind kind, const char* operation) {
@@ -429,124 +701,298 @@ void GpuEngine::execute_physical_pipeline() {
                 report_.transfer_time_ms +=
                     std::chrono::duration<double, std::milli>(transfer_stop - transfer_start).count();
             };
-            std::vector<std::uint8_t> effective_trigger = state_.trigger_mask;
-            for (std::size_t b = 0; b < B; ++b) {
-                for (std::size_t s = 0; s < S; ++s) {
-                    if (state_.active_mask[b] == 0 || mutual_stage_mask_[b * S + s] == 0)
-                        effective_trigger[b * S + s] = 0;
-                }
-            }
-            copy(d_coils, coils.data(), sizeof(CoilGeo) * S, cudaMemcpyHostToDevice, "coil upload");
-            copy(d_filaments, filaments.data(), sizeof(FilGeo) * F, cudaMemcpyHostToDevice, "filament upload");
-            copy(d_separations, separations.data(), sizeof(double) * separations.size(), cudaMemcpyHostToDevice, "separation upload");
             copy(d_active, active.data(), sizeof(std::uint8_t) * active.size(), cudaMemcpyHostToDevice, "active upload");
             copy(d_batch_active, state_.active_mask.data(), sizeof(std::uint8_t) * B, cudaMemcpyHostToDevice, "batch active upload");
-            copy(d_trigger, effective_trigger.data(), sizeof(std::uint8_t) * state_.trigger_mask.size(), cudaMemcpyHostToDevice, "trigger upload");
-            copy(d_currents, state_.currents.data(), sizeof(double) * state_.currents.size(), cudaMemcpyHostToDevice, "current upload");
-            copy(d_velocity, state_.velocity.data(), sizeof(double) * B, cudaMemcpyHostToDevice, "velocity upload");
-            copy(d_position, state_.position.data(), sizeof(double) * B, cudaMemcpyHostToDevice, "position upload");
-            const auto launch_mutual = [&](cudaStream_t stream) {
-                launch_mutual_pipeline(MutualPipelineView{d_coils, d_filaments, d_separations, d_active,
-                                                           d_mutual, d_gradient, B, S, F, 9},
-                                         policy_.precision == PrecisionMode::Aggressive
-                                             ? GpuOptLevel::Aggressive
-                                             : (policy_.precision == PrecisionMode::Full
-                                                    ? GpuOptLevel::Full : GpuOptLevel::Standard),
-                                          config_.threads_per_block, stream);
-                return GraphCaptureStatus::success();
-             };
-              if (policy_.backend == BackendMode::Graph && graph_cache_) {
-                  if (fault_injection_.fail_graph_capture) {
-                      fault_injection_.fail_graph_capture = false;
-                      throw std::runtime_error("injected CUDA graph capture failure");
-                  }
-                 const auto key = graph_key();
-                 if (!graph_cache_->has_current() || !(graph_cache_->current_key() == key)) {
-                     // Upload the constant quadrature tables before capture. CUDA
-                     // graph capture does not reliably retain symbol copies.
-                     (void)launch_mutual(context_->stream());
-                     context_->synchronize();
-                 }
-                  const auto capture_count = graph_cache_->capture_count();
-                  auto selected = graph_cache_->capture_and_select(key, context_->stream(), launch_mutual);
-                 if (!selected.ok) {
-                    record_runtime_failure(SolverStatus::failure_status(
-                        SolverFailure::InvalidArgument,
-                        "CUDA graph capture failed: " + selected.failure.message));
-                     throw std::runtime_error(report_.fallback_reason);
-                 }
-                 if (graph_cache_->capture_count() > capture_count)
-                     ++report_.graph_rebuild_count;
-                auto replayed = graph_cache_->replay(context_->stream());
-                if (!replayed.ok) {
-                    record_runtime_failure(SolverStatus::failure_status(
-                        SolverFailure::InvalidArgument,
-                        "CUDA graph replay failed: " + replayed.failure.message));
-                    throw std::runtime_error(report_.fallback_reason);
+            copy(d_trigger, state_.trigger_mask.data(), sizeof(std::uint8_t) * state_.trigger_mask.size(), cudaMemcpyHostToDevice, "trigger upload");
+            copy(d_stage_mask, stage_mask_.data(), sizeof(std::uint8_t) * B * S,
+                 cudaMemcpyHostToDevice, "stage mask upload");
+            copy(d_mutual_stage_mask, mutual_stage_mask_.data(), sizeof(std::uint8_t) * B * S,
+                 cudaMemcpyHostToDevice, "mutual stage mask upload");
+            std::vector<double> stage_voltages = state_.stage_voltages;
+            if (stage_voltages.empty()) stage_voltages.assign(B * S, 0.0);
+            copy(d_stage_voltage, stage_voltages.data(), sizeof(double) * B * S,
+                 cudaMemcpyHostToDevice, "stage voltage upload");
+            if (policy_.thermal != ThermalMode::Gpu && state_.resistances.size() == B * F)
+                copy(d_dynamic_resistance, state_.resistances.data(), sizeof(double) * B * F,
+                     cudaMemcpyHostToDevice, "dynamic resistance upload");
+            if (device_control_enabled()) {
+                copy(d_trigger_modes, state_.trigger_modes.data(), B * S * sizeof(std::uint8_t),
+                     cudaMemcpyHostToDevice, "trigger mode upload");
+                copy(d_trigger_values, state_.trigger_values.data(), B * S * sizeof(double),
+                     cudaMemcpyHostToDevice, "trigger value upload");
+                copy(d_excitation_finished, state_.excitation_finished.data(),
+                     B * S * sizeof(std::uint8_t), cudaMemcpyHostToDevice,
+                     "excitation completion upload");
+                copy(d_stage_completed, state_.stage_completed.data(),
+                     B * S * sizeof(std::uint8_t), cudaMemcpyHostToDevice,
+                     "stage completion upload");
+                copy(d_trigger_times, state_.trigger_times.data(), B * S * sizeof(double),
+                     cudaMemcpyHostToDevice, "trigger time upload");
+                copy(d_trigger_positions, state_.trigger_positions.data(), B * S * sizeof(double),
+                     cudaMemcpyHostToDevice, "trigger position upload");
+                copy(d_position_offsets, state_.position_offsets.data(), B * sizeof(double),
+                     cudaMemcpyHostToDevice, "position offset upload");
+                const double control_time = (result_.completed_steps + 1) * state_.dt;
+                copy(d_control_time, &control_time, sizeof(double), cudaMemcpyHostToDevice,
+                     "control time upload");
+            }
+            const auto opt_level = policy_.precision == PrecisionMode::Aggressive
+                ? GpuOptLevel::Aggressive
+                : (policy_.precision == PrecisionMode::Full
+                       ? GpuOptLevel::Full : GpuOptLevel::Standard);
+            const auto thermal_precision = policy_.precision == PrecisionMode::Aggressive
+                ? ThermalPrecision::Aggressive
+                : (policy_.precision == PrecisionMode::Full
+                       ? ThermalPrecision::Full : ThermalPrecision::Standard);
+            const double* assembly_resistances = policy_.thermal == ThermalMode::Gpu
+                ? resources_->thermal_workspace->device_resistances()
+                : (state_.resistances.size() == B * F ? d_dynamic_resistance : nullptr);
+            const auto assembly_view = DeviceAssemblyView{
+                B, S, F,
+                static_cast<double*>(resources_->buffers[StageInductance]),
+                static_cast<double*>(resources_->buffers[StageResistance]),
+                static_cast<double*>(resources_->buffers[StageMutual]),
+                static_cast<double*>(resources_->buffers[FilamentInductance]),
+                static_cast<double*>(resources_->buffers[FilamentReferenceResistance]),
+                static_cast<double*>(resources_->buffers[FilamentMutual]),
+                assembly_resistances, d_mutual, d_gradient, d_currents, d_velocity,
+                d_stage_voltage, d_batch_active, d_trigger, d_stage_mask,
+                d_mutual_stage_mask, d_matrix, d_rhs};
+
+            const auto launch_device_step = [&](cudaStream_t stream) {
+                if (cudaMemcpyAsync(d_pre_step_currents, d_currents,
+                                    B * (S + F) * sizeof(double),
+                                    cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "pre-step current snapshot failed");
+                if (launch_separation_update(B, S, F,
+                        static_cast<double*>(resources_->buffers[StagePosition]),
+                        static_cast<double*>(resources_->buffers[FilamentPosition]),
+                        d_position, d_separations, stream) != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "separation update failed");
+                launch_mutual_pipeline(MutualPipelineView{
+                        d_coils, d_filaments, d_separations, d_active,
+                        d_mutual, d_gradient, B, S, F, 9},
+                    opt_level, config_.threads_per_block, stream);
+                if (cudaGetLastError() != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "mutual pipeline failed");
+                if (launch_device_assembly(assembly_view, stream) != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "device assembly failed");
+                const auto solve = solver_->solve_device(
+                    DeviceMatrixView{d_matrix, B, S + F},
+                    DeviceVectorView{d_rhs, B, S + F},
+                    DeviceVectorView{d_solution, B, S + F},
+                    DeviceResidualView{d_residual, B});
+                if (!solve.ok)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody, 0,
+                                                       solve.message);
+                if (launch_state_update_masked(
+                        B, S, F, d_currents, d_solution, d_gradient,
+                        d_trigger, d_batch_active, state_.mass, state_.dt,
+                        d_acceleration, d_velocity, d_position, d_force,
+                        StateKernelConfig{config_.deterministic,
+                            static_cast<unsigned int>(config_.threads_per_block)},
+                        stream) != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "state update failed");
+                if (policy_.thermal == ThermalMode::Gpu &&
+                    resources_->thermal_workspace->launch_device(
+                        thermal_precision, B, S, F, d_pre_step_currents,
+                        d_batch_active, state_.dt, stream) != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "thermal update failed");
+                if (device_control_enabled() && launch_device_control(DeviceControlView{
+                        B, S, F, S + F, 1.0e-6, d_control_time,
+                        d_currents, d_position, d_position_offsets, d_trigger_modes,
+                        d_trigger_values, d_excitation_finished, d_batch_active, d_trigger,
+                        d_stage_mask, d_mutual_stage_mask, d_stage_completed, d_active,
+                        d_trigger_times, d_trigger_positions}, stream) != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "device control failed");
+                if (launch_compact_status(B, S + F, d_currents, d_velocity,
+                        d_position, d_residual, d_batch_active, d_status, stream) != cudaSuccess)
+                    return GraphCaptureStatus::failed(GraphCapturePhase::CaptureBody,
+                        static_cast<int>(cudaGetLastError()), "compact status failed");
+                return GraphCaptureStatus::success(
+                    reinterpret_cast<std::uintptr_t>(d_status),
+                    B * sizeof(DeviceStepStatus));
+            };
+
+            bool device_step_complete = false;
+            if (policy_.backend == BackendMode::Graph && graph_cache_) {
+                if (fault_injection_.fail_graph_capture) {
+                    fault_injection_.fail_graph_capture = false;
+                    throw std::runtime_error("injected CUDA graph capture failure");
                 }
-            } else if (persistent_active_) {
-                execute_persistent_mutual();
-            } else {
-                (void)launch_mutual(context_->stream());
+                const auto key = graph_key();
+                const auto capture_count = graph_cache_->capture_count();
+                const auto selected = graph_cache_->capture_and_select(
+                    key, context_->stream(), launch_device_step,
+                    GraphWorkspace{reinterpret_cast<std::uintptr_t>(d_status),
+                                   B * sizeof(DeviceStepStatus)});
+                if (!selected.ok)
+                    throw std::runtime_error("CUDA graph capture failed: " +
+                                             selected.failure.message);
+                if (graph_cache_->capture_count() > capture_count)
+                    ++report_.graph_rebuild_count;
+                const auto replayed = graph_cache_->replay(context_->stream());
+                if (!replayed.ok)
+                    throw std::runtime_error("CUDA graph replay failed: " +
+                                             replayed.failure.message);
+                device_step_complete = true;
+            } else if (solver_->resolved_mode() == SolverMode::Batched) {
+                const auto launched = launch_device_step(context_->stream());
+                if (!launched.ok) throw std::runtime_error(launched.failure.message);
+                device_step_complete = true;
             }
-            if (!persistent_active_)
+
+            if (!device_step_complete) {
+                if (launch_separation_update(B, S, F,
+                        static_cast<double*>(resources_->buffers[StagePosition]),
+                        static_cast<double*>(resources_->buffers[FilamentPosition]),
+                        d_position, d_separations, context_->stream()) != cudaSuccess)
+                    throw std::runtime_error("separation update kernel launch failed");
+                launch_mutual_pipeline(MutualPipelineView{
+                        d_coils, d_filaments, d_separations, d_active,
+                        d_mutual, d_gradient, B, S, F, 9},
+                    opt_level, config_.threads_per_block, context_->stream());
                 context_->synchronize();
-             copy(state_.m1.data(), d_mutual, sizeof(double) * state_.m1.size(), cudaMemcpyDeviceToHost, "mutual download");
-             copy(state_.dm1.data(), d_gradient, sizeof(double) * state_.dm1.size(), cudaMemcpyDeviceToHost, "gradient download");
-              if (fault_injection_.fail_after_mutual) {
-                  fault_injection_.fail_after_mutual = false;
-                 throw std::runtime_error("injected GPU failure after mutual segment");
-             }
-             assemble_physical_system(true);
-            pipeline_order_.push_back(PipelineStage::Matrix);
-            execute_solver_step();
-            pipeline_order_.push_back(PipelineStage::Solver);
-            solver_done = true;
-            copy(d_derivative, solution_.data(), sizeof(double) * solution_.size(), cudaMemcpyHostToDevice, "derivative upload");
-            pipeline_order_.push_back(PipelineStage::Force);
-            if (launch_state_update_masked(
-                    B, S, F, d_currents, d_derivative, d_gradient,
-                    d_trigger, d_batch_active, state_.mass, state_.dt,
-                    d_acceleration, d_velocity, d_position, d_force,
-                    StateKernelConfig{config_.deterministic,
-                                      static_cast<unsigned int>(config_.threads_per_block)},
-                    context_->stream()) != cudaSuccess) {
-                throw std::runtime_error("state kernel launch failed");
+                if (fault_injection_.fail_after_mutual) {
+                    fault_injection_.fail_after_mutual = false;
+                    throw std::runtime_error("injected GPU failure after mutual segment");
+                }
+                if (launch_device_assembly(assembly_view, context_->stream()) != cudaSuccess)
+                    throw std::runtime_error("device matrix/RHS assembly failed");
+                context_->synchronize();
+                copy(matrices_.data(), d_matrix, sizeof(double) * matrices_.size(),
+                     cudaMemcpyDeviceToHost, "matrix fallback download");
+                copy(rhs_.data(), d_rhs, sizeof(double) * rhs_.size(),
+                     cudaMemcpyDeviceToHost, "rhs fallback download");
+                execute_solver_step();
+                copy(d_derivative, solution_.data(), sizeof(double) * solution_.size(),
+                     cudaMemcpyHostToDevice, "derivative fallback upload");
+                if (cudaMemcpyAsync(d_pre_step_currents, d_currents,
+                                    B * (S + F) * sizeof(double),
+                                    cudaMemcpyDeviceToDevice, context_->stream()) != cudaSuccess)
+                    throw std::runtime_error("pre-step current snapshot failed");
+                if (launch_state_update_masked(
+                        B, S, F, d_currents, d_derivative, d_gradient,
+                        d_trigger, d_batch_active, state_.mass, state_.dt,
+                        d_acceleration, d_velocity, d_position, d_force,
+                        StateKernelConfig{config_.deterministic,
+                            static_cast<unsigned int>(config_.threads_per_block)},
+                        context_->stream()) != cudaSuccess)
+                    throw std::runtime_error("state kernel launch failed");
+                if (policy_.thermal == ThermalMode::Gpu &&
+                    resources_->thermal_workspace->launch_device(
+                        thermal_precision, B, S, F, d_pre_step_currents,
+                        d_batch_active, state_.dt, context_->stream()) != cudaSuccess)
+                    throw std::runtime_error("thermal update failed");
+                if (device_control_enabled() && launch_device_control(DeviceControlView{
+                        B, S, F, S + F, 1.0e-6, d_control_time,
+                        d_currents, d_position, d_position_offsets, d_trigger_modes,
+                        d_trigger_values, d_excitation_finished, d_batch_active, d_trigger,
+                        d_stage_mask, d_mutual_stage_mask, d_stage_completed, d_active,
+                        d_trigger_times, d_trigger_positions}, context_->stream()) != cudaSuccess)
+                    throw std::runtime_error("device control failed");
+                if (launch_compact_status(B, S + F, d_currents, d_velocity,
+                        d_position, nullptr, d_batch_active, d_status,
+                        context_->stream()) != cudaSuccess)
+                    throw std::runtime_error("compact status failed");
             }
+
             context_->synchronize();
-             copy(state_.currents.data(), d_currents, sizeof(double) * state_.currents.size(), cudaMemcpyDeviceToHost, "current download");
-             copy(state_.velocity.data(), d_velocity, sizeof(double) * B, cudaMemcpyDeviceToHost, "velocity download");
-             copy(state_.position.data(), d_position, sizeof(double) * B, cudaMemcpyDeviceToHost, "position download");
-             pipeline_order_.push_back(PipelineStage::State);
-             if (policy_.thermal != ThermalMode::Disabled && !state_.temperatures.empty()) {
-                 const auto thermal_start = std::chrono::steady_clock::now();
-                 std::vector<double> filament_currents(B * F, 0.0);
-                for (std::size_t b = 0; b < B; ++b)
-                    if (state_.active_mask[b] != 0)
-                        std::copy_n(state_.currents.data() + b * layout_.D + S, F,
-                                    filament_currents.data() + b * F);
+            if (solver_->resolved_mode() == SolverMode::Batched) {
+                const auto solver_status = solver_->validate_device_result(
+                    DeviceResidualView{d_residual, B});
+                if (!solver_status.ok) throw std::runtime_error(solver_status.message);
+            }
+            std::vector<DeviceStepStatus> compact_status(B);
+            copy(compact_status.data(), d_status, B * sizeof(DeviceStepStatus),
+                 cudaMemcpyDeviceToHost, "compact status download");
+            for (std::size_t batch = 0; batch < B; ++batch) {
+                if (compact_status[batch].finite == 0 ||
+                    compact_status[batch].solver_ok == 0)
+                    throw std::runtime_error("device compact status rejected the step");
+            }
+
+            copy(state_.m1.data(), d_mutual, sizeof(double) * state_.m1.size(),
+                 cudaMemcpyDeviceToHost, "mutual download");
+            copy(state_.dm1.data(), d_gradient, sizeof(double) * state_.dm1.size(),
+                 cudaMemcpyDeviceToHost, "gradient download");
+            copy(state_.currents.data(), d_currents, sizeof(double) * state_.currents.size(),
+                 cudaMemcpyDeviceToHost, "current download");
+            copy(state_.velocity.data(), d_velocity, sizeof(double) * B,
+                 cudaMemcpyDeviceToHost, "velocity download");
+            copy(state_.position.data(), d_position, sizeof(double) * B,
+                 cudaMemcpyDeviceToHost, "position download");
+            state_.current_derivatives.resize(B * (S + F));
+            copy(state_.current_derivatives.data(),
+                 solver_->resolved_mode() == SolverMode::Batched ? d_solution : d_derivative,
+                 sizeof(double) * state_.current_derivatives.size(),
+                 cudaMemcpyDeviceToHost, "derivative download");
+            current_derivatives_ = state_.current_derivatives;
+            if (device_control_enabled()) {
+                copy(state_.active_mask.data(), d_batch_active, B * sizeof(std::uint8_t),
+                     cudaMemcpyDeviceToHost, "active status download");
+                copy(state_.trigger_mask.data(), d_trigger, B * S * sizeof(std::uint8_t),
+                     cudaMemcpyDeviceToHost, "trigger status download");
+                copy(state_.stage_mask.data(), d_stage_mask, B * S * sizeof(std::uint8_t),
+                     cudaMemcpyDeviceToHost, "stage status download");
+                copy(state_.mutual_stage_mask.data(), d_mutual_stage_mask,
+                     B * S * sizeof(std::uint8_t), cudaMemcpyDeviceToHost,
+                     "mutual status download");
+                copy(state_.stage_completed.data(), d_stage_completed,
+                     B * S * sizeof(std::uint8_t), cudaMemcpyDeviceToHost,
+                     "completion status download");
+                copy(state_.trigger_times.data(), d_trigger_times, B * S * sizeof(double),
+                     cudaMemcpyDeviceToHost, "trigger time download");
+                copy(state_.trigger_positions.data(), d_trigger_positions,
+                     B * S * sizeof(double), cudaMemcpyDeviceToHost,
+                     "trigger position download");
+                stage_mask_ = state_.stage_mask;
+                mutual_stage_mask_ = state_.mutual_stage_mask;
+                select_graph_variant_at_boundary();
+            }
+            pipeline_order_.push_back(PipelineStage::Matrix);
+            pipeline_order_.push_back(PipelineStage::Solver);
+            pipeline_order_.push_back(PipelineStage::Force);
+            solver_done = true;
+            pipeline_order_.push_back(PipelineStage::State);
+
+            if (policy_.thermal != ThermalMode::Disabled && !state_.temperatures.empty()) {
+                const auto thermal_start = std::chrono::steady_clock::now();
                 state_.resistivities.resize(B * F);
                 state_.resistances.resize(B * F);
                 state_.joule_energy.resize(B * F);
-                const auto precision = policy_.precision == PrecisionMode::Aggressive
-                    ? ThermalPrecision::Aggressive
-                    : (policy_.precision == PrecisionMode::Full ? ThermalPrecision::Full : ThermalPrecision::Standard);
                 if (policy_.thermal == ThermalMode::Cpu) {
-                    update_thermal_batch_cpu(material_tables_, precision, B, F, filament_currents.data(),
-                        state_.filament_masses.data(), state_.reference_resistances.data(), state_.filament_materials.data(),
-                        state_.dt, state_.temperatures.data(), state_.resistivities.data(), state_.resistances.data(), state_.joule_energy.data());
-                 } else {
-                     resources_->thermal_workspace->update(material_tables_, precision, B, F, filament_currents.data(),
-                         state_.filament_masses.data(), state_.reference_resistances.data(), state_.filament_materials.data(),
-                         state_.dt, state_.temperatures.data(), state_.resistivities.data(), state_.resistances.data(), state_.joule_energy.data(), context_->stream());
-                  }
-                  context_->synchronize();
-                 const auto thermal_stop = std::chrono::steady_clock::now();
-                 report_.thermal_time_ms +=
-                     std::chrono::duration<double, std::milli>(thermal_stop - thermal_start).count();
+                    std::vector<double> filament_currents(B * F, 0.0);
+                    for (std::size_t b = 0; b < B; ++b)
+                        if (state_.active_mask[b] != 0)
+                            std::copy_n(state_snapshot.currents.data() + b * layout_.D + S,
+                                        F, filament_currents.data() + b * F);
+                    update_thermal_batch_cpu(
+                        material_tables_, thermal_precision, B, F,
+                        filament_currents.data(), state_.filament_masses.data(),
+                        state_.reference_resistances.data(), state_.filament_materials.data(),
+                        state_.dt, state_.temperatures.data(), state_.resistivities.data(),
+                        state_.resistances.data(), state_.joule_energy.data());
+                } else if (resources_->thermal_workspace->download_device_state(
+                               state_.temperatures.data(), state_.resistivities.data(),
+                               state_.resistances.data(), state_.joule_energy.data(),
+                               context_->stream()) != cudaSuccess) {
+                    throw std::runtime_error("resident thermal observation failed");
+                } else {
+                    context_->synchronize();
+                }
+                report_.thermal_time_ms += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - thermal_start).count();
                 pipeline_order_.push_back(PipelineStage::Thermal);
-             }
-             restore_inactive_state(state_snapshot);
+            }
+            restore_inactive_state(state_snapshot);
          } catch (...) { throw; }
     }
 #endif
