@@ -115,7 +115,8 @@ private:
         std::vector<std::unique_ptr<Excitation>> excitations;
         std::vector<TriggerConfig>               trigger_configs;
         std::vector<bool>                        triggered;
-        std::vector<bool>                        finished;
+        std::vector<bool>                        excitation_finished;
+        std::vector<bool>                        stage_completed;
         std::vector<double>                      trigger_times;
         std::vector<double>                      trigger_positions;
         std::vector<double>                      initial_stage_energies;

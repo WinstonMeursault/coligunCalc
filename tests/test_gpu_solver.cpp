@@ -26,6 +26,22 @@ bool gpu_available() {
     int count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
+
+template<typename T>
+class DeviceAllocation {
+public:
+    explicit DeviceAllocation(std::size_t count) {
+        if (cudaMalloc(reinterpret_cast<void**>(&pointer_), count * sizeof(T)) != cudaSuccess)
+            throw std::runtime_error("CUDA test allocation failed");
+    }
+    ~DeviceAllocation() { (void)cudaFree(pointer_); }
+    DeviceAllocation(const DeviceAllocation&) = delete;
+    DeviceAllocation& operator=(const DeviceAllocation&) = delete;
+    T* get() const noexcept { return pointer_; }
+
+private:
+    T* pointer_ = nullptr;
+};
 }
 
 TEST_CASE("Eigen solver resolves mode and solves a known FP64 system") {
@@ -223,6 +239,48 @@ TEST_CASE("CUDA solver reports the failed batch and backend info") {
     CHECK(status.failed_batch == 1);
     CHECK(status.backend_info != 0);
     CHECK(status.message.find("batch 1") != std::string::npos);
+}
+
+TEST_CASE("CUDA device solver preserves assembly input and reports residual") {
+    if (!gpu_available()) {
+        MESSAGE("CUDA device unavailable; skipping device solver test");
+        return;
+    }
+
+    GpuExecutionContext context;
+    GpuSolver solver(context, SolverMode::Batched, SolverBatchLayout{1, 2});
+    REQUIRE(solver.initialize_workspace().ok);
+    const std::array<double, 4> matrix{2.0, 1.0, 1.0, 2.0};
+    const std::array<double, 2> rhs{5.0, 5.0};
+    std::array<double, 4> matrix_after{};
+    std::array<double, 2> solution{};
+    double residual = -1.0;
+    DeviceAllocation<double> device_matrix(matrix.size());
+    DeviceAllocation<double> device_rhs(rhs.size());
+    DeviceAllocation<double> device_solution(solution.size());
+    DeviceAllocation<double> device_residual(1);
+    REQUIRE(cudaMemcpy(device_matrix.get(), matrix.data(), sizeof(matrix),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(cudaMemcpy(device_rhs.get(), rhs.data(), sizeof(rhs),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+
+    const SolverStatus status = solver.solve_device(
+        DeviceMatrixView{device_matrix.get(), 1, 2},
+        DeviceVectorView{device_rhs.get(), 1, 2},
+        DeviceVectorView{device_solution.get(), 1, 2},
+        DeviceResidualView{device_residual.get(), 1});
+
+    REQUIRE(status.ok);
+    REQUIRE(cudaMemcpy(matrix_after.data(), device_matrix.get(), sizeof(matrix_after),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(cudaMemcpy(solution.data(), device_solution.get(), sizeof(solution),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(cudaMemcpy(&residual, device_residual.get(), sizeof(residual),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    CHECK(matrix_after == matrix);
+    CHECK(solution[0] == doctest::Approx(5.0 / 3.0));
+    CHECK(solution[1] == doctest::Approx(5.0 / 3.0));
+    CHECK(residual < 1.0e-12);
 }
 
 TEST_CASE("CUDA context operations preserve the caller's current device") {

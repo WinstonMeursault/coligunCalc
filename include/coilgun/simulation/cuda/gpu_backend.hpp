@@ -37,12 +37,11 @@ struct GpuBackend {
     int     threads_per_block = 512;  ///< Threads per block for integration kernel.
     size_t  max_batch_sims    = 256;  ///< Pre-allocated buffer size for batch mode.
     bool    enable_profiling  = false; ///< Retain profiling-request metadata; host-wall timing fields are always collected. No NVTX guarantee.
-    // Kept as a request flag for source compatibility. The synchronous engine
-    // cannot host a resident control-stream kernel yet and therefore reports a
-    // safe CPU fallback when this is true.
+    // Kept as a request flag for source compatibility. It is consulted only
+    // when backend is Auto; explicit backend modes take precedence.
     bool    use_persistent    = true;
-    // Graph is the default optimized backend. The current graph captures only
-    // the mutual-inductance segment; the remaining physical step is direct.
+    // Graph is the default optimized backend. When selected and supported, it
+    // captures the complete fixed-shape resident physical step.
     BackendMode backend = BackendMode::Graph;
 
     void validate() const {

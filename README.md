@@ -1,7 +1,7 @@
 # coligunCalc
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Language](https://img.shields.io/badge/language-C%2B%2B17-blue)](https://isocpp.org/)
+[![Language](https://img.shields.io/badge/language-C%2B%2B20-blue)](https://isocpp.org/)
 [![Status](https://img.shields.io/badge/status-developing-orange)]()
 
 [中文文档](README_cn.md)
@@ -28,7 +28,7 @@ Licensed under GPLv3.
 - **Three optimization levels** — Reference / LookupTable / Full (distance cutoff + adaptive GL order)
 - **Stage triggering** — position-based or time-delay, up to 50 stages
 - **LRU caching** — 4096-entry filament-level M and dM/dz caches
-- **OpenMP multicore parallelism** — parallelized M/dM computation, force summation, and thermal updates per time step
+- **OpenMP multicore support** — the CPU M/dM loop is parallelized when the filament count is at least 8; force and thermal update loops are currently serial
 - **GPU acceleration (CUDA)** — synchronous Euler method surfaces align with the CPU API; stepping GPU single-/multi-stage RK4 instantiations currently throws `std::logic_error` and requires the CPU implementation
 
 ---
@@ -38,7 +38,7 @@ Licensed under GPLv3.
 ```
 include/coilgun/   — Public headers (core types, physics, components, simulation)
 src/               — Library implementation (static library libcoilgun.a)
-tests/             — Unit and integration tests (doctest, 28 CUDA-configured CTest targets)
+tests/             — Unit and integration tests (doctest/CTest)
 tools/             — T(q,p) lookup table generator
 docs/              — Documentation (API reference EN/CN, numerical model, design docs)
 .references/       — Reference papers in PDF (gitignored, local-only)
@@ -46,14 +46,14 @@ docs/              — Documentation (API reference EN/CN, numerical model, desi
 
 ## Quick Start
 
-**Requirements**: C++17 compiler with OpenMP support, CMake ≥ 3.20.
+**Requirements**: C++20 compiler with OpenMP support, CMake ≥ 3.20.
 
 Both Boost.Math and Eigen are fetched automatically via CMake `FetchContent` — no manual installation needed.
 
 ```sh
-cmake --preset ninja-debug       # configure
-cmake --build --preset ninja-debug   # build
-ctest --preset debug              # run tests
+cmake --preset cpu-debug
+cmake --build --preset cpu-debug
+ctest --preset cpu-debug
 ```
 
 ### GPU Acceleration (CUDA)
@@ -61,9 +61,10 @@ ctest --preset debug              # run tests
 **Additional requirements**: CUDA Toolkit ≥ 12.8 (for Blackwell sm_120; ≥ 9.0 for earlier architectures), NVIDIA GPU with Compute Capability ≥ 6.0.
 
 ```sh
-cmake --preset ninja-cuda-debug      # configure with CUDA
-cmake --build --preset ninja-cuda-debug  # build CPU + GPU libraries
-ctest --preset debug                 # run all tests (CPU + GPU)
+cmake --preset cuda-debug
+cmake --build --preset cuda-debug
+ctest --preset cuda-debug
+ctest --preset cuda-debug -L gpu
 ```
 
 The measurement-only CUDA benchmark includes CPU Reference rows and records
@@ -72,8 +73,8 @@ timings. It is excluded from the default build because results are
 machine-dependent:
 
 ```sh
-cmake --build --preset ninja-cuda-debug --target bench_gpu_engine
-./build/ninja-cuda-debug/src/cuda/bench_gpu_engine
+cmake --build --preset cuda-debug --target bench_gpu_engine
+./build/cuda-debug/src/cuda/bench_gpu_engine
 ```
 
 See [the benchmark record](docs/benchmarks/2026-07-19-unified-gpu-engine.md)
@@ -92,7 +93,9 @@ sim.run();
 double v = sim.result().summary.muzzle_velocity;
 ```
 
-The Direct and graph-assisted engines use CUDA mutual-inductance and state-update kernels. Matrix assembly and the Eigen solver remain host-side; thermal execution may use CPU or GPU according to policy. Graph currently captures only the mutual-inductance segment.
+The CUDA engine keeps the fixed-shape Euler state, matrix/RHS assembly, batched solve, force/motion update, optional thermal update, and compact device control in resident buffers. `Graph` captures and replays that complete fixed-shape device step; `Direct` launches the same resident stages directly. Runtime initialization, allocation, solver, capture, replay, or validation failures restore the pre-step state, record `FallbackReason::RuntimeFailure`, and lock the engine to the CPU/Eigen fallback. `Persistent` remains an explicit safe fallback until a dedicated resident control stream is implemented.
+
+GPU tests may be skipped when no CUDA device is available. A GPU validation run must additionally require `ExecutionReport::gpu_executed == true` and `ExecutionReport::backend != BackendMode::Fallback`; a requested backend or a passing CPU fallback is not proof of GPU execution.
 
 ### Minimal Usage Example
 
@@ -134,7 +137,7 @@ target_link_libraries(your_target PRIVATE coilgun OpenMP::OpenMP_CXX)
 Or compile directly:
 
 ```sh
-g++ -std=c++17 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_binary
+g++ -std=c++20 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_binary
 ```
 
 ---
@@ -154,44 +157,17 @@ The library implements the numerical model described in [NumericalModel.md](docs
 
 ---
 
-## Test Suite (28 CUDA-configured CTest targets)
+## Test Suite
 
-| Suite | Coverage | Status |
-|-------|----------|--------|
-| `test_elliptic` | K(k), E(k) against known values | ✅ |
-| `test_struve` | H₀(x), H₁(x) against SciPy reference | ✅ |
-| `test_quadrature` | Gauss-Legendre/Laguerre node generation | ✅ |
-| `test_lookup` | T(q,p) table + bilinear interpolation vs reference | ✅ |
-| `test_self_inductance` | Table vs exact, edge cases, exact/comparison | ✅ |
-| `test_mutual_inductance` | Filament & coil-level M and dM/dz | ✅ |
-| `test_driving_coil` | Geometry, R, L, turns density | ✅ |
-| `test_armature` | Filament geometry, per-filament R/L/mass | ✅ |
-| `test_single_stage_sim` | Capacitor, crowbar, Euler/RK4, thermal | ✅ |
-| `test_multi_stage_sim` | 1-stage equivalence, 2-stage, triggers, optimization levels | ✅ |
-| `test_integration` | End-to-end single-stage scenarios | ✅ |
-| `test_gpu_engine_layout` | GPU engine layout and validation | ✅ |
-| `test_gpu_execution_policy` | Backend, solver, and thermal policy selection | ✅ |
-| `test_gpu_engine_physics` | Engine physics and CPU fallback behavior | ✅ |
-| `test_gpu_thermal_cpu` | CPU thermal policy path | ✅ |
-| `test_gpu_elliptic` | GPU K(k), E(k) vs CPU reference | ✅ |
-| `test_gpu_filament` | GPU filament-level M, dM/dz vs CPU | ✅ |
-| `test_gpu_coil_pair` | GPU coil-filament M, dM/dz vs CPU | ✅ |
-| `test_gpu_vs_cpu_single` | GPU single-stage end-to-end vs CPU (ε < 0.5%) | ✅ |
-| `test_gpu_vs_cpu_multi` | GPU multi-stage end-to-end vs CPU (ε < 0.5%) | ✅ |
-| `test_gpu_batch` | GPU batch simulation mode | ⏱️ |
-| `test_gpu_sim_batch` | SimBatch integration coverage | ⏱️ |
-| `test_gpu_solver` | GPU solver paths and fallback | ✅ |
-| `test_gpu_paths` | Direct, Graph, and fallback execution paths | ✅ |
-| `test_gpu_graph` | CUDA Graph capture/replay behavior | ✅ |
-| `test_gpu_precision` | Standard/Full/Aggressive M/dM and CPU-reference precision | ✅ |
-| `test_gpu_thermal` | GPU thermal policy path | ✅ |
-| `test_gpu_context_smoke` | CUDA execution-context smoke coverage | ✅ |
+CTest discovers the current target set from the selected preset; the documentation does not freeze a target count. Use labels to separate quick CPU checks, numerical validation, and CUDA tests:
 
-The benchmark executable `bench_gpu_engine` is not a CTest target. It must be
-run explicitly and reports CPU wall time alongside GPU `ExecutionReport`
-timing categories.
+```sh
+ctest --preset cpu-debug -L fast
+ctest --preset cpu-debug -L validation
+ctest --preset cuda-debug -L gpu
+```
 
-> The CUDA-configured build passes all 28 CTest targets, including the batch targets. The full suite takes approximately four minutes in CUDA Debug on the measurement machine.
+GPU tests use a shared resource lock. Tests that require a physical CUDA device skip when no device is available; actual GPU CI must also assert the execution-report conditions above. The benchmark executable `bench_gpu_engine` is not a CTest target and must be run explicitly.
 
 ---
 
@@ -200,7 +176,7 @@ timing categories.
 - [API Reference (EN)](docs/API.md) — Complete C++ function and class API
 - [API 参考 (中文)](docs/API_cn.md) — Chinese translation
 - [Numerical Model](docs/NumericalModel.md) — Detailed physics derivation and algorithm
-- [Audit Report](docs/audit_report.md) — Codebase audit findings and fix plan
+- [GPU Benchmark Record](docs/benchmarks/2026-07-19-unified-gpu-engine.md) — Machine-specific execution measurements and fallback status
 
 ---
 
@@ -208,10 +184,10 @@ timing categories.
 
 | Preset | Generator | Build type | Flags | Notes |
 |--------|-----------|------------|-------|-------|
-| `ninja-debug` | Ninja | Debug | `-march=native` | Tests ON, compile_commands.json |
-| `ninja-release` | Ninja | Release | `-march=native -O3` | — |
-| `make-debug` | Unix Makefiles | Debug | `-march=native` | Tests ON, compile_commands.json |
-| `ninja-cuda-debug` | Ninja | Debug | `-march=native` | CUDA ON, Tests ON |
+| `cpu-debug` | Ninja | Debug | `-march=native`, `-O2 -g` | CPU only, tests ON, compile_commands.json |
+| `cpu-release` | Ninja | Release | `-march=native` | CPU only, tests ON |
+| `cuda-debug` | Ninja | Debug | `-march=native`, `-O2 -g` | CUDA ON, tests ON, compile_commands.json |
+| `cuda-release` | Ninja | Release | `-march=native` | CUDA ON, tests ON |
 
 ---
 

@@ -3,8 +3,8 @@
  * @brief GPU-accelerated multi-stage coilgun simulation.
  * @author Winston Meursault
  *
- * Identical public API to MultiStageSim. Physical state advancement is
- * delegated to GpuEngine using its normalized B=1, S-stage layout. The
+ * Compatible core stepping API to MultiStageSim. Physical state advancement
+ * is delegated to GpuEngine using its normalized B=1, S-stage layout. The
  * optional explicit backend mode disambiguates migrated backend selection
  * from the legacy use_persistent flag.
  */
@@ -40,8 +40,8 @@ inline GpuBackend multi_stage_default_backend() {
 /**
  * @brief GPU-accelerated multi-stage coilgun simulator.
  *
- * Public API is identical to MultiStageSim. Trigger, excitation, result,
- * and termination policy state remains in this compatibility wrapper while
+ * The core stepping surface follows MultiStageSim. Trigger, excitation,
+ * result, and termination policy state remains in this compatibility wrapper while
  * GpuEngine owns the normalized physical state and execution policy.
  *
  * @tparam SP Time-stepping policy (EulerStepper or RK4Stepper).
@@ -64,10 +64,10 @@ public:
      * @param dt Fixed time step, s.
      * @param enable_thermal Enable adiabatic filament heating.
      * @param opt_level GPU optimisation level (default: Full).
-     * @param backend GPU backend configuration. The omitted/default backend
-     *         selects Direct (or its documented CUDA fallback). A caller that
-     *         supplies `use_persistent=true` intentionally still requests the
-     *         legacy Persistent path.
+      * @param backend GPU backend configuration. The omitted/default backend
+      *         selects Direct (or its documented CUDA fallback). The legacy
+      *         `use_persistent` flag is consulted only when `backend.backend`
+      *         is `Auto`; an explicit backend mode takes precedence.
      * @param explicit_backend Explicit backend selection. When not Auto it
      *         takes precedence over `use_persistent` and `backend.backend`.
      *
@@ -152,8 +152,10 @@ private:
     void configure_engine_boundary();
     double compute_force(const std::vector<double>& pre_step_currents) const;
     std::vector<double> compute_stage_forces(const std::vector<double>& pre_step_currents) const;
-    std::vector<double> compute_recorded_stage_forces() const;
-    void check_triggers();
+    std::vector<double> compute_pre_step_gradients() const;
+    std::vector<double> compute_recorded_stage_forces(
+        const std::vector<double>& gradients) const;
+    void check_triggers(double pre_position, double post_position, double next_time);
     void extinguish_quiet_stages();
     void record_step();
     bool check_all_finished() const;
@@ -173,7 +175,7 @@ private:
     BackendMode explicit_backend_;
     int N_fil_;
 
-    std::vector<bool> triggered_, finished_;
+    std::vector<bool> triggered_, excitation_finished_, stage_completed_;
     std::vector<double> trigger_times_;
     std::vector<double> trigger_positions_;
     std::vector<double> initial_stage_energies_;

@@ -47,19 +47,23 @@ __device__ T table_interpolate(const double* temperatures, const double* values,
 }
 
 __global__ void thermal_kernel(const double* table_t, const double* cp_al, const double* cp_cu,
-                               const double* rho_al, const double* rho_cu, std::size_t table_count,
-                               double minimum, double maximum, int precision, std::size_t count,
-                               const double* currents, const double* masses,
-                               const double* reference_resistances, const int* materials, double dt,
-                           double* temperatures, double* resistivities, double* resistances,
-                                double* joule_energy) {
+                                const double* rho_al, const double* rho_cu, std::size_t table_count,
+                                double minimum, double maximum, int precision, std::size_t count,
+                                const double* currents, std::size_t current_stride,
+                                std::size_t current_offset, const std::uint8_t* active_mask,
+                                std::size_t filament_count, const double* masses,
+                                const double* reference_resistances, const int* materials, double dt,
+                            double* temperatures, double* resistivities, double* resistances,
+                                 double* joule_energy) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count) return;
+    const std::size_t batch = index / filament_count;
+    if (active_mask != nullptr && active_mask[batch] == 0) return;
     const int material = materials[index];
     const double old_temperature = temperatures[index];
     const double old_resistance = resistances[index] == 0.0
         ? reference_resistances[index] : resistances[index];
-    const double current = currents[index];
+    const double current = currents[batch * current_stride + current_offset + index % filament_count];
     const double joule = current * current * old_resistance * dt;
 
     if (precision == static_cast<int>(ThermalPrecision::Aggressive)) {
@@ -111,7 +115,9 @@ struct ThermalWorkspace::Impl {
     double *i = nullptr, *m = nullptr, *r0 = nullptr, *temp = nullptr, *rho = nullptr, *r = nullptr, *q = nullptr;
     int* material = nullptr;
     std::size_t table_count = 0, value_count = 0;
+    int device_id = -1;
     ~Impl() {
+        if (device_id >= 0) cudaSetDevice(device_id);
         cudaFree(t); cudaFree(cp_al); cudaFree(cp_cu); cudaFree(rho_al); cudaFree(rho_cu);
         cudaFree(i); cudaFree(m); cudaFree(r0); cudaFree(temp); cudaFree(rho); cudaFree(r); cudaFree(q);
         cudaFree(material);
@@ -128,9 +134,15 @@ void ThermalWorkspace::initialize(const MaterialTables& tables, std::size_t coun
         tables.rho_copper.size() != tables.temperatures.size() ||
         count == 0 || !(tables.minimum_temperature < tables.maximum_temperature))
         throw std::invalid_argument("invalid thermal workspace dimensions or material tables");
+    int device = -1;
+    check_cuda(cudaGetDevice(&device), "cudaGetDevice(thermal workspace)");
+    const ThermalWorkspaceKey requested{device, tables.version,
+        tables.minimum_temperature, tables.maximum_temperature,
+        tables.temperatures.size(), count};
     if (!impl_) impl_ = std::make_unique<Impl>();
-    if (impl_->table_count == tables.temperatures.size() && impl_->value_count == count) return;
+    if (key_ == requested) return;
     impl_.reset(new Impl{});
+    impl_->device_id = device;
     const auto n = tables.temperatures.size();
     alloc_copy(impl_->t, tables.temperatures.data(), n);
     alloc_copy(impl_->cp_al, tables.cp_aluminum.data(), n);
@@ -148,6 +160,7 @@ void ThermalWorkspace::initialize(const MaterialTables& tables, std::size_t coun
     impl_->table_count = n;
     impl_->value_count = count;
     allocation_count_ = n * 5 + count * 8;
+    key_ = requested;
 }
 
 void ThermalWorkspace::update(const MaterialTables& tables, ThermalPrecision precision,
@@ -186,7 +199,8 @@ void ThermalWorkspace::update(const MaterialTables& tables, ThermalPrecision pre
     check_cuda(cudaMemcpyAsync(impl_->r, resistances, count * sizeof(double), cudaMemcpyHostToDevice, stream), "state resistance copy");
     thermal_kernel<<<static_cast<unsigned>((count + 255) / 256), 256, 0, stream>>>(impl_->t, impl_->cp_al, impl_->cp_cu,
         impl_->rho_al, impl_->rho_cu, n, tables.minimum_temperature, tables.maximum_temperature,
-        static_cast<int>(precision), count, impl_->i, impl_->m, impl_->r0, impl_->material, dt,
+        static_cast<int>(precision), count, impl_->i, filament_count, 0, nullptr,
+        filament_count, impl_->m, impl_->r0, impl_->material, dt,
         impl_->temp, impl_->rho, impl_->r, impl_->q);
     check_cuda(cudaGetLastError(), "thermal kernel");
     check_cuda(cudaMemcpyAsync(temperatures, impl_->temp, count * sizeof(double), cudaMemcpyDeviceToHost, stream), "temperature result");
@@ -194,6 +208,77 @@ void ThermalWorkspace::update(const MaterialTables& tables, ThermalPrecision pre
     check_cuda(cudaMemcpyAsync(resistances, impl_->r, count * sizeof(double), cudaMemcpyDeviceToHost, stream), "resistance result");
     check_cuda(cudaMemcpyAsync(joule_energy, impl_->q, count * sizeof(double), cudaMemcpyDeviceToHost, stream), "joule result");
     check_cuda(cudaStreamSynchronize(stream), "thermal synchronize");
+}
+
+void ThermalWorkspace::initialize_device_state(
+    const MaterialTables& tables, std::size_t batch_count,
+    std::size_t filament_count, const double* masses,
+    const double* reference_resistances, const int* materials,
+    const double* temperatures, const double* resistances,
+    cudaStream_t stream) {
+    if (batch_count == 0 || filament_count == 0 ||
+        filament_count > std::numeric_limits<std::size_t>::max() / batch_count ||
+        !masses || !reference_resistances || !materials || !temperatures || !resistances)
+        throw std::invalid_argument("invalid resident thermal state");
+    const std::size_t count = batch_count * filament_count;
+    initialize(tables, count);
+    check_cuda(cudaMemcpyAsync(impl_->m, masses, count * sizeof(double),
+                               cudaMemcpyHostToDevice, stream), "resident thermal mass copy");
+    check_cuda(cudaMemcpyAsync(impl_->r0, reference_resistances, count * sizeof(double),
+                               cudaMemcpyHostToDevice, stream), "resident thermal reference copy");
+    check_cuda(cudaMemcpyAsync(impl_->material, materials, count * sizeof(int),
+                               cudaMemcpyHostToDevice, stream), "resident thermal material copy");
+    check_cuda(cudaMemcpyAsync(impl_->temp, temperatures, count * sizeof(double),
+                               cudaMemcpyHostToDevice, stream), "resident thermal temperature copy");
+    check_cuda(cudaMemcpyAsync(impl_->r, resistances, count * sizeof(double),
+                               cudaMemcpyHostToDevice, stream), "resident thermal resistance copy");
+    check_cuda(cudaMemsetAsync(impl_->rho, 0, count * sizeof(double), stream),
+               "resident thermal resistivity clear");
+    check_cuda(cudaMemsetAsync(impl_->q, 0, count * sizeof(double), stream),
+               "resident thermal energy clear");
+}
+
+cudaError_t ThermalWorkspace::launch_device(
+    ThermalPrecision precision, std::size_t batch_count,
+    std::size_t stage_count, std::size_t filament_count,
+    const double* currents, const std::uint8_t* active_mask,
+    double dt, cudaStream_t stream) noexcept {
+    if (!impl_ || !currents || !active_mask || batch_count == 0 || filament_count == 0 ||
+        filament_count > std::numeric_limits<std::size_t>::max() / batch_count ||
+        batch_count * filament_count != impl_->value_count ||
+        !std::isfinite(dt) || dt <= 0.0)
+        return cudaErrorInvalidValue;
+    const std::size_t count = batch_count * filament_count;
+    thermal_kernel<<<static_cast<unsigned>((count + 255) / 256), 256, 0, stream>>>(
+        impl_->t, impl_->cp_al, impl_->cp_cu, impl_->rho_al, impl_->rho_cu,
+        impl_->table_count, key_.min_temperature, key_.max_temperature,
+        static_cast<int>(precision), count, currents, stage_count + filament_count,
+        stage_count, active_mask, filament_count, impl_->m, impl_->r0,
+        impl_->material, dt, impl_->temp, impl_->rho, impl_->r, impl_->q);
+    return cudaGetLastError();
+}
+
+cudaError_t ThermalWorkspace::download_device_state(
+    double* temperatures, double* resistivities, double* resistances,
+    double* joule_energy, cudaStream_t stream) noexcept {
+    if (!impl_ || !temperatures || !resistivities || !resistances || !joule_energy)
+        return cudaErrorInvalidValue;
+    const std::size_t bytes = impl_->value_count * sizeof(double);
+    cudaError_t error = cudaMemcpyAsync(temperatures, impl_->temp, bytes,
+                                        cudaMemcpyDeviceToHost, stream);
+    if (error != cudaSuccess) return error;
+    error = cudaMemcpyAsync(resistivities, impl_->rho, bytes,
+                            cudaMemcpyDeviceToHost, stream);
+    if (error != cudaSuccess) return error;
+    error = cudaMemcpyAsync(resistances, impl_->r, bytes,
+                            cudaMemcpyDeviceToHost, stream);
+    if (error != cudaSuccess) return error;
+    return cudaMemcpyAsync(joule_energy, impl_->q, bytes,
+                           cudaMemcpyDeviceToHost, stream);
+}
+
+double* ThermalWorkspace::device_resistances() const noexcept {
+    return impl_ ? impl_->r : nullptr;
 }
 
 std::vector<std::uintptr_t> ThermalWorkspace::device_addresses() const {
@@ -275,7 +360,7 @@ void update_thermal_batch(const MaterialTables& tables, ThermalPrecision precisi
             !std::isfinite(temperatures[i]) || !std::isfinite(resistances[i]) || resistances[i] < 0.0)
             throw std::invalid_argument("invalid thermal state");
     }
-    static thread_local ThermalWorkspace workspace;
+    ThermalWorkspace workspace;
     workspace.update(tables, precision, batch_count, filament_count, currents, masses,
                      reference_resistances, materials, dt, temperatures, resistivities,
                      resistances, joule_energy, stream);

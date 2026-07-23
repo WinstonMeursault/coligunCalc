@@ -7,49 +7,60 @@
   },
   "configurePresets": [
     {
-      "name": "ninja-debug",
-      "displayName": "Ninja Debug",
+      "name": "cpu-debug",
+      "displayName": "CPU Debug",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/ninja-debug",
+      "binaryDir": "${sourceDir}/build/cpu-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-march=native",
+        "CMAKE_CXX_FLAGS_DEBUG": "-O2 -g",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "COILGUN_BUILD_TESTS": "ON"
+        "COILGUN_BUILD_TESTS": "ON",
+        "COILGUN_BUILD_GENERATOR_TESTS": "ON",
+        "COILGUN_ENABLE_CUDA": "OFF"
       }
     },
     {
-      "name": "ninja-release",
-      "displayName": "Ninja Release",
+      "name": "cpu-release",
+      "displayName": "CPU Release",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/ninja-release",
+      "binaryDir": "${sourceDir}/build/cpu-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_FLAGS": "-march=native"
+        "CMAKE_CXX_FLAGS": "-march=native",
+        "COILGUN_BUILD_TESTS": "ON",
+        "COILGUN_BUILD_GENERATOR_TESTS": "ON",
+        "COILGUN_ENABLE_CUDA": "OFF"
       }
     },
     {
-      "name": "make-debug",
-      "displayName": "Make Debug",
-      "generator": "Unix Makefiles",
-      "binaryDir": "${sourceDir}/build/make-debug",
+      "name": "cuda-debug",
+      "displayName": "CUDA Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cuda-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-march=native",
+        "CMAKE_CXX_FLAGS_DEBUG": "-O2 -g",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "COILGUN_BUILD_TESTS": "ON"
+        "COILGUN_BUILD_TESTS": "ON",
+        "COILGUN_BUILD_GENERATOR_TESTS": "ON",
+        "COILGUN_ENABLE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "native"
       }
     },
     {
-      "name": "ninja-cuda-debug",
-      "displayName": "Ninja CUDA Debug",
+      "name": "cuda-release",
+      "displayName": "CUDA Release",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/ninja-cuda-debug",
+      "binaryDir": "${sourceDir}/build/cuda-release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_FLAGS": "-march=native",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "COILGUN_BUILD_TESTS": "ON",
+        "COILGUN_BUILD_GENERATOR_TESTS": "ON",
         "COILGUN_ENABLE_CUDA": "ON",
         "CMAKE_CUDA_ARCHITECTURES": "native"
       }
@@ -57,31 +68,55 @@
   ],
   "buildPresets": [
     {
-      "name": "ninja-debug",
-      "displayName": "Ninja Debug",
-      "configurePreset": "ninja-debug"
+      "name": "cpu-debug",
+      "displayName": "CPU Debug",
+      "configurePreset": "cpu-debug"
     },
     {
-      "name": "ninja-release",
-      "displayName": "Ninja Release",
-      "configurePreset": "ninja-release"
+      "name": "cpu-release",
+      "displayName": "CPU Release",
+      "configurePreset": "cpu-release"
     },
     {
-      "name": "make-debug",
-      "displayName": "Make Debug",
-      "configurePreset": "make-debug"
+      "name": "cuda-debug",
+      "displayName": "CUDA Debug",
+      "configurePreset": "cuda-debug"
     },
     {
-      "name": "ninja-cuda-debug",
-      "displayName": "Ninja CUDA Debug",
-      "configurePreset": "ninja-cuda-debug"
+      "name": "cuda-release",
+      "displayName": "CUDA Release",
+      "configurePreset": "cuda-release"
     }
   ],
   "testPresets": [
     {
-      "name": "debug",
-      "displayName": "Debug Tests",
-      "configurePreset": "ninja-debug",
+      "name": "cpu-debug",
+      "displayName": "CPU Debug Tests",
+      "configurePreset": "cpu-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cpu-release",
+      "displayName": "CPU Release Tests",
+      "configurePreset": "cpu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cuda-debug",
+      "displayName": "CUDA Debug Tests",
+      "configurePreset": "cuda-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cuda-release",
+      "displayName": "CUDA Release Tests",
+      "configurePreset": "cuda-release",
       "output": {
         "outputOnFailure": true
       }

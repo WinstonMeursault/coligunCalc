@@ -6,6 +6,7 @@
 #include "coilgun/simulation/cuda/gpu_single_stage_sim.hpp"
 
 #include "coilgun/physics/constants.hpp"
+#include "coilgun/physics/mutual_inductance.hpp"
 
 #include <cuda_runtime_api.h>
 #include <algorithm>
@@ -164,22 +165,40 @@ void GpuSingleStageSim<SP>::sync_state_from_engine() {
 
 template<typename SP>
 double GpuSingleStageSim<SP>::compute_force() const {
-    const auto& source = engine_->state();
+    return compute_force_at(state_.arm_position, state_.currents);
+}
+
+template<typename SP>
+double GpuSingleStageSim<SP>::compute_force_at(
+        double position, const Eigen::VectorXd& currents) const {
     double force = 0.0;
-    for (std::size_t k = 0; k < engine_->layout().F; ++k)
-        force -= source.currents[k + 1] * source.currents[0] * source.dm1[k];
+    const int radial_count = armature_.radial_filaments();
+    const double filament_length = armature_.length() / armature_.axial_filaments();
+    for (std::size_t k = 0; k < engine_->layout().F; ++k) {
+        const int radial = static_cast<int>(k % radial_count) + 1;
+        const int axial = static_cast<int>(k / radial_count) + 1;
+        const double relative = armature_.filament_axial_position(axial) - armature_.position();
+        const double separation = position + relative - coil_.position();
+        const double gradient = physics::mutual_inductance_gradient_coil(
+            coil_.inner_radius(), coil_.outer_radius(), coil_.length(), coil_.turns(),
+            armature_.filament_inner_radius(radial),
+            armature_.filament_outer_radius(radial), filament_length, 1,
+            separation, 9, false);
+        force += currents(0) * currents(static_cast<Eigen::Index>(k + 1)) *
+            gradient;
+    }
     return force;
 }
 
 template<typename SP>
-void GpuSingleStageSim<SP>::record_step() {
+void GpuSingleStageSim<SP>::record_step(double force) {
     SimStep entry;
     entry.time = step_count_ * dt_;
     entry.cap_voltage = excitation_->voltage();
     entry.coil_current = state_.currents(0);
     entry.arm_position = state_.arm_position;
     entry.arm_velocity = state_.arm_velocity;
-    entry.force = compute_force();
+    entry.force = force;
     entry.filament_currents.resize(engine_->layout().F);
     for (std::size_t k = 0; k < engine_->layout().F; ++k)
         entry.filament_currents[k] = state_.currents(static_cast<Eigen::Index>(k + 1));
@@ -214,10 +233,12 @@ const SimStep& GpuSingleStageSim<SP>::step() {
         std::abs(state_.arm_position - coil_.position()) <= 10.0 * coil_.length();
     engine_->set_mutual_stage_mask({static_cast<std::uint8_t>(within_mutual_range ? 1 : 0)});
     engine_->set_stage_voltage(0, excitation_->voltage());
+    const double pre_step_coil_current = state_.currents(0);
+    const double pre_step_position = state_.arm_position;
     engine_->step();
     sync_state_from_engine();
-    excitation_->advance(dt_, state_.currents(0));
-    record_step();
+    excitation_->advance(dt_, pre_step_coil_current);
+    record_step(compute_force_at(pre_step_position, state_.currents));
     ++step_count_;
     return result_.history.back();
 }

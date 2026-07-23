@@ -1,461 +1,594 @@
-/**
- * @file multi_stage_sim.cpp
- * @brief Multi-stage coilgun simulation engine implementation.
- * @author Winston Meursault
- *
- * @see NumericalModel Sec.3.3, Sec.3.4, Sec.5, Sec.8.
- */
-
 #include "coilgun/simulation/multi_stage_sim.hpp"
-#include "coilgun/physics/mutual_inductance.hpp"
+
 #include "coilgun/physics/constants.hpp"
+#include "coilgun/physics/mutual_inductance.hpp"
 
 #include <Eigen/Dense>
+
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace coilgun::simulation {
-
-MultiStageState& MultiStageState::operator+=(const MultiStageState& rhs) {
-    currents += rhs.currents;
-    arm_position += rhs.arm_position;
-    arm_velocity += rhs.arm_velocity;
-    if (filament_temperatures.size() > 0 && rhs.filament_temperatures.size() > 0)
-        filament_temperatures += rhs.filament_temperatures;
-    return *this;
-}
-
-MultiStageState& MultiStageState::operator*=(double scalar) {
-    currents *= scalar;
-    arm_position *= scalar;
-    arm_velocity *= scalar;
-    filament_temperatures *= scalar;
-    return *this;
-}
-
-MultiStageState operator+(MultiStageState lhs, const MultiStageState& rhs) { lhs += rhs; return lhs; }
-MultiStageState operator*(double scalar, MultiStageState s) { s *= scalar; return s; }
-
 namespace {
 
-double filament_axial_sep(const components::Armature& arm, int a_idx, int b_idx) {
-    int nr = arm.radial_filaments();
-    int ia = a_idx / nr + 1;
-    int ib = b_idx / nr + 1;
-    return std::abs(arm.filament_axial_position(ia) - arm.filament_axial_position(ib));
+constexpr double kQuietCurrent = 1e-6;
+constexpr double kEventTolerance = 1e-12;
+constexpr int kMaxEventSegments = 16;
+constexpr int kMaxEventBisections = 64;
+
+double filament_axial_sep(const components::Armature& arm, int first, int second) {
+    const int radial = arm.radial_filaments();
+    return std::abs(arm.filament_axial_position(first / radial + 1) -
+                    arm.filament_axial_position(second / radial + 1));
 }
 
-} // anonymous namespace
+bool snapshot_finished(const ExcitationSnapshot& snapshot) {
+    if (const auto* value = dynamic_cast<const CapacitorSnapshot*>(&snapshot))
+        return value->finished;
+    if (const auto* value = dynamic_cast<const CrowbarSnapshot*>(&snapshot))
+        return value->finished;
+    if (const auto* value = dynamic_cast<const WaveformSnapshot*>(&snapshot))
+        return value->finished;
+    throw std::invalid_argument("unsupported excitation snapshot");
+}
+
+double event_value(const Excitation& source, const ExcitationSnapshot& snapshot) {
+    if (const auto* value = dynamic_cast<const CapacitorSnapshot*>(&snapshot))
+        return value->finished ? -1.0 : value->capacitor_voltage;
+    if (const auto* value = dynamic_cast<const CrowbarSnapshot*>(&snapshot))
+        return value->diode_on ? 1.0 : value->capacitor_voltage;
+    if (const auto* value = dynamic_cast<const WaveformSnapshot*>(&snapshot)) {
+        const auto* waveform = dynamic_cast<const WaveformExcitation*>(&source);
+        return waveform ? waveform->end_time() - value->time : 1.0;
+    }
+    return 1.0;
+}
+
+} // namespace
 
 template<typename SP>
 MultiStageSim<SP>::MultiStageSim(
-        std::vector<components::DrivingCoil>     coils,
-        components::Armature                      armature,
-        std::vector<std::unique_ptr<Excitation>>  excitations,
-        std::vector<TriggerConfig>                trigger_configs,
-        double                                    dt,
-        bool                                      enable_thermal,
-        OptimizationLevel                         opt_level)
-    : n_stages_(static_cast<int>(coils.size()))
-    , coils_(std::move(coils))
-    , armature_(std::move(armature))
-    , excitations_(std::move(excitations))
-    , trigger_configs_(std::move(trigger_configs))
-    , dt_(dt)
-    , enable_thermal_(enable_thermal)
-    , opt_level_(opt_level)
-    , N_fil_(armature_.total_filaments())
-{
-    // ---- validation ----
-    if (n_stages_ <= 0) {
-        throw std::invalid_argument("MultiStageSim: at least one stage is required");
-    }
-    if (n_stages_ != static_cast<int>(excitations_.size())) {
-        throw std::invalid_argument(
-            "MultiStageSim: coils.size() != excitations.size()");
-    }
-    if (n_stages_ > kMaxStages) {
-        throw std::invalid_argument(
-            "MultiStageSim: n_stages exceeds kMaxStages");
-    }
-    if (static_cast<int>(trigger_configs_.size()) != n_stages_ - 1) {
-        throw std::invalid_argument(
-            "MultiStageSim: trigger_configs.size() must be n_stages-1");
-    }
-    for (const auto& config : trigger_configs_)
-        validate_trigger_config(config);
+    std::vector<components::DrivingCoil> coils,
+    components::Armature armature,
+    std::vector<std::unique_ptr<Excitation>> excitations,
+    std::vector<TriggerConfig> trigger_configs,
+    double dt,
+    bool enable_thermal,
+    OptimizationLevel opt_level)
+    : n_stages_(static_cast<int>(coils.size())), coils_(std::move(coils)),
+      armature_(std::move(armature)), excitations_(std::move(excitations)),
+      trigger_configs_(std::move(trigger_configs)), dt_(dt),
+      enable_thermal_(enable_thermal), opt_level_(opt_level),
+      N_fil_(armature_.total_filaments()) {
+    if (n_stages_ <= 0) throw std::invalid_argument("MultiStageSim requires at least one coil");
+    if (n_stages_ > kMaxStages) throw std::invalid_argument("MultiStageSim stage count exceeds kMaxStages");
+    if (excitations_.size() != coils_.size())
+        throw std::invalid_argument("coils.size() must equal excitations.size()");
+    if (trigger_configs_.size() + 1 != coils_.size())
+        throw std::invalid_argument("trigger_configs.size() must equal coils.size() - 1");
+    if (!std::isfinite(dt_) || dt_ <= 0.0)
+        throw std::invalid_argument("dt must be finite and positive");
+    for (const auto& excitation : excitations_)
+        if (!excitation) throw std::invalid_argument("excitation pointer must not be null");
+    for (const auto& trigger : trigger_configs_) validate_trigger_config(trigger);
 
-    triggered_.resize(n_stages_, false);
-    finished_.resize(n_stages_, false);
-    trigger_times_.resize(n_stages_, 0.0);
-    trigger_positions_.resize(n_stages_, armature_.position());
-    initial_stage_energies_.resize(n_stages_, 0.0);
-
-    // Stage 0 auto-triggers at t=0
-    triggered_[0] = true;
-    for (int i = 0; i < n_stages_; ++i) {
-        if (const auto* capacitor = dynamic_cast<const CapacitorExcitation*>(excitations_[i].get()))
-            initial_stage_energies_[i] = 0.5 * capacitor->capacitance() *
-                capacitor->initial_voltage() * capacitor->initial_voltage();
-    }
-
-    // ---- extract coil self-inductances and resistances ----
     R_diag_.resize(n_stages_);
     L_diag_.resize(n_stages_);
-    for (int i = 0; i < n_stages_; ++i) {
-        R_diag_(i) = coils_[i].resistance();
-        L_diag_(i) = coils_[i].self_inductance();
+    initial_stage_energies_.assign(n_stages_, 0.0);
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        R_diag_(stage) = coils_[stage].resistance();
+        L_diag_(stage) = coils_[stage].self_inductance();
+        if (const auto* capacitor =
+                dynamic_cast<const CapacitorExcitation*>(excitations_[stage].get())) {
+            initial_stage_energies_[stage] = 0.5 * capacitor->capacitance() *
+                capacitor->initial_voltage() * capacitor->initial_voltage();
+        }
     }
 
-    // ---- extract filament arrays ----
-    int N = N_fil_;
-    R_fil_ref_.resize(N); R_fil_.resize(N);
-    L_fil_.resize(N); mass_fil_.resize(N);
-    const auto& R_arm = armature_.resistances();
-    const auto& L_arm = armature_.inductances();
-    const auto& M_arm = armature_.masses();
-    for (int k = 0; k < N; ++k) {
-        R_fil_ref_(k) = R_arm[k];
-        R_fil_(k)     = R_arm[k];
-        L_fil_(k)     = L_arm[k];
-        mass_fil_(k)  = M_arm[k];
+    R_fil_ref_.resize(N_fil_);
+    L_fil_.resize(N_fil_);
+    mass_fil_.resize(N_fil_);
+    for (int filament = 0; filament < N_fil_; ++filament) {
+        R_fil_ref_(filament) = armature_.resistances()[filament];
+        L_fil_(filament) = armature_.inductances()[filament];
+        mass_fil_(filament) = armature_.masses()[filament];
     }
-
-    // ---- build inter-filament and inter-coil mutual inductance matrices ----
     build_filament_M_matrix();
     precompute_M_cc();
+    workspace_.resize(static_cast<std::size_t>(n_stages_),
+                      static_cast<std::size_t>(N_fil_));
 
-    // ---- allocate working buffers ----
-    M1_mat_.resize(n_stages_, N);
-    dM1_mat_.resize(n_stages_, N);
+    auto& physical = integration_state_.physical;
+    physical.currents = Eigen::VectorXd::Zero(n_stages_ + N_fil_);
+    physical.arm_position = armature_.position();
+    physical.arm_velocity = armature_.velocity();
+    if (enable_thermal_)
+        physical.filament_temperatures =
+            Eigen::VectorXd::Constant(N_fil_, physics::T_REFERENCE);
 
-    int dim = n_stages_ + N;
-    L_total_.resize(dim, dim);
-    RHS_.resize(dim);
-
-    state_.currents.resize(dim);
-    state_.currents.setZero();
-    state_.arm_position = armature_.position();
-    state_.arm_velocity = armature_.velocity();
-    if (enable_thermal_) {
-        state_.filament_temperatures.resize(N);
-        state_.filament_temperatures.setConstant(physics::T_REFERENCE);
+    integration_state_.stages.resize(n_stages_);
+    integration_state_.excitations.reserve(n_stages_);
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        integration_state_.excitations.push_back(excitations_[stage]->snapshot());
+        auto& runtime = integration_state_.stages[stage];
+        runtime.triggered = stage == 0;
+        runtime.circuit_active = stage == 0;
+        runtime.trigger_time = 0.0;
+        runtime.trigger_position = physical.arm_position;
     }
+    initial_integration_state_ = clone_integration_state(integration_state_);
+}
 
+template<typename SP>
+const StageRuntimeState& MultiStageSim<SP>::stage_state(std::size_t stage) const {
+    return coilgun::simulation::stage_state(integration_state_, stage);
+}
+
+template<typename SP>
+bool MultiStageSim<SP>::circuit_active(std::size_t stage) const noexcept {
+    return stage < integration_state_.stages.size() &&
+           integration_state_.stages[stage].circuit_active;
 }
 
 template<typename SP>
 void MultiStageSim<SP>::build_filament_M_matrix() {
-    int N = N_fil_;
-    M_mat_.resize(N, N);
-    M_mat_.setZero();
-    int nr = armature_.radial_filaments();
-    for (int a = 0; a < N; ++a) {
-        int ja = a % nr + 1;
-        double ra = armature_.filament_mean_radius(ja);
-        for (int b = a + 1; b < N; ++b) {
-            int jb = b % nr + 1;
-            double rb = armature_.filament_mean_radius(jb);
-            double sep = filament_axial_sep(armature_, a, b);
-            double m = physics::mutual_inductance_filament(ra, rb, sep, true);
-            M_mat_(a, b) = m;
-            M_mat_(b, a) = m;
+    M_mat_ = Eigen::MatrixXd::Zero(N_fil_, N_fil_);
+    const int radial = armature_.radial_filaments();
+    for (int first = 0; first < N_fil_; ++first) {
+        const double first_radius = armature_.filament_mean_radius(first % radial + 1);
+        for (int second = first + 1; second < N_fil_; ++second) {
+            const double second_radius = armature_.filament_mean_radius(second % radial + 1);
+            const double mutual = physics::mutual_inductance_filament(
+                first_radius, second_radius,
+                filament_axial_sep(armature_, first, second), false);
+            M_mat_(first, second) = mutual;
+            M_mat_(second, first) = mutual;
         }
     }
 }
 
 template<typename SP>
 void MultiStageSim<SP>::precompute_M_cc() {
-    M_cc_.resize(n_stages_, n_stages_);
-    M_cc_.setZero();
-    for (int i = 0; i < n_stages_; ++i) {
-        for (int j = i + 1; j < n_stages_; ++j) {
-            const auto& a = coils_[i];
-            const auto& b = coils_[j];
-            double sep = std::abs(a.position() - b.position());
-            double m = physics::mutual_inductance_coil(
-                a.inner_radius(), a.outer_radius(), a.length(), a.turns(),
-                b.inner_radius(), b.outer_radius(), b.length(), b.turns(),
-                sep, 9, true);
-            M_cc_(i, j) = m;
-            M_cc_(j, i) = m;
+    M_cc_ = Eigen::MatrixXd::Zero(n_stages_, n_stages_);
+    for (int first = 0; first < n_stages_; ++first) {
+        for (int second = first + 1; second < n_stages_; ++second) {
+            const double mutual = physics::mutual_inductance_coil(
+                coils_[first].inner_radius(), coils_[first].outer_radius(),
+                coils_[first].length(), coils_[first].turns(),
+                coils_[second].inner_radius(), coils_[second].outer_radius(),
+                coils_[second].length(), coils_[second].turns(),
+                std::abs(coils_[first].position() - coils_[second].position()),
+                9, false);
+            M_cc_(first, second) = mutual;
+            M_cc_(second, first) = mutual;
         }
     }
 }
 
 template<typename SP>
-bool MultiStageSim<SP>::is_stage_within_range(int stage_idx) const {
+bool MultiStageSim<SP>::is_stage_within_range(int stage) const {
     if (opt_level_ != OptimizationLevel::Full) return true;
-    const auto& coil = coils_[stage_idx];
-    double cutoff = 10.0 * coil.length();
-    double dist = std::abs(state_.arm_position - coil.position());
-    return dist <= cutoff;
+    return std::abs(integration_state_.physical.arm_position - coils_[stage].position()) <=
+           10.0 * coils_[stage].length();
 }
 
 template<typename SP>
-void MultiStageSim<SP>::build_system_matrix(const MultiStageState& s) {
-    int S = n_stages_;
-    int F = N_fil_;
-    int dim = S + F;
-    L_total_.setZero();
+Eigen::VectorXd MultiStageSim<SP>::derive_resistance(
+    const MultiStageState& state) const {
+    Eigen::VectorXd resistance = R_fil_ref_;
+    if (!enable_thermal_ || state.filament_temperatures.size() == 0) return resistance;
+    const double beta = physics::material_beta(armature_.material());
+    for (int filament = 0; filament < N_fil_; ++filament) {
+        resistance(filament) = R_fil_ref_(filament) *
+            (1.0 + beta * (state.filament_temperatures(filament) - physics::T_REFERENCE));
+        if (!std::isfinite(resistance(filament)) || resistance(filament) <= 0.0)
+            throw std::runtime_error("derived filament resistance is not positive");
+    }
+    return resistance;
+}
 
-    // coil-coil block
-    for (int i = 0; i < S; ++i) {
-        if (!triggered_[i] || finished_[i]) {
-            L_total_(i, i) = 1.0;
+template<typename SP>
+double MultiStageSim<SP>::compute_force(
+    const MultiStageState& state,
+    const Eigen::MatrixXd& gradient,
+    const std::vector<StageRuntimeState>& stages) const {
+    double force = 0.0;
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (!stages[stage].circuit_active || !is_stage_within_range(stage)) continue;
+        for (int filament = 0; filament < N_fil_; ++filament)
+            force += state.currents(stage) * state.currents(n_stages_ + filament) *
+                     gradient(stage, filament);
+    }
+    return force;
+}
+
+template<typename SP>
+DerivativeResult MultiStageSim<SP>::evaluate_derivatives(
+    const IntegrationState& state,
+    DerivativeWorkspace& workspace) const {
+    workspace.resize(static_cast<std::size_t>(n_stages_),
+                     static_cast<std::size_t>(N_fil_));
+    workspace.resistance = derive_resistance(state.physical);
+    auto& matrix = workspace.system_matrix;
+    auto& rhs = workspace.rhs;
+    matrix.setZero();
+    rhs.setZero();
+
+    Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> mutual(
+        workspace.mutual.data(), n_stages_, N_fil_);
+    Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> gradient(
+        workspace.mutual_gradient.data(), n_stages_, N_fil_);
+    mutual.setZero();
+    gradient.setZero();
+
+    const int radial = armature_.radial_filaments();
+    const double initial_center = armature_.position();
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        const auto& runtime = state.stages[stage];
+        if (!runtime.circuit_active || !is_stage_within_range(stage)) continue;
+#pragma omp parallel for if (N_fil_ >= 8)
+        for (int filament = 0; filament < N_fil_; ++filament) {
+            const int axial = filament / radial + 1;
+            const int radial_index = filament % radial + 1;
+            const double relative =
+                armature_.filament_axial_position(axial) - initial_center;
+            const double separation =
+                state.physical.arm_position + relative - coils_[stage].position();
+            const double filament_length =
+                armature_.length() / static_cast<double>(armature_.axial_filaments());
+            int nodes = 9;
+            if (opt_level_ == OptimizationLevel::Full &&
+                std::abs(state.physical.arm_position - coils_[stage].position()) >
+                    coils_[stage].length())
+                nodes = 4;
+            mutual(stage, filament) = physics::mutual_inductance_coil(
+                coils_[stage].inner_radius(), coils_[stage].outer_radius(),
+                coils_[stage].length(), coils_[stage].turns(),
+                armature_.filament_inner_radius(radial_index),
+                armature_.filament_outer_radius(radial_index), filament_length, 1,
+                separation, nodes, false);
+            gradient(stage, filament) = physics::mutual_inductance_gradient_coil(
+                coils_[stage].inner_radius(), coils_[stage].outer_radius(),
+                coils_[stage].length(), coils_[stage].turns(),
+                armature_.filament_inner_radius(radial_index),
+                armature_.filament_outer_radius(radial_index), filament_length, 1,
+                separation, nodes, false);
+        }
+    }
+
+    const int dimension = n_stages_ + N_fil_;
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (!state.stages[stage].triggered || state.stages[stage].stage_completed) {
+            matrix(stage, stage) = 1.0;
             continue;
         }
-        L_total_(i, i) = L_diag_(i);
-        for (int j = 0; j < S; ++j) {
-            if (i != j && triggered_[j] && !finished_[j])
-                L_total_(i, j) = M_cc_(i, j);
+        matrix(stage, stage) = L_diag_(stage);
+        for (int other = 0; other < n_stages_; ++other) {
+            if (other != stage && state.stages[other].circuit_active)
+                matrix(stage, other) = M_cc_(stage, other);
+        }
+        if (state.stages[stage].circuit_active) {
+            for (int filament = 0; filament < N_fil_; ++filament) {
+                matrix(stage, n_stages_ + filament) = mutual(stage, filament);
+                matrix(n_stages_ + filament, stage) = mutual(stage, filament);
+            }
         }
     }
+    for (int filament = 0; filament < N_fil_; ++filament) {
+        const int row = n_stages_ + filament;
+        matrix(row, row) = L_fil_(filament);
+        for (int other = 0; other < N_fil_; ++other)
+            if (filament != other) matrix(row, n_stages_ + other) = M_mat_(filament, other);
+    }
 
-    // coil-filament and filament-coil blocks
-    for (int i = 0; i < S; ++i) {
-        if (!triggered_[i] || finished_[i]) continue;
-        for (int k = 0; k < F; ++k) {
-            L_total_(i, S + k) = M1_mat_(i, k);
-            L_total_(S + k, i) = M1_mat_(i, k);
+    const double velocity = state.physical.arm_velocity;
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (!state.stages[stage].circuit_active) continue;
+        double motional = 0.0;
+        for (int filament = 0; filament < N_fil_; ++filament)
+            motional += gradient(stage, filament) *
+                        state.physical.currents(n_stages_ + filament);
+        const double source_voltage = state.stages[stage].excitation_finished
+            ? 0.0 : excitations_[stage]->voltage(*state.excitations[stage]);
+        rhs(stage) = source_voltage - R_diag_(stage) * state.physical.currents(stage) -
+                     velocity * motional;
+    }
+    for (int filament = 0; filament < N_fil_; ++filament) {
+        double back_emf = 0.0;
+        for (int stage = 0; stage < n_stages_; ++stage) {
+            if (state.stages[stage].circuit_active)
+                back_emf += gradient(stage, filament) * state.physical.currents(stage);
         }
+        rhs(n_stages_ + filament) =
+            -workspace.resistance(filament) *
+                state.physical.currents(n_stages_ + filament) -
+            velocity * back_emf;
     }
 
-    // filament block: self-inductances on diagonal, inter-filament mutual off-diagonal
-    for (int a = 0; a < F; ++a) {
-        L_total_(S + a, S + a) = L_fil_(a);
-        for (int b = 0; b < F; ++b) {
-            if (a != b) L_total_(S + a, S + b) = M_mat_(a, b);
-        }
-    }
-}
-
-template<typename SP>
-MultiStageState MultiStageSim<SP>::compute_derivatives(const MultiStageState& s) {
-    int S = n_stages_;
-    int F = N_fil_;
-    int dim = S + F;
-
-    MultiStageState ds;
-    ds.currents.resize(dim);
-    ds.arm_position = s.arm_velocity;
-    if (enable_thermal_ && s.filament_temperatures.size() > 0) {
-        ds.filament_temperatures.resize(F);
-        ds.filament_temperatures.setZero();
-    }
-
-    std::vector<int> active_idx;
-    active_idx.reserve(S);
-    for (int st = 0; st < S; ++st) {
-        if (triggered_[st] && !finished_[st] && is_stage_within_range(st))
-            active_idx.push_back(st);
-    }
-    int n_active = static_cast<int>(active_idx.size());
-
-    int nr = armature_.radial_filaments();
-    double arm_center = s.arm_position;
-    double arm_center_init = armature_.position();
-
-    M1_mat_.setZero();
-    dM1_mat_.setZero();
-
-    if (n_active > 0) {
-#pragma omp parallel for
-        for (int flat = 0; flat < n_active * F; ++flat) {
-            int si = active_idx[flat / F];
-            int fi = flat % F;
-
-            const auto& coil = coils_[si];
-            int i = fi / nr + 1;
-            int j = fi % nr + 1;
-            double z_rel = armature_.filament_axial_position(i) - arm_center_init;
-            double z_global = arm_center + z_rel;
-            double sep = z_global - coil.position();
-            double fil_ri = armature_.filament_inner_radius(j);
-            double fil_re = armature_.filament_outer_radius(j);
-            double fil_l  = armature_.length() / armature_.axial_filaments();
-
-            double dist = std::abs(arm_center - coil.position());
-            int n_nodes = 9;
-            if (opt_level_ == OptimizationLevel::Full && dist > coil.length())
-                n_nodes = 4;
-
-            M1_mat_(si, fi) = physics::mutual_inductance_coil(
-                coil.inner_radius(), coil.outer_radius(),
-                coil.length(), coil.turns(),
-                fil_ri, fil_re, fil_l, 1, sep, n_nodes, false);
-
-            dM1_mat_(si, fi) = physics::mutual_inductance_gradient_coil(
-                coil.inner_radius(), coil.outer_radius(),
-                coil.length(), coil.turns(),
-                fil_ri, fil_re, fil_l, 1, sep, n_nodes, false);
-        }
-    }
-
-    build_system_matrix(s);
-
-    ds.arm_velocity = compute_force(s) / armature_.mass();
-
-    double v = s.arm_velocity;
-    RHS_.setZero();
-
-    for (int i = 0; i < S; ++i) {
-        if (!triggered_[i] || finished_[i]) continue;
-
-        double U   = excitations_[i]->voltage();
-        double I_d = s.currents(i);
-
-        double motional_emf = 0.0;
-        for (int k = 0; k < F; ++k)
-            motional_emf += dM1_mat_(i, k) * s.currents(S + k);
-
-        RHS_(i) = U - R_diag_(i) * I_d - v * motional_emf;
-    }
-
-    for (int k = 0; k < F; ++k) {
-        double I_f = s.currents(S + k);
-        double coil_back_emf = 0.0;
-        for (int i = 0; i < S; ++i) {
-            if (triggered_[i] && !finished_[i])
-                coil_back_emf += dM1_mat_(i, k) * s.currents(i);
-        }
-        RHS_(S + k) = -R_fil_(k) * I_f - v * coil_back_emf;
-    }
-
-    Eigen::LDLT<Eigen::MatrixXd> solver(L_total_);
-    if (solver.info() != Eigen::Success)
-        ds.currents = L_total_.colPivHouseholderQr().solve(RHS_);
+    DerivativeResult result;
+    result.physical_derivative.currents.resize(dimension);
+    Eigen::LDLT<Eigen::MatrixXd> solver(matrix);
+    if (solver.info() == Eigen::Success)
+        result.physical_derivative.currents = solver.solve(rhs);
     else
-        ds.currents = solver.solve(RHS_);
-    return ds;
-}
+        result.physical_derivative.currents = matrix.colPivHouseholderQr().solve(rhs);
+    if (!result.physical_derivative.currents.allFinite())
+        throw std::runtime_error("multi-stage circuit solve produced non-finite derivatives");
 
-template<typename SP>
-double MultiStageSim<SP>::compute_force(const MultiStageState& s) {
-    int S = n_stages_;
-    int F = N_fil_;
-    double F_net = 0.0;
-#pragma omp parallel for reduction(+:F_net)
-    for (int i = 0; i < S; ++i) {
-        if (!triggered_[i] || finished_[i]) continue;
-        double I_d = s.currents(i);
-        for (int k = 0; k < F; ++k)
-            F_net += I_d * s.currents(S + k) * dM1_mat_(i, k);
+    result.force = compute_force(state.physical, gradient, state.stages);
+    result.physical_derivative.arm_position = state.physical.arm_velocity;
+    result.physical_derivative.arm_velocity = result.force / armature_.mass();
+    if (enable_thermal_) {
+        result.physical_derivative.filament_temperatures.resize(N_fil_);
+        for (int filament = 0; filament < N_fil_; ++filament) {
+            const double current = state.physical.currents(n_stages_ + filament);
+            const double temperature = state.physical.filament_temperatures(filament);
+            result.physical_derivative.filament_temperatures(filament) =
+                current * current * workspace.resistance(filament) /
+                (mass_fil_(filament) *
+                 physics::material_cp(armature_.material(), temperature));
+        }
     }
-    return F_net;
-}
 
-template<typename SP>
-void MultiStageSim<SP>::update_temperatures(MultiStageState& s, double dt_sub) {
-    int F = N_fil_;
-    auto mat = armature_.material();
-    double beta = physics::material_beta(mat);
-#pragma omp parallel for
-    for (int k = 0; k < F; ++k) {
-        double I_k = s.currents(n_stages_ + k);
-        double m_k = mass_fil_(k);
-        double T_k = s.filament_temperatures(k);
-        double cp  = physics::material_cp(mat, T_k);
-        double dT  = I_k * I_k * R_fil_(k) * dt_sub / (m_k * cp);
-        T_k += dT;
-        s.filament_temperatures(k) = T_k;
-        R_fil_(k) = R_fil_ref_(k) * (1.0 + beta * (T_k - physics::T_REFERENCE));
+    result.excitation_derivatives.resize(n_stages_);
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (state.stages[stage].triggered && !state.stages[stage].excitation_finished) {
+            result.excitation_derivatives[stage] =
+                excitations_[stage]->continuous_derivative(
+                    *state.excitations[stage], state.physical.currents(stage));
+        }
     }
+    return result;
 }
 
 template<typename SP>
-void MultiStageSim<SP>::check_triggers() {
-    if (n_stages_ <= 1) return;
+IntegrationState MultiStageSim<SP>::make_trial(
+    const IntegrationState& initial,
+    const DerivativeResult& derivative,
+    double scale) const {
+    auto trial = clone_integration_state(initial);
+    trial.physical += scale * derivative.physical_derivative;
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (trial.stages[stage].triggered && !trial.stages[stage].excitation_finished) {
+            excitations_[stage]->advance_snapshot_derivative(
+                *trial.excitations[stage], scale,
+                derivative.excitation_derivatives[stage]);
+        }
+    }
+    return trial;
+}
 
-    double current_time = step_count_ * dt_;
+template<typename SP>
+void MultiStageSim<SP>::check_triggers(
+    IntegrationState& state,
+    const IntegrationState& pre,
+    double absolute_time) const {
+    for (int stage = 1; stage < n_stages_; ++stage) {
+        auto& runtime = state.stages[stage];
+        if (runtime.triggered || !state.stages[stage - 1].triggered) continue;
+        const auto& trigger = trigger_configs_[stage - 1];
+        if (trigger.value == std::numeric_limits<double>::infinity()) continue;
 
-    for (int i = 1; i < n_stages_; ++i) {
-        if (triggered_[i]) continue;
-        if (!triggered_[i - 1]) continue;
-
-        const auto& cfg = trigger_configs_[i - 1];
         bool fire = false;
-
-        if (cfg.mode == TriggerMode::Position) {
-            fire = (state_.arm_position >= cfg.value);
+        double event_time = absolute_time;
+        double event_position = pre.physical.arm_position;
+        if (trigger.mode == TriggerMode::Position) {
+            const double before = pre.physical.arm_position - trigger.value;
+            const double after = state.physical.arm_position - trigger.value;
+            fire = before >= 0.0 || (before < 0.0 && after >= 0.0);
+            if (fire && before < 0.0 && after > before) {
+                const double fraction = -before / (after - before);
+                event_time = absolute_time + fraction * dt_;
+                event_position = pre.physical.arm_position;
+            }
         } else {
-            // TimeDelay: relative to previous stage's trigger time
-            fire = (current_time >= trigger_times_[i - 1] + cfg.value);
+            const double target = state.stages[stage - 1].trigger_time + trigger.value;
+            fire = absolute_time + dt_ >= target;
+            if (fire) event_time = std::max(absolute_time, target);
         }
-
         if (fire) {
-            triggered_[i] = true;
-            trigger_times_[i] = current_time;
-            trigger_positions_[i] = state_.arm_position;
+            runtime.triggered = true;
+            runtime.circuit_active = true;
+            runtime.trigger_time = event_time;
+            runtime.trigger_position = event_position;
         }
     }
 }
 
 template<typename SP>
-void MultiStageSim<SP>::extinguish_quiet_stages() {
-    static constexpr double kQuietThreshold = 1e-6; // A
-    for (int i = 0; i < n_stages_; ++i) {
-        if (!triggered_[i] || finished_[i]) continue;
-        if (excitations_[i]->voltage() == 0.0 &&
-            std::abs(state_.currents(i)) < kQuietThreshold) {
-            finished_[i] = true;
+void MultiStageSim<SP>::complete_quiet_stages(IntegrationState& state) const {
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        auto& runtime = state.stages[stage];
+        if (runtime.circuit_active && runtime.excitation_finished &&
+            std::abs(state.physical.currents(stage)) < kQuietCurrent) {
+            mark_stage_completed(state, static_cast<std::size_t>(stage));
         }
     }
 }
 
 template<typename SP>
-void MultiStageSim<SP>::record_step() {
-    int S = n_stages_;
-    int F = N_fil_;
+void MultiStageSim<SP>::apply_boundary_events(
+    IntegrationState& state,
+    const IntegrationState& pre,
+    double,
+    double absolute_time) const {
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (!state.stages[stage].triggered || state.stages[stage].excitation_finished) continue;
+        auto& snapshot = *state.excitations[stage];
+        if (auto* capacitor = dynamic_cast<CapacitorSnapshot*>(&snapshot)) {
+            if (capacitor->capacitor_voltage <= 0.0) {
+                excitations_[stage]->apply_event(snapshot, ExcitationEvent::CapacitorZero);
+                excitations_[stage]->apply_event(snapshot, ExcitationEvent::Finished);
+            }
+        } else if (auto* crowbar = dynamic_cast<CrowbarSnapshot*>(&snapshot)) {
+            if (!crowbar->diode_on && crowbar->capacitor_voltage <= 0.0) {
+                excitations_[stage]->apply_event(snapshot, ExcitationEvent::CapacitorZero);
+                excitations_[stage]->apply_event(snapshot, ExcitationEvent::CrowbarOn);
+            }
+            state.stages[stage].crowbar_on = crowbar->diode_on;
+            if (crowbar->diode_on && std::abs(state.physical.currents(stage)) < kQuietCurrent)
+                excitations_[stage]->apply_event(snapshot, ExcitationEvent::Finished);
+        } else if (auto* waveform = dynamic_cast<WaveformSnapshot*>(&snapshot)) {
+            const auto* source = dynamic_cast<const WaveformExcitation*>(excitations_[stage].get());
+            if (source && waveform->time >= source->end_time())
+                excitations_[stage]->apply_event(snapshot, ExcitationEvent::WaveformEnd);
+        }
+        state.stages[stage].excitation_finished = snapshot_finished(snapshot);
+    }
+    check_triggers(state, pre, absolute_time);
+    complete_quiet_stages(state);
+}
 
+template<typename SP>
+IntegrationState MultiStageSim<SP>::advance_euler(
+    const IntegrationState& original_pre, double dt) {
+    auto pre = clone_integration_state(original_pre);
+    check_triggers(pre, original_pre, step_count_ * dt_);
+    const auto derivative = evaluate_derivatives(pre, workspace_);
+    pre_step_mutual_gradient_ = workspace_.mutual_gradient;
+    auto post = make_trial(pre, derivative, dt);
+    apply_boundary_events(post, pre, dt, step_count_ * dt_);
+    return post;
+}
+
+template<typename SP>
+IntegrationState MultiStageSim<SP>::advance_rk4_segment(
+    const IntegrationState& pre, double dt) {
+    const auto k1 = evaluate_derivatives(pre, workspace_);
+    pre_step_mutual_gradient_ = workspace_.mutual_gradient;
+    const auto s2 = make_trial(pre, k1, 0.5 * dt);
+    const auto k2 = evaluate_derivatives(s2, workspace_);
+    const auto s3 = make_trial(pre, k2, 0.5 * dt);
+    const auto k3 = evaluate_derivatives(s3, workspace_);
+    const auto s4 = make_trial(pre, k3, dt);
+    const auto k4 = evaluate_derivatives(s4, workspace_);
+
+    auto post = clone_integration_state(pre);
+    auto physical = k1.physical_derivative;
+    physical += 2.0 * k2.physical_derivative;
+    physical += 2.0 * k3.physical_derivative;
+    physical += k4.physical_derivative;
+    post.physical += (dt / 6.0) * physical;
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        ExcitationDerivative derivative;
+        derivative.capacitor_voltage_rate =
+            (k1.excitation_derivatives[stage].capacitor_voltage_rate +
+             2.0 * k2.excitation_derivatives[stage].capacitor_voltage_rate +
+             2.0 * k3.excitation_derivatives[stage].capacitor_voltage_rate +
+             k4.excitation_derivatives[stage].capacitor_voltage_rate) / 6.0;
+        derivative.waveform_time_rate =
+            (k1.excitation_derivatives[stage].waveform_time_rate +
+             2.0 * k2.excitation_derivatives[stage].waveform_time_rate +
+             2.0 * k3.excitation_derivatives[stage].waveform_time_rate +
+             k4.excitation_derivatives[stage].waveform_time_rate) / 6.0;
+        if (post.stages[stage].triggered && !post.stages[stage].excitation_finished)
+            excitations_[stage]->advance_snapshot_derivative(
+                *post.excitations[stage], dt, derivative);
+    }
+    return post;
+}
+
+template<typename SP>
+IntegrationState MultiStageSim<SP>::advance_rk4_event_aware(
+    const IntegrationState& original_pre, double dt) {
+    pre_step_mutual_gradient_.resize(0);
+    auto current = clone_integration_state(original_pre);
+    check_triggers(current, original_pre, step_count_ * dt_);
+    double remaining = dt;
+    double elapsed = 0.0;
+    for (int segment = 0; segment < kMaxEventSegments && remaining > 0.0; ++segment) {
+        auto candidate = advance_rk4_segment(current, remaining);
+        int crossing_stage = -1;
+        for (int stage = 0; stage < n_stages_; ++stage) {
+            if (!current.stages[stage].triggered || current.stages[stage].excitation_finished) continue;
+            const double before = event_value(*excitations_[stage], *current.excitations[stage]);
+            const double after = event_value(*excitations_[stage], *candidate.excitations[stage]);
+            if (before > 0.0 && after <= 0.0) {
+                crossing_stage = stage;
+                break;
+            }
+        }
+        if (crossing_stage < 0) {
+            apply_boundary_events(candidate, current, remaining,
+                                  step_count_ * dt_ + elapsed);
+            return candidate;
+        }
+
+        double lower = 0.0;
+        double upper = remaining;
+        for (int iteration = 0; iteration < kMaxEventBisections; ++iteration) {
+            const double midpoint = 0.5 * (lower + upper);
+            const auto trial = advance_rk4_segment(current, midpoint);
+            if (event_value(*excitations_[crossing_stage],
+                            *trial.excitations[crossing_stage]) > 0.0)
+                lower = midpoint;
+            else
+                upper = midpoint;
+            if (upper - lower <= kEventTolerance) break;
+        }
+        if (upper <= 0.0) throw std::runtime_error("zero-duration repeated RK4 event");
+        auto event_state = advance_rk4_segment(current, upper);
+        apply_boundary_events(event_state, current, upper,
+                              step_count_ * dt_ + elapsed);
+        current = std::move(event_state);
+        elapsed += upper;
+        remaining -= upper;
+    }
+    if (remaining > kEventTolerance)
+        throw std::runtime_error("multi-stage RK4 event segment limit exceeded");
+    return current;
+}
+
+template<typename SP>
+void MultiStageSim<SP>::record_step(double post_time) {
+    Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> gradient(
+        pre_step_mutual_gradient_.data(), n_stages_, N_fil_);
     MultiStageStep entry;
-    entry.state.time         = step_count_ * dt_;
-    entry.state.arm_position = state_.arm_position;
-    entry.state.arm_velocity = state_.arm_velocity;
-    entry.state.force        = compute_force(state_);
-    entry.state.filament_currents.resize(F);
-    for (int k = 0; k < F; ++k)
-        entry.state.filament_currents[k] = state_.currents(S + k);
-
-    if (enable_thermal_ && state_.filament_temperatures.size() > 0) {
-        entry.state.filament_temperatures.resize(F);
-        for (int k = 0; k < F; ++k)
-            entry.state.filament_temperatures[k] = state_.filament_temperatures(k);
+    entry.state.time = post_time;
+    entry.state.arm_position = integration_state_.physical.arm_position;
+    entry.state.arm_velocity = integration_state_.physical.arm_velocity;
+    entry.state.filament_currents.resize(N_fil_);
+    for (int filament = 0; filament < N_fil_; ++filament)
+        entry.state.filament_currents[filament] =
+            integration_state_.physical.currents(n_stages_ + filament);
+    if (enable_thermal_) {
+        entry.state.filament_temperatures.resize(N_fil_);
+        for (int filament = 0; filament < N_fil_; ++filament)
+            entry.state.filament_temperatures[filament] =
+                integration_state_.physical.filament_temperatures(filament);
     }
 
-    entry.cap_voltages.resize(S);
-    entry.coil_currents.resize(S);
-    entry.stage_forces.resize(S);
-    for (int i = 0; i < S; ++i) {
-        entry.cap_voltages[i] = triggered_[i] ? excitations_[i]->voltage() : 0.0;
-        entry.coil_currents[i] = triggered_[i] ? state_.currents(i) : 0.0;
-        if (!triggered_[i] || finished_[i]) continue;
-        for (int k = 0; k < F; ++k)
-            entry.stage_forces[i] += state_.currents(i) * state_.currents(S + k) * dM1_mat_(i, k);
+    entry.cap_voltages.resize(n_stages_);
+    entry.coil_currents.resize(n_stages_);
+    entry.stage_forces.assign(n_stages_, 0.0);
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        const auto& runtime = integration_state_.stages[stage];
+        if (runtime.triggered)
+            entry.cap_voltages[stage] =
+                excitations_[stage]->voltage(*integration_state_.excitations[stage]);
+        entry.coil_currents[stage] = integration_state_.physical.currents(stage);
+        if (!runtime.circuit_active) continue;
+        for (int filament = 0; filament < N_fil_; ++filament) {
+            entry.stage_forces[stage] += integration_state_.physical.currents(stage) *
+                integration_state_.physical.currents(n_stages_ + filament) *
+                gradient(stage, filament);
+        }
+        entry.state.force += entry.stage_forces[stage];
     }
-    entry.state.force = 0.0;
-    for (const double force : entry.stage_forces) entry.state.force += force;
-
     result_.history.push_back(std::move(entry));
 }
 
 template<typename SP>
 bool MultiStageSim<SP>::check_all_finished() const {
-    // A finite trigger policy remains eligible even if earlier stages finished;
-    // only completed stages and explicit +infinity policies are terminal.
-    auto terminally_ineligible = [this](int stage_idx) {
-        for (int stage = stage_idx; stage > 0; --stage) {
-            const auto& cfg = trigger_configs_[static_cast<std::size_t>(stage - 1)];
-            if (cfg.value == INFINITY) return true;
-            if (triggered_[stage - 1]) return false;
-        }
-        return false;
-    };
-    for (int i = 0; i < n_stages_; ++i) {
-        if (finished_[i]) continue;
-        if (!triggered_[i] && terminally_ineligible(i)) continue;
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (integration_state_.stages[stage].stage_completed) continue;
+        if (!integration_state_.stages[stage].triggered && stage > 0 &&
+            trigger_configs_[stage - 1].value == std::numeric_limits<double>::infinity())
+            continue;
         return false;
     }
     return true;
@@ -463,111 +596,85 @@ bool MultiStageSim<SP>::check_all_finished() const {
 
 template<typename SP>
 bool MultiStageSim<SP>::check_termination(const TerminationPolicy& policy) {
-    if (policy.enable_bound_check && state_.arm_position >= policy.barrel_end_position)
-        return true;
-    if (step_count_ >= policy.max_steps) return true;
-    if (check_all_finished()) return true;
-
+    const auto& state = integration_state_.physical;
+    if (policy.enable_bound_check && state.arm_position >= policy.barrel_end_position) return true;
+    if (step_count_ >= policy.max_steps || check_all_finished()) return true;
+    for (const auto& stage : integration_state_.stages)
+        if (stage.triggered && stage.circuit_active && !stage.excitation_finished)
+            return false;
     if (policy.enable_velocity_check && step_count_ >= policy.velocity_decay_steps) {
-        double accel = compute_force(state_) / armature_.mass();
-        const auto& hist = result_.history;
+        const double acceleration = result_.history.empty() ? 0.0 :
+            result_.history.back().state.force / armature_.mass();
         bool decaying = true;
-        auto n = static_cast<int>(hist.size());
-        for (int i = 0; i < policy.velocity_decay_steps; ++i) {
-            if (n - 2 - i < 0 || hist[n - 1 - i].state.arm_velocity >= hist[n - 2 - i].state.arm_velocity) {
-                decaying = false; break;
+        const auto count = static_cast<int>(result_.history.size());
+        for (int index = 0; index < policy.velocity_decay_steps; ++index) {
+            if (count - 2 - index < 0 ||
+                result_.history[count - 1 - index].state.arm_velocity >=
+                    result_.history[count - 2 - index].state.arm_velocity) {
+                decaying = false;
+                break;
             }
         }
-        if (decaying && std::abs(accel) < policy.accel_threshold) return true;
+        if (decaying && std::abs(acceleration) < policy.accel_threshold)
+            return true;
     }
     return false;
 }
 
 template<typename SP>
 void MultiStageSim<SP>::prepare_summary() {
-    int S = n_stages_;
-    int F = N_fil_;
-    auto& s = result_.summary;
-    s = MultiStageSummary{};
-    s.step_count = step_count_;
+    auto& summary = result_.summary;
+    summary = {};
+    summary.step_count = step_count_;
     if (result_.history.empty()) return;
+    summary.total_time = result_.history.back().state.time;
+    summary.muzzle_velocity = result_.history.back().state.arm_velocity;
 
-    const auto& last = result_.history.back();
-    s.total_time      = last.state.time;
-    s.muzzle_velocity = last.state.arm_velocity;
-
-    // per-stage summaries
-    for (int i = 0; i < S; ++i) {
-        if (!triggered_[i]) continue;
-        PerStageSummary ps;
-        ps.stage_index = i;
-        ps.trigger_time = trigger_times_[i];
-
-        ps.trigger_position = trigger_positions_[static_cast<std::size_t>(i)];
-
-        auto* cap = dynamic_cast<CapacitorExcitation*>(excitations_[i].get());
-        bool active = false;
-
+    for (int stage = 0; stage < n_stages_; ++stage) {
+        if (!integration_state_.stages[stage].triggered) continue;
+        PerStageSummary stage_summary;
+        stage_summary.stage_index = stage;
+        stage_summary.trigger_time = integration_state_.stages[stage].trigger_time;
+        stage_summary.trigger_position = integration_state_.stages[stage].trigger_position;
         for (const auto& step : result_.history) {
-            if (step.coil_currents[i] > ps.peak_current)
-                ps.peak_current = step.coil_currents[i];
-            if (i < static_cast<int>(step.stage_forces.size()))
-                ps.max_force = std::max(ps.max_force, std::abs(step.stage_forces[i]));
-
-            if (triggered_[i] && step.coil_currents[i] > 1e-6)
-                active = true;
-            if (active) ps.step_count_active++;
-
+            stage_summary.peak_current = std::max(
+                stage_summary.peak_current, std::abs(step.coil_currents[stage]));
+            stage_summary.max_force = std::max(
+                stage_summary.max_force, std::abs(step.stage_forces[stage]));
+            if (std::abs(step.coil_currents[stage]) >= kQuietCurrent)
+                ++stage_summary.step_count_active;
         }
-
-        if (cap) {
-            double E_end = 0.5 * cap->capacitance() * cap->capacitor_voltage() * cap->capacitor_voltage();
-            ps.energy_depleted = initial_stage_energies_[static_cast<std::size_t>(i)] - E_end;
+        if (const auto* capacitor =
+                dynamic_cast<const CapacitorExcitation*>(excitations_[stage].get())) {
+            const double voltage = result_.history.back().cap_voltages[stage];
+            stage_summary.energy_depleted = initial_stage_energies_[stage] -
+                0.5 * capacitor->capacitance() * voltage * voltage;
         }
-
-        s.per_stage.push_back(ps);
+        summary.per_stage.push_back(stage_summary);
     }
-
-    // global
     for (const auto& step : result_.history) {
-        if (std::abs(step.state.force) > s.max_force)
-            s.max_force = std::abs(step.state.force);
+        summary.max_force = std::max(summary.max_force, std::abs(step.state.force));
+        for (const double current : step.coil_currents)
+            summary.peak_coil_current =
+                std::max(summary.peak_coil_current, std::abs(current));
     }
-    for (int i = 0; i < S; ++i) {
-        for (const auto& step : result_.history) {
-            if (step.coil_currents[i] > s.peak_coil_current)
-                s.peak_coil_current = step.coil_currents[i];
-        }
-    }
-
-    // efficiency
-    double E_total = 0.0;
-    for (int i = 0; i < S; ++i) {
-        auto* cap = dynamic_cast<CapacitorExcitation*>(excitations_[i].get());
-        if (cap)
-            E_total += 0.5 * cap->capacitance() * cap->initial_voltage() * cap->initial_voltage();
-    }
-    double E_kin = 0.5 * armature_.mass() * s.muzzle_velocity * s.muzzle_velocity;
-    s.efficiency = (E_total > 0.0) ? E_kin / E_total : 0.0;
+    double input_energy = 0.0;
+    for (const double energy : initial_stage_energies_) input_energy += energy;
+    const double kinetic = 0.5 * armature_.mass() *
+        summary.muzzle_velocity * summary.muzzle_velocity;
+    summary.efficiency = input_energy > 0.0 ? kinetic / input_energy : 0.0;
 }
 
 template<typename SP>
 const MultiStageStep& MultiStageSim<SP>::step() {
-    check_triggers();
-    extinguish_quiet_stages();
-    state_ = stepper_.advance(dt_, state_,
-        [this](const MultiStageState& s) { return compute_derivatives(s); });
-
-    for (int i = 0; i < n_stages_; ++i) {
-        if (triggered_[i] && !finished_[i]) {
-            excitations_[i]->advance(dt_, state_.currents(i));
-            if (excitations_[i]->finished()) finished_[i] = true;
-        }
-    }
-
-    if (enable_thermal_) update_temperatures(state_, dt_);
-
-    record_step();
+    const auto pre = clone_integration_state(integration_state_);
+    if constexpr (std::is_same_v<SP, RK4Stepper>)
+        integration_state_ = advance_rk4_event_aware(pre, dt_);
+    else
+        integration_state_ = advance_euler(pre, dt_);
+    for (int stage = 0; stage < n_stages_; ++stage)
+        excitations_[stage]->restore(*integration_state_.excitations[stage]);
+    record_step((step_count_ + 1) * dt_);
     ++step_count_;
     return result_.history.back();
 }
@@ -579,31 +686,18 @@ const MultiStageResult& MultiStageSim<SP>::run() {
 
 template<typename SP>
 const MultiStageResult& MultiStageSim<SP>::run(const TerminationPolicy& policy) {
-    while (!check_termination(policy))
-        step();
+    while (!check_termination(policy)) step();
     prepare_summary();
     return result_;
 }
 
 template<typename SP>
 void MultiStageSim<SP>::reset() {
-    state_.currents.setZero();
-    state_.arm_position = armature_.position();
-    state_.arm_velocity = armature_.velocity();
-    if (enable_thermal_ && state_.filament_temperatures.size() > 0)
-        state_.filament_temperatures.setConstant(physics::T_REFERENCE);
-
-    R_fil_ = R_fil_ref_;
-    result_ = MultiStageResult{};
+    integration_state_ = clone_integration_state(initial_integration_state_);
+    for (int stage = 0; stage < n_stages_; ++stage)
+        excitations_[stage]->restore(*integration_state_.excitations[stage]);
+    result_ = {};
     step_count_ = 0;
-
-    for (int i = 0; i < n_stages_; ++i) {
-        triggered_[i] = (i == 0);
-        finished_[i] = false;
-        trigger_times_[i] = 0.0;
-        trigger_positions_[i] = armature_.position();
-        excitations_[i]->reset();
-    }
 }
 
 template class MultiStageSim<EulerStepper>;

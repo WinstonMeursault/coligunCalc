@@ -157,6 +157,13 @@ struct GpuEngineState {
     std::vector<double> joule_energy;
     std::vector<double> current_derivatives;
     std::vector<double> stage_voltages;
+    std::vector<std::uint8_t> trigger_modes;
+    std::vector<double> trigger_values;
+    std::vector<std::uint8_t> excitation_finished;
+    std::vector<std::uint8_t> stage_completed;
+    std::vector<double> trigger_times;
+    std::vector<double> trigger_positions;
+    std::vector<double> position_offsets;
     double dt = 0.0;
     double mass = 0.0;
     double reference_temperature = 293.0;
@@ -166,6 +173,11 @@ struct GpuEngineState {
 struct GpuEngineResult {
     std::size_t completed_steps = 0;
     bool finished = false;
+};
+
+struct GpuAssemblySnapshot {
+    std::vector<double> matrix;
+    std::vector<double> rhs;
 };
 
 struct GpuRunBoundary {
@@ -462,6 +474,9 @@ public:
         stage_mask_ = state_.stage_mask;
         mutual_stage_mask_ = state_.mutual_stage_mask;
         select_graph_variant_at_boundary();
+#if defined(COILGUN_CUDA_AVAILABLE)
+        sync_runtime_state_after_reset();
+#endif
         // Execution diagnostics are cumulative audit data. Reset clears the
         // simulation state/history and boundary variant, but retains timings,
         // fallback count, calibration, and graph rebuild history.
@@ -511,6 +526,33 @@ public:
         select_graph_variant_at_boundary();
     }
 
+    void set_control_boundary_state(
+        std::vector<std::uint8_t> trigger_modes,
+        std::vector<double> trigger_values,
+        std::vector<std::uint8_t> excitation_finished,
+        std::vector<std::uint8_t> stage_completed,
+        std::vector<double> trigger_times,
+        std::vector<double> trigger_positions,
+        std::vector<double> position_offsets) {
+        ensure_running();
+        const auto stage_values = layout_.B * layout_.S;
+        validate_mask(trigger_modes, stage_values, "trigger mode size does not match layout");
+        validate_mask(excitation_finished, stage_values,
+                      "excitation finished size does not match layout");
+        validate_mask(stage_completed, stage_values,
+                      "stage completed size does not match layout");
+        if (trigger_values.size() != stage_values || trigger_times.size() != stage_values ||
+            trigger_positions.size() != stage_values || position_offsets.size() != layout_.B)
+            throw std::invalid_argument("GPU control buffers do not match layout");
+        state_.trigger_modes = std::move(trigger_modes);
+        state_.trigger_values = std::move(trigger_values);
+        state_.excitation_finished = std::move(excitation_finished);
+        state_.stage_completed = std::move(stage_completed);
+        state_.trigger_times = std::move(trigger_times);
+        state_.trigger_positions = std::move(trigger_positions);
+        state_.position_offsets = std::move(position_offsets);
+    }
+
     /** Select or capture a graph variant at the current step boundary. */
     void select_graph_variant_at_boundary() {
         ensure_running();
@@ -558,7 +600,12 @@ public:
             state_.stage_voltages.assign(layout_.B * layout_.S, 0.0);
         state_.stage_voltages[stage] = voltage;
     }
+    void complete_stage(std::size_t batch, std::size_t stage);
     std::size_t calibration_count() const noexcept { return calibration_count_; }
+    GpuAssemblySnapshot assemble_reference_for_test();
+#if defined(COILGUN_CUDA_AVAILABLE)
+    GpuAssemblySnapshot assemble_device_for_test();
+#endif
 #if defined(COILGUN_CUDA_AVAILABLE)
     bool context_available() const noexcept { return context_ != nullptr && context_->valid(); }
     bool solver_workspace_initialized() const noexcept {
@@ -608,6 +655,20 @@ private:
         validate_optional_mask(state.mutual_stage_mask, layout.B * layout.S,
                                "mutual stage mask size does not match layout");
         validate_stage_voltages(state.stage_voltages, layout.B * layout.S);
+        const auto control_size = layout.B * layout.S;
+        const bool control_enabled = !state.trigger_modes.empty() ||
+            !state.trigger_values.empty() || !state.excitation_finished.empty() ||
+            !state.stage_completed.empty() || !state.trigger_times.empty() ||
+            !state.trigger_positions.empty() || !state.position_offsets.empty();
+        if (control_enabled &&
+            (state.trigger_modes.size() != control_size ||
+             state.trigger_values.size() != control_size ||
+             state.excitation_finished.size() != control_size ||
+             state.stage_completed.size() != control_size ||
+             state.trigger_times.size() != control_size ||
+             state.trigger_positions.size() != control_size ||
+             state.position_offsets.size() != layout.B))
+            throw std::invalid_argument("GPU device control buffers do not match layout");
         const bool thermal_required = geometry.thermal_enabled ||
             thermal_mode == ThermalMode::Cpu || thermal_mode == ThermalMode::Gpu;
         if (thermal_required && state.temperatures.size() != layout.temperatures_size()) {
@@ -662,6 +723,16 @@ private:
         const auto expected = layout_.B * layout_.S;
         if (state.stage_mask.empty()) state.stage_mask.assign(expected, 1);
         if (state.mutual_stage_mask.empty()) state.mutual_stage_mask.assign(expected, 1);
+    }
+
+    bool device_control_enabled() const noexcept {
+        return state_.trigger_modes.size() == layout_.B * layout_.S &&
+            state_.trigger_values.size() == layout_.B * layout_.S &&
+            state_.excitation_finished.size() == layout_.B * layout_.S &&
+            state_.stage_completed.size() == layout_.B * layout_.S &&
+            state_.trigger_times.size() == layout_.B * layout_.S &&
+            state_.trigger_positions.size() == layout_.B * layout_.S &&
+            state_.position_offsets.size() == layout_.B;
     }
 
     void restore_inactive_state(const GpuEngineState& snapshot) {
@@ -855,6 +926,7 @@ private:
     void record_runtime_failure(const SolverStatus& status);
     void shutdown_runtime() noexcept;
     void release_runtime_resources() noexcept;
+    void sync_runtime_state_after_reset();
 #endif
     void execute_cpu_physical_pipeline() {
         const auto state_snapshot = state_;

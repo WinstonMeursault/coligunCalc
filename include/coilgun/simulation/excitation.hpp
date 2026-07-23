@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "coilgun/simulation/excitation_snapshot.hpp"
+
 #include <functional>
 #include <memory>
 #include <cmath>
@@ -40,6 +42,19 @@ public:
 
     /// @brief Restore initial state (voltage restored, timer reset).
     virtual void reset() {}
+
+    virtual std::unique_ptr<ExcitationSnapshot> snapshot() const = 0;
+    virtual void restore(const ExcitationSnapshot& snapshot) = 0;
+    virtual double voltage(const ExcitationSnapshot& snapshot) const = 0;
+    virtual ExcitationDerivative continuous_derivative(
+        const ExcitationSnapshot& snapshot, double coil_current) const = 0;
+    virtual void advance_snapshot(ExcitationSnapshot& snapshot,
+                                  double dt, double coil_current) const = 0;
+    virtual void advance_snapshot_derivative(
+        ExcitationSnapshot& snapshot, double dt,
+        const ExcitationDerivative& derivative) const = 0;
+    virtual void apply_event(ExcitationSnapshot& snapshot,
+                             ExcitationEvent event) const = 0;
 };
 
 /**
@@ -61,6 +76,18 @@ public:
     void advance(double dt, double coil_current) override;
     bool finished() const override;
     void reset() override;
+    std::unique_ptr<ExcitationSnapshot> snapshot() const override;
+    void restore(const ExcitationSnapshot& snapshot) override;
+    double voltage(const ExcitationSnapshot& snapshot) const override;
+    ExcitationDerivative continuous_derivative(
+        const ExcitationSnapshot& snapshot, double coil_current) const override;
+    void advance_snapshot(ExcitationSnapshot& snapshot,
+                          double dt, double coil_current) const override;
+    void advance_snapshot_derivative(
+        ExcitationSnapshot& snapshot, double dt,
+        const ExcitationDerivative& derivative) const override;
+    void apply_event(ExcitationSnapshot& snapshot,
+                     ExcitationEvent event) const override;
 
     /// @brief Capacitance, F.
     double capacitance() const;
@@ -88,8 +115,21 @@ class CrowbarExcitation : public CapacitorExcitation {
 public:
     using CapacitorExcitation::CapacitorExcitation;
 
+    double voltage() const override { return diode_on_ ? 0.0 : U_C_; }
     void advance(double dt, double coil_current) override;
     void reset() override;
+    std::unique_ptr<ExcitationSnapshot> snapshot() const override;
+    void restore(const ExcitationSnapshot& snapshot) override;
+    double voltage(const ExcitationSnapshot& snapshot) const override;
+    ExcitationDerivative continuous_derivative(
+        const ExcitationSnapshot& snapshot, double coil_current) const override;
+    void advance_snapshot(ExcitationSnapshot& snapshot,
+                          double dt, double coil_current) const override;
+    void advance_snapshot_derivative(
+        ExcitationSnapshot& snapshot, double dt,
+        const ExcitationDerivative& derivative) const override;
+    void apply_event(ExcitationSnapshot& snapshot,
+                     ExcitationEvent event) const override;
 
     /// @brief Whether the crowbar diode is currently conducting.
     bool diode_on() const;
@@ -125,6 +165,21 @@ public:
     void advance(double dt, double coil_current) override;
     bool finished() const override;
     void reset() override;
+    std::unique_ptr<ExcitationSnapshot> snapshot() const override;
+    void restore(const ExcitationSnapshot& snapshot) override;
+    double voltage(const ExcitationSnapshot& snapshot) const override;
+    ExcitationDerivative continuous_derivative(
+        const ExcitationSnapshot& snapshot, double coil_current) const override;
+    void advance_snapshot(ExcitationSnapshot& snapshot,
+                          double dt, double coil_current) const override;
+    void advance_snapshot_derivative(
+        ExcitationSnapshot& snapshot, double dt,
+        const ExcitationDerivative& derivative) const override;
+    void apply_event(ExcitationSnapshot& snapshot,
+                     ExcitationEvent event) const override;
+
+    double time() const { return t_; }
+    double end_time() const { return end_time_; }
 
 private:
     Waveform func_;

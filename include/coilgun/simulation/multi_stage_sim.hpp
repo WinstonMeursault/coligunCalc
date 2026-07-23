@@ -15,6 +15,8 @@
 #include "coilgun/simulation/termination.hpp"
 #include "coilgun/simulation/time_stepper.hpp"
 #include "coilgun/simulation/trigger_config.hpp"
+#include "coilgun/simulation/integration_state.hpp"
+#include "coilgun/simulation/derivative_workspace.hpp"
 #include <Eigen/Dense>
 #include <memory>
 #include <vector>
@@ -31,27 +33,6 @@ enum class OptimizationLevel {
     LookupTable = 1,   ///< Reserved for the component-level T(q,p) lookup selection; same runtime path as Reference.
     Full        = 2    ///< Distance cutoff plus adaptive 9/4-point mutual-inductance quadrature.
 };
-
-/**
- * @brief Full state vector for the multi-stage ODE system.
- *
- * Layout: @p currents[0..S-1] = coil currents @f$ I_{di} @f$ (S = n_stages),
- * @p currents[S..S+F-1] = filament currents @f$ I_{ij} @f$ (F = N_fil).
- */
-struct MultiStageState {
-    Eigen::VectorXd currents;              ///< [n_stages + N_fil] current vector, A.
-    double arm_position = 0.0;             ///< Armature centre position, m.
-    double arm_velocity = 0.0;             ///< Armature velocity, m/s.
-    Eigen::VectorXd filament_temperatures; ///< [N_fil] filament temperatures, K.
-
-    MultiStageState& operator+=(const MultiStageState& rhs);
-    MultiStageState& operator*=(double scalar);
-};
-
-/// @related MultiStageState
-MultiStageState operator+(MultiStageState lhs, const MultiStageState& rhs);
-/// @related MultiStageState
-MultiStageState operator*(double scalar, MultiStageState s);
 
 /**
  * @brief Multi-stage synchronous induction coilgun simulation engine.
@@ -121,7 +102,9 @@ public:
     /// @brief Result after the last run().
     const MultiStageResult& result()  const { return result_; }
     /// @brief Current internal state.
-    const MultiStageState&  state()   const { return state_; }
+    const MultiStageState& state() const { return integration_state_.physical; }
+    const StageRuntimeState& stage_state(std::size_t stage) const;
+    bool circuit_active(std::size_t stage) const noexcept;
     /// @brief Fixed time step, s.
     double  dt()          const { return dt_; }
     /// @brief Step count since construction or last reset().
@@ -138,19 +121,30 @@ public:
     void    reset();
 
 private:
-    MultiStageState compute_derivatives(const MultiStageState& s);
+    DerivativeResult evaluate_derivatives(const IntegrationState& state,
+                                          DerivativeWorkspace& workspace) const;
+    IntegrationState advance_euler(const IntegrationState& pre, double dt);
+    IntegrationState advance_rk4_segment(const IntegrationState& pre, double dt);
+    IntegrationState advance_rk4_event_aware(const IntegrationState& pre, double dt);
+    IntegrationState make_trial(const IntegrationState& initial,
+                                const DerivativeResult& derivative,
+                                double scale) const;
+    Eigen::VectorXd derive_resistance(const MultiStageState& state) const;
+    void apply_boundary_events(IntegrationState& state, const IntegrationState& pre,
+                               double segment_time, double absolute_time) const;
+    void check_triggers(IntegrationState& state, const IntegrationState& pre,
+                        double absolute_time) const;
+    void complete_quiet_stages(IntegrationState& state) const;
     void     build_filament_M_matrix();
     void     precompute_M_cc();
     bool     is_stage_within_range(int stage_idx) const;
-    void     extinguish_quiet_stages();
-    double   compute_force(const MultiStageState& s);
-    void     update_temperatures(MultiStageState& s, double dt_sub);
-    void     check_triggers();
-    void     record_step();
+    double   compute_force(const MultiStageState& state,
+                           const Eigen::MatrixXd& mutual_gradient,
+                           const std::vector<StageRuntimeState>& stages) const;
+    void     record_step(double post_time);
     bool     check_all_finished() const;
     bool     check_termination(const TerminationPolicy& policy);
     void     prepare_summary();
-    void     build_system_matrix(const MultiStageState& s);
 
     int n_stages_;
 
@@ -159,10 +153,6 @@ private:
 
     std::vector<std::unique_ptr<Excitation>> excitations_;
     std::vector<TriggerConfig> trigger_configs_;
-    std::vector<bool> triggered_;
-    std::vector<bool> finished_;
-    std::vector<double> trigger_times_;
-    std::vector<double> trigger_positions_;
     std::vector<double> initial_stage_energies_;
 
     double dt_;
@@ -177,17 +167,13 @@ private:
 
     Eigen::VectorXd L_fil_;        // [N_fil]
     Eigen::VectorXd R_fil_ref_;    // [N_fil]
-    Eigen::VectorXd R_fil_;        // [N_fil]
     Eigen::VectorXd mass_fil_;     // [N_fil]
     Eigen::MatrixXd M_mat_;        // [N_fil x N_fil], inter-filament mutual
 
-    Eigen::MatrixXd M1_mat_;       // [n_stages x N_fil], coil<->filament M
-    Eigen::MatrixXd dM1_mat_;      // [n_stages x N_fil], coil<->filament dM/dx
-
-    Eigen::MatrixXd L_total_;      // [(n_stages+N_fil) x (n_stages+N_fil)]
-    Eigen::VectorXd RHS_;          // [n_stages + N_fil]
-
-    MultiStageState  state_;
+    IntegrationState integration_state_;
+    IntegrationState initial_integration_state_;
+    DerivativeWorkspace workspace_;
+    Eigen::VectorXd pre_step_mutual_gradient_;
     MultiStageResult result_;
     int              step_count_ = 0;
     StepperPolicy    stepper_;

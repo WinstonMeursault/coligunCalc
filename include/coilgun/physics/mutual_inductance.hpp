@@ -16,6 +16,9 @@ namespace coilgun::physics {
  * @return Mutual inductance, H.
  *
  * Closed-form via complete elliptic integrals.
+ * The default overload bypasses the process-global LRU and is safe for
+ * parallel hot paths. Passing @c use_cache=true opts into a non-thread-safe
+ * shared cache and requires external synchronization.
  * NumericalModel Sec. 4.2, Eq. (4.8).
  */
 double mutual_inductance_filament(double radius_a, double radius_b,

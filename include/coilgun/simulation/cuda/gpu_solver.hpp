@@ -41,6 +41,23 @@ struct SolverWorkspace {
     std::size_t dimension_capacity = 0;
 };
 
+struct DeviceMatrixView {
+    double* data = nullptr;
+    std::size_t batch_size = 0;
+    std::size_t dimension = 0;
+};
+
+struct DeviceVectorView {
+    double* data = nullptr;
+    std::size_t batch_size = 0;
+    std::size_t dimension = 0;
+};
+
+struct DeviceResidualView {
+    double* values = nullptr;
+    std::size_t count = 0;
+};
+
 struct SolverStatus {
     bool ok = false;
     SolverFailure failure = SolverFailure::None;
@@ -84,6 +101,11 @@ public:
     SolverStatus solve_batch(const double* matrices,
                              const double* rhs,
                              double* solutions);
+    SolverStatus solve_device(const DeviceMatrixView& matrix,
+                              const DeviceVectorView& rhs,
+                              DeviceVectorView solution,
+                              DeviceResidualView residual = {});
+    SolverStatus validate_device_result(DeviceResidualView residual);
 
     SolverStatus check_residual(const double* matrix,
                                 const double* rhs,

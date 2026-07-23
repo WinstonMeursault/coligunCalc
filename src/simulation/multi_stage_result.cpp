@@ -6,9 +6,12 @@
 
 #include "coilgun/simulation/multi_stage_result.hpp"
 
+#include <stdexcept>
+
 namespace coilgun::simulation {
 
 MultiStageResult MultiStageResult::sampled(int every_n) const {
+    if (every_n <= 0) throw std::invalid_argument("every_n must be positive");
     MultiStageResult r;
     r.summary = summary;
     r.history.reserve(history.size() / static_cast<std::size_t>(every_n) + 1);

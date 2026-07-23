@@ -12,6 +12,7 @@
  */
 
 #include "coilgun/physics/self_inductance.hpp"
+#include "coilgun/tools/t_table_workers.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -134,14 +135,15 @@ int main(int argc, char** argv) {
         ? argv[1]
         : "include/coilgun/physics/lookup_table_data.hpp";
 
-    const int n_threads = std::max(1u, std::thread::hardware_concurrency() - 4);
+    const unsigned int n_threads = coilgun::tools::t_table_worker_count(
+        std::thread::hardware_concurrency());
     std::printf("T(q,p) table generator\n"
                 "  Grid: q[%.2f:%.2f:%.3f] × p[%.2f:%.2f:%.3f]\n"
                 "  Size: %d × %d = %d entries\n"
                 "  Threads: %d\n"
                 "  Output: %s\n\n",
                 k_q_min, k_q_max, k_dq, k_p_min, k_p_max, k_dp,
-                k_nq, k_np, k_total, n_threads, out_path.c_str());
+                 k_nq, k_np, k_total, static_cast<int>(n_threads), out_path.c_str());
 
     std::vector<double> table(k_total, 0.0);
 
@@ -149,8 +151,9 @@ int main(int argc, char** argv) {
 
     std::vector<std::thread> threads;
     threads.reserve(n_threads);
-    for (int t = 0; t < n_threads; ++t) {
-        threads.emplace_back(worker_thread, std::ref(table), t, n_threads);
+    for (unsigned int t = 0; t < n_threads; ++t) {
+        threads.emplace_back(worker_thread, std::ref(table), static_cast<int>(t),
+                             static_cast<int>(n_threads));
     }
     for (auto& t : threads) t.join();
 

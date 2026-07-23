@@ -187,7 +187,8 @@ SimBatch<SP>::SimBatch(std::vector<components::DrivingCoil> coils,
     sims_.resize(static_cast<std::size_t>(num_sims_));
     for (auto& sim : sims_) {
         sim.triggered.assign(static_cast<std::size_t>(n_stages_), false);
-        sim.finished.assign(static_cast<std::size_t>(n_stages_), false);
+        sim.excitation_finished.assign(static_cast<std::size_t>(n_stages_), false);
+        sim.stage_completed.assign(static_cast<std::size_t>(n_stages_), false);
         sim.triggered[0] = true;
         sim.trigger_times.assign(static_cast<std::size_t>(n_stages_), 0.0);
         sim.trigger_positions.assign(static_cast<std::size_t>(n_stages_), armature_.position());
@@ -219,7 +220,8 @@ void SimBatch<SP>::set_excitations(int sim_id,
     sim.excitations = std::move(excitations);
     sim.trigger_configs = std::move(trigger_configs);
     sim.triggered.assign(static_cast<std::size_t>(n_stages_), false);
-    sim.finished.assign(static_cast<std::size_t>(n_stages_), false);
+    sim.excitation_finished.assign(static_cast<std::size_t>(n_stages_), false);
+    sim.stage_completed.assign(static_cast<std::size_t>(n_stages_), false);
     sim.triggered[0] = true;
     sim.trigger_times.assign(static_cast<std::size_t>(n_stages_), 0.0);
     sim.trigger_positions.assign(static_cast<std::size_t>(n_stages_), armature_.position());
@@ -279,10 +281,17 @@ void SimBatch<SP>::check_triggers(SimInstance& sim) {
 template<typename SP>
 void SimBatch<SP>::extinguish_quiet_stages(SimInstance& sim) {
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (!sim.triggered[static_cast<std::size_t>(stage)] || sim.finished[static_cast<std::size_t>(stage)]) continue;
+        if (!sim.triggered[static_cast<std::size_t>(stage)] ||
+            sim.stage_completed[static_cast<std::size_t>(stage)]) continue;
         if (sim.excitations[static_cast<std::size_t>(stage)]->voltage() == 0.0 &&
-            std::abs(sim.state.currents(stage)) < 1e-6)
-            sim.finished[static_cast<std::size_t>(stage)] = true;
+            std::abs(sim.state.currents(stage)) < 1e-6) {
+            sim.excitation_finished[static_cast<std::size_t>(stage)] = true;
+            sim.stage_completed[static_cast<std::size_t>(stage)] = true;
+            sim.state.currents(stage) = 0.0;
+            engine_->complete_stage(
+                static_cast<std::size_t>(&sim - sims_.data()),
+                static_cast<std::size_t>(stage));
+        }
     }
 }
 
@@ -301,7 +310,8 @@ bool SimBatch<SP>::check_termination(SimInstance& sim, const TerminationPolicy& 
     if (sim.step_count >= policy.max_steps) return true;
     bool all_finished = true;
     for (int stage = 0; stage < n_stages_; ++stage) {
-        if (!sim.finished[static_cast<std::size_t>(stage)] && !terminally_ineligible(sim, stage)) {
+        if (!sim.stage_completed[static_cast<std::size_t>(stage)] &&
+            !terminally_ineligible(sim, stage)) {
             all_finished = false;
             break;
         }
@@ -334,15 +344,43 @@ void SimBatch<SP>::configure_engine_boundary() {
         active[b] = sim.active ? 1 : 0;
         for (std::size_t s = 0; s < S; ++s) {
             const auto index = b * S + s;
-            if (!sim.active || !sim.triggered[s] || sim.finished[s]) continue;
-            trigger[index] = 1;
+            trigger[index] = sim.triggered[s] ? 1 : 0;
+            if (!sim.active || !sim.triggered[s] || sim.stage_completed[s]) continue;
             stage[index] = 1;
             mutual[index] = is_stage_within_range(static_cast<int>(s), sim) ? 1 : 0;
-            voltages[index] = sim.excitations[s]->voltage();
+            voltages[index] = sim.excitation_finished[s]
+                ? 0.0 : sim.excitations[s]->voltage();
         }
     }
     engine_->set_step_boundary_state(std::move(active), std::move(trigger), std::move(stage),
                                      std::move(mutual), std::move(voltages));
+
+    std::vector<std::uint8_t> trigger_modes(B * S, 0);
+    std::vector<double> trigger_values(B * S, INFINITY);
+    std::vector<std::uint8_t> excitation_finished(B * S, 0);
+    std::vector<std::uint8_t> stage_completed(B * S, 0);
+    std::vector<double> trigger_times(B * S, 0.0);
+    std::vector<double> trigger_positions(B * S, armature_.position());
+    std::vector<double> position_offsets(B, armature_.position());
+    for (std::size_t b = 0; b < B; ++b) {
+        const auto& sim = sims_[b];
+        for (std::size_t s = 0; s < S; ++s) {
+            const auto index = b * S + s;
+            excitation_finished[index] = sim.excitation_finished[s] ? 1 : 0;
+            stage_completed[index] = sim.stage_completed[s] ? 1 : 0;
+            trigger_times[index] = sim.trigger_times[s];
+            trigger_positions[index] = sim.trigger_positions[s];
+            if (s == 0) continue;
+            const auto& config = sim.trigger_configs[s - 1];
+            trigger_modes[index] = config.mode == TriggerMode::Position ? 1 : 2;
+            trigger_values[index] = config.value;
+        }
+    }
+    engine_->set_control_boundary_state(
+        std::move(trigger_modes), std::move(trigger_values),
+        std::move(excitation_finished), std::move(stage_completed),
+        std::move(trigger_times), std::move(trigger_positions),
+        std::move(position_offsets));
 }
 
 template<typename SP>
@@ -354,7 +392,7 @@ std::vector<double> SimBatch<SP>::compute_stage_forces(std::size_t sim_id,
     std::vector<double> forces(S, 0.0);
     const auto& sim = sims_[sim_id];
     for (std::size_t s = 0; s < S; ++s) {
-        if (!sim.triggered[s] || sim.finished[s]) continue;
+        if (!sim.triggered[s] || sim.stage_completed[s]) continue;
         for (std::size_t f = 0; f < F; ++f)
             forces[s] -= currents[sim_id * D + s] * currents[sim_id * D + S + f] *
                          gradients[(sim_id * S + s) * F + f];
@@ -447,18 +485,49 @@ void SimBatch<SP>::run(const TerminationPolicy& policy) {
                 else any_active = true;
             }
             if (!any_active) break;
-            for (auto& sim : sims_) if (sim.active) { check_triggers(sim); extinguish_quiet_stages(sim); }
+            for (auto& sim : sims_) {
+                if (!sim.active) continue;
+                if (engine_->report().backend == BackendMode::Fallback) check_triggers(sim);
+                extinguish_quiet_stages(sim);
+            }
             configure_engine_boundary();
+            std::vector<std::uint8_t> stepped(sims_.size(), 0);
+            for (std::size_t b = 0; b < sims_.size(); ++b)
+                stepped[b] = sims_[b].active ? 1 : 0;
+            const auto pre_step_currents = engine_->state().currents;
             engine_->step();
             const auto boundary_gradients = engine_->state().dm1;
             sync_states_from_engine();
+            if (engine_->report().backend != BackendMode::Fallback) {
+                const auto& engine_state = engine_->state();
+                for (std::size_t b = 0; b < sims_.size(); ++b) {
+                    auto& sim = sims_[b];
+                    sim.active = engine_state.active_mask[b] != 0;
+                    for (std::size_t s = 0; s < static_cast<std::size_t>(n_stages_); ++s) {
+                        const auto index = b * static_cast<std::size_t>(n_stages_) + s;
+                        sim.triggered[s] = engine_state.trigger_mask[index] != 0;
+                        sim.stage_completed[s] = engine_state.stage_completed[index] != 0;
+                        sim.trigger_times[s] = engine_state.trigger_times[index];
+                        sim.trigger_positions[s] = engine_state.trigger_positions[index];
+                    }
+                }
+            }
             for (std::size_t b = 0; b < sims_.size(); ++b) {
                 auto& sim = sims_[b];
-                if (!sim.active) continue;
+                if (stepped[b] == 0) continue;
                 for (std::size_t s = 0; s < static_cast<std::size_t>(n_stages_); ++s) {
-                    if (sim.triggered[s] && !sim.finished[s]) {
-                        sim.excitations[s]->advance(dt_, sim.state.currents(static_cast<Eigen::Index>(s)));
-                        if (sim.excitations[s]->finished()) sim.finished[s] = true;
+                    if (sim.triggered[s] && !sim.excitation_finished[s]) {
+                        const auto dimension = static_cast<std::size_t>(n_stages_ + N_fil_);
+                        sim.excitations[s]->advance(
+                            dt_, pre_step_currents[b * dimension + s]);
+                        if (sim.excitations[s]->finished())
+                            sim.excitation_finished[s] = true;
+                    }
+                    if (sim.triggered[s] && sim.excitation_finished[s] &&
+                        std::abs(sim.state.currents(static_cast<Eigen::Index>(s))) < 1e-6) {
+                        sim.stage_completed[s] = true;
+                        sim.state.currents(static_cast<Eigen::Index>(s)) = 0.0;
+                        engine_->complete_stage(b, s);
                     }
                 }
                 // The engine used pre-step currents for physical acceleration.

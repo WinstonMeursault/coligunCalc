@@ -597,7 +597,8 @@ TEST_CASE("GPU single-stage Full and Aggressive apply the canonical distant mutu
     constexpr double dt = 1e-6;
     constexpr double distant_coil_position = 1.0;
 
-    auto make_sim = [](GpuOptLevel opt_level, BackendMode backend_mode) {
+    auto make_sim = [distant_coil_position](GpuOptLevel opt_level,
+                                             BackendMode backend_mode) {
         DrivingCoil coil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref,
                          1e-6, 0.7, distant_coil_position);
         Armature arm(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref,
@@ -740,6 +741,8 @@ TEST_CASE("GPU single-stage thermal state and reset remain wrapper-compatible") 
     static_assert(std::is_same_v<decltype(sim.filament_resistances()), std::vector<double>>);
     sim.step();
     REQUIRE(sim.state().filament_temperatures.size() == arm.total_filaments());
+    REQUIRE(sim.state().filament_temperatures(0) == doctest::Approx(T_REFERENCE));
+    sim.step();
     REQUIRE(sim.state().filament_temperatures(0) > T_REFERENCE);
     REQUIRE(sim.filament_resistances().size() == static_cast<std::size_t>(arm.total_filaments()));
     REQUIRE(sim.filament_resistances()[0] > arm.resistances()[0]);

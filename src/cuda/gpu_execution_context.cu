@@ -4,6 +4,7 @@
  */
 
 #include "coilgun/simulation/cuda/gpu_execution_context.hpp"
+#include "coilgun/simulation/cuda/gpu_mutual_pipeline.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -122,6 +123,7 @@ struct GpuExecutionContext::Impl {
     cusolverDnHandle_t cusolver = nullptr;
     void* workspace = nullptr;
     std::size_t workspace_bytes = 0;
+    bool quadrature9_loaded = false;
 };
 
 GpuExecutionContext::GpuExecutionContext(GpuExecutionContextConfig config)
@@ -144,6 +146,16 @@ std::size_t GpuExecutionContext::workspace_bytes() const noexcept { return impl_
 void GpuExecutionContext::synchronize() const { if (!impl_) throw std::logic_error("moved-from GPU context"); ScopedDevice device(impl_->device_id); check_cuda(cudaStreamSynchronize(impl_->stream), "cudaStreamSynchronize"); }
 void GpuExecutionContext::record_start() const { if (!impl_) throw std::logic_error("moved-from GPU context"); ScopedDevice device(impl_->device_id); check_cuda(cudaEventRecord(impl_->start_event, impl_->stream), "cudaEventRecord(start)"); }
 void GpuExecutionContext::record_stop() const { if (!impl_) throw std::logic_error("moved-from GPU context"); ScopedDevice device(impl_->device_id); check_cuda(cudaEventRecord(impl_->stop_event, impl_->stream), "cudaEventRecord(stop)"); }
+void GpuExecutionContext::ensure_quadrature9_loaded() {
+    if (!impl_) throw std::logic_error("moved-from GPU context");
+    if (impl_->quadrature9_loaded) return;
+    ScopedDevice device(impl_->device_id);
+    initialize_mutual_pipeline_constants(impl_->stream);
+    impl_->quadrature9_loaded = true;
+}
+bool GpuExecutionContext::quadrature9_loaded() const noexcept {
+    return impl_ && impl_->quadrature9_loaded;
+}
 
 } // namespace coilgun::simulation::cuda
 

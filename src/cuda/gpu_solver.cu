@@ -40,6 +40,27 @@ struct DeviceGuard {
     ~DeviceGuard() noexcept { if (previous >= 0 && previous != target) (void)cudaSetDevice(previous); }
     int target; int previous = -1;
 };
+
+__global__ void residual_kernel(const double* matrices, const double* rhs,
+                                const double* solutions, double* residuals,
+                                std::size_t batch_size, std::size_t dimension) {
+    const std::size_t batch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (batch >= batch_size) return;
+
+    const double* matrix = matrices + batch * dimension * dimension;
+    const double* vector = rhs + batch * dimension;
+    const double* solution = solutions + batch * dimension;
+    double maximum = 0.0;
+    double scale = 1.0;
+    for (std::size_t row = 0; row < dimension; ++row) {
+        double reconstructed = 0.0;
+        for (std::size_t column = 0; column < dimension; ++column)
+            reconstructed += matrix[row * dimension + column] * solution[column];
+        maximum = fmax(maximum, fabs(reconstructed - vector[row]));
+        scale = fmax(scale, fabs(vector[row]));
+    }
+    residuals[batch] = maximum / scale;
+}
 }
 
 struct GpuSolver::Impl {
@@ -64,6 +85,7 @@ struct GpuSolver::Impl {
     std::vector<double*> rhs_ptrs;
     std::vector<int> info;
     std::vector<int> solve_info;
+    std::vector<double> residuals;
 
     ~Impl() { release(); }
     void release() noexcept {
@@ -132,7 +154,7 @@ SolverStatus GpuSolver::initialize_workspace(const SolverBatchLayout& requested_
             alloc(reinterpret_cast<void**>(&impl_->d_info), B * sizeof(int)) != cudaSuccess) {
             impl_->release(); return SolverStatus::failure_status(SolverFailure::InvalidArgument, "CUDA workspace allocation failed");
         }
-        impl_->matrices.resize(B); impl_->rhs_ptrs.resize(B); impl_->info.resize(B); impl_->solve_info.resize(B); impl_->column_major.resize(matrix_count);
+        impl_->matrices.resize(B); impl_->rhs_ptrs.resize(B); impl_->info.resize(B); impl_->solve_info.resize(B); impl_->residuals.resize(B); impl_->column_major.resize(matrix_count);
         for (std::size_t b = 0; b < B; ++b) { impl_->matrices[b] = impl_->d_matrix + b * D * D; impl_->rhs_ptrs[b] = impl_->d_rhs + b * D; }
         if (cudaMemcpy(impl_->d_matrix_ptrs, impl_->matrices.data(), B * sizeof(double*), cudaMemcpyHostToDevice) != cudaSuccess ||
             cudaMemcpy(impl_->d_rhs_ptrs, impl_->rhs_ptrs.data(), B * sizeof(double*), cudaMemcpyHostToDevice) != cudaSuccess) {
@@ -204,6 +226,150 @@ SolverStatus GpuSolver::solve_batch(const double* matrices, const double* rhs, d
     for (std::size_t b = 0; b < B; ++b) { if (!finite_values(solutions + b * D, D)) { auto s = SolverStatus::failure_status(SolverFailure::NonFiniteOutput, "cuSOLVER produced a non-finite solution"); s.failed_batch = static_cast<int>(b); return s; } auto s = check_residual(matrices + b * D * D, rhs + b * D, solutions + b * D); if (!s.ok) { s.failed_batch = static_cast<int>(b); return s; } }
     } catch (const std::exception& error) { return SolverStatus::failure_status(SolverFailure::InvalidArgument, error.what()); }
     return SolverStatus::success();
+}
+
+SolverStatus GpuSolver::solve_device(const DeviceMatrixView& matrix,
+                                     const DeviceVectorView& rhs,
+                                     DeviceVectorView solution,
+                                     DeviceResidualView residual) {
+    if (!impl_ || !impl_->workspace.initialized)
+        return SolverStatus::failure_status(SolverFailure::NotInitialized,
+                                            "solver workspace has not been initialized");
+    const auto B = layout().batch_size;
+    const auto D = layout().dimension;
+    if (impl_->resolved != SolverMode::Batched || !impl_->context)
+        return SolverStatus::failure_status(SolverFailure::UnsupportedMode,
+                                            "device solve requires batched CUDA solver mode");
+    if (!matrix.data || !rhs.data || !solution.data || matrix.batch_size != B ||
+        rhs.batch_size != B || solution.batch_size != B || matrix.dimension != D ||
+        rhs.dimension != D || solution.dimension != D ||
+        (residual.values != nullptr && residual.count != B))
+        return SolverStatus::failure_status(SolverFailure::LayoutMismatch,
+                                            "device solver views do not match configured layout");
+    try {
+        DeviceGuard guard(impl_->context->device_id());
+        double maximum_residual = 0.0;
+        if (cudaMemcpyAsync(impl_->d_matrix, matrix.data, B * D * D * sizeof(double),
+                            cudaMemcpyDeviceToDevice, impl_->context->stream()) != cudaSuccess ||
+            cudaMemcpyAsync(impl_->d_rhs, rhs.data, B * D * sizeof(double),
+                            cudaMemcpyDeviceToDevice, impl_->context->stream()) != cudaSuccess)
+            return SolverStatus::failure_status(SolverFailure::InvalidArgument,
+                                                "device solver pointer setup failed");
+        const auto factor = cublasDgetrfBatched(
+            impl_->context->cublas(), static_cast<int>(D), impl_->d_matrix_ptrs,
+            static_cast<int>(D), impl_->d_pivots, impl_->d_info, static_cast<int>(B));
+        if (factor != CUBLAS_STATUS_SUCCESS)
+            return SolverStatus::failure_status(SolverFailure::FactorizationFailed,
+                                                "cublasDgetrfBatched failed for device views");
+        const auto solve = cublasDgetrsBatched(
+            impl_->context->cublas(), CUBLAS_OP_N, static_cast<int>(D), 1,
+            const_cast<const double* const*>(impl_->d_matrix_ptrs), static_cast<int>(D),
+            impl_->d_pivots, impl_->d_rhs_ptrs, static_cast<int>(D),
+            impl_->solve_info.data(), static_cast<int>(B));
+        if (solve != CUBLAS_STATUS_SUCCESS)
+            return SolverStatus::failure_status(SolverFailure::FactorizationFailed,
+                                                "cublasDgetrsBatched failed for device views");
+
+        if (cudaMemcpyAsync(solution.data, impl_->d_rhs, B * D * sizeof(double),
+                            cudaMemcpyDeviceToDevice, impl_->context->stream()) != cudaSuccess)
+            return SolverStatus::failure_status(SolverFailure::InvalidArgument,
+                                                "device solver solution copy failed");
+
+        if (residual.values != nullptr) {
+            residual_kernel<<<static_cast<unsigned int>((B + 127) / 128), 128, 0,
+                              impl_->context->stream()>>>(
+                matrix.data, rhs.data, solution.data, residual.values, B, D);
+            if (cudaGetLastError() != cudaSuccess)
+                return SolverStatus::failure_status(SolverFailure::InvalidArgument,
+                                                    "device residual kernel launch failed");
+        }
+
+        cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+        if (cudaStreamIsCapturing(impl_->context->stream(), &capture_status) != cudaSuccess)
+            return SolverStatus::failure_status(SolverFailure::InvalidArgument,
+                                                "unable to query solver stream capture status");
+        if (capture_status != cudaStreamCaptureStatusNone) return SolverStatus::success();
+        if (cudaMemcpyAsync(impl_->info.data(), impl_->d_info, B * sizeof(int),
+                            cudaMemcpyDeviceToHost, impl_->context->stream()) != cudaSuccess ||
+            (residual.values != nullptr &&
+             cudaMemcpyAsync(impl_->residuals.data(), residual.values, B * sizeof(double),
+                             cudaMemcpyDeviceToHost, impl_->context->stream()) != cudaSuccess) ||
+            cudaStreamSynchronize(impl_->context->stream()) != cudaSuccess)
+            return SolverStatus::failure_status(SolverFailure::InvalidArgument,
+                                                "device solver status synchronization failed");
+        for (std::size_t batch = 0; batch < B; ++batch) {
+            if (impl_->info[batch] != 0 || impl_->solve_info[batch] != 0) {
+                auto status = SolverStatus::failure_status(
+                    SolverFailure::FactorizationFailed,
+                    "device solver factorization failed at batch " + std::to_string(batch));
+                status.failed_batch = static_cast<int>(batch);
+                status.backend_info = impl_->info[batch] != 0
+                    ? impl_->info[batch] : impl_->solve_info[batch];
+                return status;
+            }
+            if (residual.values != nullptr &&
+                (!std::isfinite(impl_->residuals[batch]) || impl_->residuals[batch] > 1.0e-10)) {
+                auto status = SolverStatus::failure_status(
+                    std::isfinite(impl_->residuals[batch])
+                        ? SolverFailure::ResidualTooLarge : SolverFailure::NonFiniteOutput,
+                    "device solver residual check failed at batch " + std::to_string(batch));
+                status.failed_batch = static_cast<int>(batch);
+                status.max_residual = impl_->residuals[batch];
+                return status;
+            }
+            if (residual.values != nullptr)
+                maximum_residual = std::max(maximum_residual, impl_->residuals[batch]);
+        }
+        return SolverStatus::success(maximum_residual);
+    } catch (const std::exception& error) {
+        return SolverStatus::failure_status(SolverFailure::InvalidArgument, error.what());
+    }
+}
+
+SolverStatus GpuSolver::validate_device_result(DeviceResidualView residual) {
+    if (!impl_ || !impl_->workspace.initialized)
+        return SolverStatus::failure_status(SolverFailure::NotInitialized,
+                                            "solver workspace has not been initialized");
+    const auto B = layout().batch_size;
+    if (impl_->resolved != SolverMode::Batched || !impl_->context ||
+        !residual.values || residual.count != B)
+        return SolverStatus::failure_status(SolverFailure::LayoutMismatch,
+                                            "device solver status view does not match layout");
+    try {
+        DeviceGuard guard(impl_->context->device_id());
+        if (cudaMemcpyAsync(impl_->info.data(), impl_->d_info, B * sizeof(int),
+                            cudaMemcpyDeviceToHost, impl_->context->stream()) != cudaSuccess ||
+            cudaMemcpyAsync(impl_->residuals.data(), residual.values, B * sizeof(double),
+                            cudaMemcpyDeviceToHost, impl_->context->stream()) != cudaSuccess ||
+            cudaStreamSynchronize(impl_->context->stream()) != cudaSuccess)
+            return SolverStatus::failure_status(SolverFailure::InvalidArgument,
+                                                "device solver status synchronization failed");
+        double maximum_residual = 0.0;
+        for (std::size_t batch = 0; batch < B; ++batch) {
+            if (impl_->info[batch] != 0 || impl_->solve_info[batch] != 0) {
+                auto status = SolverStatus::failure_status(
+                    SolverFailure::FactorizationFailed,
+                    "device solver factorization failed at batch " + std::to_string(batch));
+                status.failed_batch = static_cast<int>(batch);
+                status.backend_info = impl_->info[batch] != 0
+                    ? impl_->info[batch] : impl_->solve_info[batch];
+                return status;
+            }
+            if (!std::isfinite(impl_->residuals[batch]) || impl_->residuals[batch] > 1.0e-10) {
+                auto status = SolverStatus::failure_status(
+                    std::isfinite(impl_->residuals[batch])
+                        ? SolverFailure::ResidualTooLarge : SolverFailure::NonFiniteOutput,
+                    "device solver residual check failed at batch " + std::to_string(batch));
+                status.failed_batch = static_cast<int>(batch);
+                status.max_residual = impl_->residuals[batch];
+                return status;
+            }
+            maximum_residual = std::max(maximum_residual, impl_->residuals[batch]);
+        }
+        return SolverStatus::success(maximum_residual);
+    } catch (const std::exception& error) {
+        return SolverStatus::failure_status(SolverFailure::InvalidArgument, error.what());
+    }
 }
 
 SolverStatus GpuSolver::check_residual(const double* m, const double* r, const double* x) const {

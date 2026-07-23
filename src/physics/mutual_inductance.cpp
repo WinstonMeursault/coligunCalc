@@ -52,25 +52,7 @@ constexpr double k_max = 1.0 - 1e-12;
 
 double mutual_inductance_filament(double radius_a, double radius_b,
                                   double separation) {
-    auto key = std::make_tuple(radius_a, radius_b, separation);
-
-    double cached;
-    if (m_cache.get(key, cached)) {
-        return cached;
-    }
-
-    double k = elliptic_modulus(radius_a, radius_b, separation);
-    k = std::clamp(k, k_min, k_max);
-
-    double m = k * k;
-    double K = elliptic_k(m);
-    double E = elliptic_e(m);
-
-    double sqrt_ab = std::sqrt(radius_a * radius_b);
-    double result = MU0 * sqrt_ab * ((2.0 / k - k) * K - (2.0 / k) * E);
-
-    m_cache.put(key, result);
-    return result;
+    return mutual_inductance_filament(radius_a, radius_b, separation, false);
 }
 
 double mutual_inductance_filament(double radius_a, double radius_b,
@@ -102,36 +84,7 @@ double mutual_inductance_filament(double radius_a, double radius_b,
 
 double mutual_inductance_gradient_filament(double radius_a, double radius_b,
                                            double separation) {
-    auto key = std::make_tuple(radius_a, radius_b, separation);
-
-    double cached;
-    if (grad_cache.get(key, cached)) {
-        return cached;
-    }
-
-    if (std::abs(separation) < 1e-16) {
-        grad_cache.put(key, 0.0);
-        return 0.0;
-    }
-
-    double k = elliptic_modulus(radius_a, radius_b, std::abs(separation));
-    k = std::clamp(k, k_min, k_max);
-
-    double m = k * k;
-    double one_minus_m = 1.0 - m;
-    double K = elliptic_k(m);
-    double E = elliptic_e(m);
-
-    double sqrt_m = k;
-    double sqrt_ab = std::sqrt(radius_a * radius_b);
-
-    double bracket = 2.0 * one_minus_m * K - (2.0 - m) * E;
-    double sign = (separation > 0.0) ? 1.0 : -1.0;
-    double result = sign * MU0 * sqrt_m * std::abs(separation)
-                    / (4.0 * one_minus_m * sqrt_ab) * bracket;
-
-    grad_cache.put(key, result);
-    return result;
+    return mutual_inductance_gradient_filament(radius_a, radius_b, separation, false);
 }
 
 double mutual_inductance_gradient_filament(double radius_a, double radius_b,
@@ -214,25 +167,8 @@ double integrate_4d(const F& integrand, int n_nodes = 9) {
 double mutual_inductance_coil(double rai, double rae, double la, int na,
                                double rbi, double rbe, double lb, int nb,
                                double separation, int n_nodes) {
-    const double ra_mid = 0.5 * (rae + rai);
-    const double ra_half = 0.5 * (rae - rai);
-    const double rb_mid = 0.5 * (rbe + rbi);
-    const double rb_half = 0.5 * (rbe - rbi);
-    const double la_half = 0.5 * la;
-    const double lb_half = 0.5 * lb;
-
-    // Prefactor (Na * Nb / 16) per NumericalModel Eq.4.13.
-    // The coordinate Jacobian is absorbed into this factor.
-
-    auto kernel = [&](double r1, double z1, double r2, double z2) -> double {
-        const double ra = map_coord(ra_mid, ra_half, r1);
-        const double rb = map_coord(rb_mid, rb_half, r2);
-        const double za = map_coord(0.0, la_half, z1);
-        const double zb = map_coord(separation, lb_half, z2);
-        return mutual_inductance_filament(ra, rb, std::abs(zb - za));
-    };
-
-    return (na * nb / 16.0) * integrate_4d(kernel, n_nodes);
+    return mutual_inductance_coil(rai, rae, la, na, rbi, rbe, lb, nb,
+                                  separation, n_nodes, false);
 }
 
 double mutual_inductance_coil(double rai, double rae, double la, int na,
@@ -260,22 +196,8 @@ double mutual_inductance_gradient_coil(double rai, double rae, double la,
                                         int na, double rbi, double rbe,
                                         double lb, int nb, double separation,
                                         int n_nodes) {
-    const double ra_mid = 0.5 * (rae + rai);
-    const double ra_half = 0.5 * (rae - rai);
-    const double rb_mid = 0.5 * (rbe + rbi);
-    const double rb_half = 0.5 * (rbe - rbi);
-    const double la_half = 0.5 * la;
-    const double lb_half = 0.5 * lb;
-
-    auto kernel = [&](double r1, double z1, double r2, double z2) -> double {
-        const double ra = map_coord(ra_mid, ra_half, r1);
-        const double rb = map_coord(rb_mid, rb_half, r2);
-        const double za = map_coord(0.0, la_half, z1);
-        const double zb = map_coord(separation, lb_half, z2);
-        return mutual_inductance_gradient_filament(ra, rb, zb - za);
-    };
-
-    return (na * nb / 16.0) * integrate_4d(kernel, n_nodes);
+    return mutual_inductance_gradient_coil(rai, rae, la, na, rbi, rbe, lb, nb,
+                                           separation, n_nodes, false);
 }
 
 double mutual_inductance_gradient_coil(double rai, double rae, double la,

@@ -12,6 +12,7 @@ add_library(coilgun STATIC
   simulation/sim_result.cpp
   simulation/termination.cpp
   simulation/excitation.cpp
+  simulation/integration_state.cpp
   simulation/single_stage_sim.cpp
   simulation/multi_stage_result.cpp
   simulation/multi_stage_sim.cpp

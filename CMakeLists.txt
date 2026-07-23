@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(coilgunCalc VERSION 2.0.0 LANGUAGES CXX C)
+project(coilgunCalc VERSION 3.0.0 LANGUAGES CXX C)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -47,7 +47,7 @@ target_link_libraries(coilgun PUBLIC OpenMP::OpenMP_CXX)
 option(COILGUN_ENABLE_CUDA "Build GPU-accelerated backend" OFF)
 if(COILGUN_ENABLE_CUDA)
     enable_language(CUDA)
-    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "Target CUDA architectures")
     find_package(CUDAToolkit REQUIRED COMPONENTS cublas cusolver)
@@ -63,6 +63,7 @@ endif()
 
 # --- Table generator (optional) ---
 option(COILGUN_BUILD_GENERATOR "Build T(q,p) table generator" OFF)
+option(COILGUN_BUILD_GENERATOR_TESTS "Build T(q,p) generator unit tests" OFF)
 if(COILGUN_BUILD_GENERATOR)
   add_executable(generate_t_table tools/generate_t_table.cpp)
   target_link_libraries(generate_t_table PRIVATE coilgun)

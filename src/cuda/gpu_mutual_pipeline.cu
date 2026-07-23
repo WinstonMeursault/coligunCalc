@@ -164,8 +164,8 @@ void launch_mutual_pipeline(const MutualPipelineView& view, GpuOptLevel opt_leve
         || view.batch_size > 0x7fffffff || view.stage_count > 0x7fffffff
         || view.filament_count > 0x7fffffff)
         throw std::invalid_argument("invalid mutual pipeline dimensions");
-    if (view.n_nodes < 1 || view.n_nodes > 9)
-        throw std::invalid_argument("mutual pipeline supports 1..9 GL nodes");
+    if (view.n_nodes != 9)
+        throw std::invalid_argument("CUDA mutual pipeline requires n_nodes == 9");
     if (threads_per_block <= 0 || threads_per_block > 512 ||
         (threads_per_block & (threads_per_block - 1)) != 0)
         throw std::invalid_argument("threads_per_block must be a positive power of two no greater than 512");
@@ -188,21 +188,6 @@ void launch_mutual_pipeline(const MutualPipelineView& view, GpuOptLevel opt_leve
         view.batch_size > static_cast<std::size_t>(properties.maxGridSize[2]))
         throw std::invalid_argument("mutual pipeline grid exceeds device limits");
 
-    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
-    const auto capture_query = cudaStreamIsCapturing(stream, &capture_status);
-    if (capture_query != cudaSuccess)
-        throw std::runtime_error("CUDA stream capture status query failed");
-    if (capture_status == cudaStreamCaptureStatusNone) {
-        const auto& gl = physics::gauss_legendre(view.n_nodes);
-        const auto nodes_copy = cudaMemcpyToSymbolAsync(pipeline_gl_nodes, gl.nodes.data(),
-                                view.n_nodes * sizeof(double), 0,
-                                cudaMemcpyHostToDevice, stream);
-        const auto weights_copy = cudaMemcpyToSymbolAsync(pipeline_gl_weights, gl.weights.data(),
-                                view.n_nodes * sizeof(double), 0,
-                                cudaMemcpyHostToDevice, stream);
-        if (nodes_copy != cudaSuccess || weights_copy != cudaSuccess)
-            throw std::runtime_error("Gauss-Legendre constant upload failed");
-    }
     const dim3 grid(static_cast<unsigned>(view.filament_count),
                     static_cast<unsigned>(view.stage_count),
                     static_cast<unsigned>(view.batch_size));
@@ -219,6 +204,24 @@ void launch_mutual_pipeline(const MutualPipelineView& view, GpuOptLevel opt_leve
     default:
         throw std::invalid_argument("unknown GPU optimization level");
     }
+}
+
+void initialize_mutual_pipeline_constants(cudaStream_t stream) {
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    const auto capture_query = cudaStreamIsCapturing(stream, &capture_status);
+    if (capture_query != cudaSuccess)
+        throw std::runtime_error("CUDA stream capture status query failed");
+    if (capture_status != cudaStreamCaptureStatusNone)
+        throw std::invalid_argument("quadrature constants must be initialized before graph capture");
+    const auto& quadrature = physics::gauss_legendre(9);
+    const auto nodes = cudaMemcpyToSymbolAsync(
+        pipeline_gl_nodes, quadrature.nodes.data(), 9 * sizeof(double), 0,
+        cudaMemcpyHostToDevice, stream);
+    const auto weights = cudaMemcpyToSymbolAsync(
+        pipeline_gl_weights, quadrature.weights.data(), 9 * sizeof(double), 0,
+        cudaMemcpyHostToDevice, stream);
+    if (nodes != cudaSuccess || weights != cudaSuccess)
+        throw std::runtime_error("Gauss-Legendre constant upload failed");
 }
 
 std::size_t mutual_pipeline_index(std::size_t simulation, std::size_t stage,
