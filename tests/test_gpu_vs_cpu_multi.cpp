@@ -35,6 +35,7 @@ using coilgun::simulation::cuda::GpuOptLevel;
 using coilgun::simulation::cuda::BackendMode;
 using coilgun::simulation::cuda::ExecutionReport;
 using coilgun::simulation::cuda::ThermalMode;
+using coilgun::simulation::cuda::SolverMode;
 
 namespace {
 
@@ -105,6 +106,30 @@ TEST_CASE("GPU multi-stage primary muzzle velocity comparison requires CUDA" *
     REQUIRE(report.backend == BackendMode::Direct);
     CHECK(gpu_test::numerically_equal(v_gpu, v_cpu,
                                       gpu_test::tolerance_for(GpuOptLevel::Standard)));
+}
+
+TEST_CASE("GPU multi-stage forwards Auto solver selection for large workloads" *
+          doctest::skip(!coilgun::simulation::cuda::cuda_device_available())) {
+    std::vector<DrivingCoil> coils{
+        DrivingCoil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7, 0.015),
+        DrivingCoil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7, 0.085)};
+    Armature armature(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref,
+                      ALUMINUM.density, 0.0, 0.120, 1, 126, 0.0);
+    std::vector<std::unique_ptr<coilgun::simulation::Excitation>> excitations;
+    excitations.push_back(std::make_unique<CrowbarExcitation>(480.0, 0.001));
+    excitations.push_back(std::make_unique<CrowbarExcitation>(320.0, 0.001));
+    GpuBackend backend;
+    backend.backend = BackendMode::Direct;
+    backend.use_persistent = false;
+    GpuMultiStageSim<EulerStepper> sim(
+        std::move(coils), armature, std::move(excitations),
+        {{TriggerMode::TimeDelay, 100e-6}}, 1e-6, false, GpuOptLevel::Full, backend);
+
+    CHECK(sim.execution_report().requested_solver == SolverMode::Auto);
+    CHECK(sim.execution_report().solver == SolverMode::Batched);
+    sim.step();
+    REQUIRE(sim.execution_report().gpu_executed);
+    CHECK(sim.execution_report().solver == SolverMode::Batched);
 }
 
 TEST_CASE("GPU multi-stage explicit backend overrides use_persistent") {
@@ -1189,10 +1214,12 @@ TEST_CASE("GPU multi-stage reset deterministically replays the first step") {
     const auto first = sim.result().history.front();
     sim.step();
     const auto report = sim.execution_report();
+    const auto history_capacity = sim.result().history.capacity();
     sim.reset();
     sim.step();
 
     REQUIRE(sim.result().history.size() == 1);
+    CHECK(sim.result().history.capacity() >= history_capacity);
     CHECK(sim.result().history.front().state.time == doctest::Approx(first.state.time));
     CHECK(sim.result().history.front().state.force == doctest::Approx(first.state.force));
     CHECK(sim.state().currents(0) ==

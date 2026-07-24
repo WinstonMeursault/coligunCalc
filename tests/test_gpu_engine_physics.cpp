@@ -73,6 +73,53 @@ TEST_CASE("engine assembles coupled circuit derivatives and advances position-de
     CHECK(std::abs(engine.state().m1[0] - first_mutual) > 1.0e-9);
 }
 
+TEST_CASE("CPU fallback stores fused mutual pair values for every active pair") {
+    auto geometry = physics_geometry();
+    geometry.n_filaments = 2;
+    geometry.filament_geometry = {0.03, 0.032};
+    geometry.filament_inner_radii = {0.029, 0.031};
+    geometry.filament_outer_radii = {0.031, 0.033};
+    geometry.filament_lengths = {0.01, 0.012};
+    geometry.filament_positions = {0.04, 0.06};
+    geometry.filament_resistances = {0.5, 0.6};
+    geometry.filament_inductances = {1.5, 1.6};
+    geometry.filament_mutual_inductances = {0.0, 0.1, 0.1, 0.0};
+
+    GpuEngineState state;
+    state.currents.assign(4, 0.0);
+    state.m1.assign(4, 0.0);
+    state.dm1.assign(4, 0.0);
+    state.stage_voltages = {10.0, 10.0};
+    state.active_mask = {1};
+    state.trigger_mask = {1, 1};
+    state.velocity = {0.0};
+    state.position = {0.0};
+    state.dt = 1.0e-5;
+    state.mass = 1.0;
+
+    GpuExecutionConfig config;
+    config.backend = BackendMode::Fallback;
+    config.solver = SolverMode::Eigen;
+
+    GpuEngine engine(geometry, state, config);
+    engine.step();
+
+    for (std::size_t stage = 0; stage < geometry.n_stages; ++stage) {
+        for (std::size_t filament = 0; filament < geometry.n_filaments; ++filament) {
+            const double separation = geometry.stage_positions[stage] -
+                (geometry.filament_positions[filament] - engine.state().position[0]);
+            const auto expected = coilgun::physics::mutual_detail::mutual_inductance_coil_pair(
+                geometry.stage_inner_radii[stage], geometry.stage_outer_radii[stage],
+                geometry.stage_lengths[stage], geometry.stage_turns[stage],
+                geometry.filament_inner_radii[filament], geometry.filament_outer_radii[filament],
+                geometry.filament_lengths[filament], 1, separation, 9, true);
+            const auto pair = stage * geometry.n_filaments + filament;
+            CHECK(engine.state().m1[pair] == doctest::Approx(expected.mutual));
+            CHECK(engine.state().dm1[pair] == doctest::Approx(expected.gradient));
+        }
+    }
+}
+
 TEST_CASE("engine stage mutual coupling changes the solved derivative") {
     auto coupled_geometry = physics_geometry();
     auto uncoupled_geometry = coupled_geometry;

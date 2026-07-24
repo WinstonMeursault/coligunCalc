@@ -15,12 +15,12 @@ function(add_coilgun_test name)
   target_link_libraries(${name} PRIVATE coilgun doctest::doctest)
   target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
   add_test(NAME ${name} COMMAND ${name})
-  set_tests_properties(${name} PROPERTIES LABELS "fast" TIMEOUT 120)
+  set_tests_properties(${name} PROPERTIES LABELS "fast;quick" TIMEOUT 120)
 endfunction()
 
 function(add_validation_test name)
   add_coilgun_test(${name})
-  set_tests_properties(${name} PROPERTIES LABELS "validation" TIMEOUT 120)
+  set_tests_properties(${name} PROPERTIES LABELS "validation;quick;integration" TIMEOUT 120)
 endfunction()
 
 add_coilgun_test(test_elliptic)
@@ -41,11 +41,12 @@ add_coilgun_test(test_gpu_engine_physics)
 add_coilgun_test(test_gpu_thermal_cpu)
 add_coilgun_test(test_simulation_contracts)
 add_coilgun_test(test_input_validation)
+add_coilgun_test(test_cpu_phase_timing)
 add_validation_test(test_coupled_integrator)
 
 if(COILGUN_BUILD_GENERATOR_TESTS)
     add_coilgun_test(test_t_table_generator)
-    set_tests_properties(test_t_table_generator PROPERTIES LABELS "fast" TIMEOUT 30)
+    set_tests_properties(test_t_table_generator PROPERTIES LABELS "fast;quick" TIMEOUT 30)
 endif()
 
 if(COILGUN_ENABLE_CUDA)
@@ -58,7 +59,7 @@ if(COILGUN_ENABLE_CUDA)
         target_link_libraries(${name} PRIVATE coilgun_cuda coilgun doctest::doctest)
         target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
         add_test(NAME ${name} COMMAND ${name})
-        set_tests_properties(${name} PROPERTIES LABELS "gpu" TIMEOUT 300 RESOURCE_LOCK gpu)
+        set_tests_properties(${name} PROPERTIES LABELS "gpu;quick" TIMEOUT 300 RESOURCE_LOCK gpu)
     endfunction()
 
     # Tests using GPU API classes (no kernel launches) — compile with g++.
@@ -69,7 +70,7 @@ if(COILGUN_ENABLE_CUDA)
         target_compile_definitions(${name} PRIVATE EIGEN_MAX_ALIGN_BYTES=32)
         target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/include)
         add_test(NAME ${name} COMMAND ${name})
-        set_tests_properties(${name} PROPERTIES LABELS "gpu" TIMEOUT 300 RESOURCE_LOCK gpu)
+        set_tests_properties(${name} PROPERTIES LABELS "gpu;quick" TIMEOUT 300 RESOURCE_LOCK gpu)
     endfunction()
 
     add_gpu_test_cuda(test_gpu_elliptic)
@@ -95,7 +96,16 @@ if(COILGUN_ENABLE_CUDA)
     target_compile_definitions(coilgun_cuda_context_smoke_test PRIVATE EIGEN_MAX_ALIGN_BYTES=32)
     target_include_directories(coilgun_cuda_context_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
     add_test(NAME test_gpu_context_smoke COMMAND coilgun_cuda_context_smoke_test)
-    set_tests_properties(test_gpu_context_smoke PROPERTIES LABELS "gpu" TIMEOUT 300 RESOURCE_LOCK gpu)
+    set_tests_properties(test_gpu_context_smoke PROPERTIES LABELS "gpu;quick" TIMEOUT 300 RESOURCE_LOCK gpu)
+endif()
+
+set_tests_properties(test_single_stage_sim test_multi_stage_sim
+    PROPERTIES LABELS "slow;integration" TIMEOUT 300)
+
+if(COILGUN_ENABLE_CUDA)
+    set_tests_properties(test_gpu_vs_cpu_single test_gpu_vs_cpu_multi
+        test_gpu_batch test_gpu_sim_batch test_gpu_precision
+        PROPERTIES LABELS "gpu;slow;integration" TIMEOUT 300)
 endif()
 
 if(NOT COILGUN_ENABLE_CUDA)

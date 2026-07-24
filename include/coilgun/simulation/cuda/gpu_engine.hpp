@@ -24,6 +24,7 @@
 #include "coilgun/simulation/cuda/gpu_solver.hpp"
 #include "coilgun/simulation/cuda/gpu_mutual_pipeline.hpp"
 #include "coilgun/simulation/cuda/gpu_thermal.hpp"
+#include "coilgun/simulation/cuda/gpu_state_kernels.hpp"
 #include "coilgun/simulation/cuda/persistent_kernel.cuh"
 #endif
 
@@ -204,6 +205,8 @@ struct GpuGraphVariant {
 };
 
 class GpuEngine {
+    struct StepWorkspace;
+
 public:
     GpuEngine(GpuGeometryInput geometry,
               GpuEngineState initial_state,
@@ -272,15 +275,18 @@ public:
                has_active_simulation) {
                policy_.backend = BackendMode::Graph;
                policy_.backend_fallback_reason = FallbackReason::None;
-           } else if (config_.backend == BackendMode::Persistent && layout_.B == 1 &&
+           } else if (config_.backend == BackendMode::Persistent &&
+                      policy_.backend == BackendMode::Persistent && layout_.B == 1 &&
                       capability.supports_persistent &&
+                      capability.supports_persistent_control_stream &&
                        (!config_.deterministic || capability.persistent_is_deterministic)) {
                 policy_.backend = BackendMode::Persistent;
                 policy_.backend_fallback_reason = FallbackReason::None;
             } else if (config_.backend == BackendMode::Graph && !capability.supports_graph) {
                 policy_.backend_fallback_reason = FallbackReason::CapabilityUnavailable;
             } else if (config_.backend == BackendMode::Persistent &&
-                       (layout_.B != 1 || !capability.supports_persistent)) {
+                       (layout_.B != 1 || !capability.supports_persistent ||
+                        !capability.supports_persistent_control_stream)) {
                 policy_.backend_fallback_reason = FallbackReason::CapabilityUnavailable;
             }
  #endif
@@ -308,6 +314,12 @@ public:
          matrices_.assign(layout_.system_matrix_size(), 0.0);
          rhs_.assign(layout_.rhs_size(), 0.0);
          solution_.assign(layout_.rhs_size(), 0.0);
+         step_workspace_.active_pairs.resize(layout_.B * layout_.S * layout_.F);
+         step_workspace_.stage_voltages.resize(layout_.B * layout_.S);
+#if defined(COILGUN_CUDA_AVAILABLE)
+         step_workspace_.compact_status.resize(layout_.B);
+#endif
+         step_workspace_.thermal_filament_currents.resize(layout_.B * layout_.F);
         report_.requested_backend = policy_.requested_backend;
         report_.requested_solver = policy_.requested_solver;
         report_.requested_precision = policy_.requested_precision;
@@ -372,19 +384,33 @@ public:
     void step() {
         ensure_running();
 #if defined(COILGUN_CUDA_AVAILABLE)
-        const auto state_snapshot = state_;
-        const auto result_snapshot = result_;
-        const auto stage_mask_snapshot = stage_mask_;
-        const auto mutual_stage_mask_snapshot = mutual_stage_mask_;
-        const auto variant_snapshot = variant_;
-        const auto selected_variant_snapshot = selected_variant_;
-        const auto pipeline_snapshot = pipeline_order_;
-        const auto report_snapshot = report_;
-        const auto policy_snapshot = policy_;
-        const auto matrices_snapshot = matrices_;
-        const auto rhs_snapshot = rhs_;
-        const auto solution_snapshot = solution_;
-        const auto derivatives_snapshot = current_derivatives_;
+        auto& workspace = step_workspace_;
+        workspace.state_snapshot = state_;
+        workspace.result_snapshot = result_;
+        workspace.stage_mask_snapshot = stage_mask_;
+        workspace.mutual_stage_mask_snapshot = mutual_stage_mask_;
+        workspace.variant_snapshot = variant_;
+        workspace.selected_variant_snapshot = selected_variant_;
+        workspace.pipeline_snapshot = pipeline_order_;
+        workspace.report_snapshot = report_;
+        workspace.policy_snapshot = policy_;
+        workspace.matrices_snapshot = matrices_;
+        workspace.rhs_snapshot = rhs_;
+        workspace.solution_snapshot = solution_;
+        workspace.derivatives_snapshot = current_derivatives_;
+        const auto& state_snapshot = workspace.state_snapshot;
+        const auto& result_snapshot = workspace.result_snapshot;
+        const auto& stage_mask_snapshot = workspace.stage_mask_snapshot;
+        const auto& mutual_stage_mask_snapshot = workspace.mutual_stage_mask_snapshot;
+        const auto& variant_snapshot = workspace.variant_snapshot;
+        const auto& selected_variant_snapshot = workspace.selected_variant_snapshot;
+        const auto& pipeline_snapshot = workspace.pipeline_snapshot;
+        const auto& report_snapshot = workspace.report_snapshot;
+        const auto& policy_snapshot = workspace.policy_snapshot;
+        const auto& matrices_snapshot = workspace.matrices_snapshot;
+        const auto& rhs_snapshot = workspace.rhs_snapshot;
+        const auto& solution_snapshot = workspace.solution_snapshot;
+        const auto& derivatives_snapshot = workspace.derivatives_snapshot;
         const bool variant_valid_snapshot = variant_valid_;
         const bool fallback_locked_snapshot = fallback_locked_;
         try {
@@ -630,6 +656,28 @@ private:
         std::vector<void*> buffers;
         std::unique_ptr<ThermalWorkspace> thermal_workspace;
         int device_id = -1;
+#endif
+    };
+
+    struct StepWorkspace {
+        GpuEngineState state_snapshot;
+        GpuEngineResult result_snapshot;
+        std::vector<std::uint8_t> stage_mask_snapshot;
+        std::vector<std::uint8_t> mutual_stage_mask_snapshot;
+        GpuGraphVariant variant_snapshot;
+        GpuGraphVariant selected_variant_snapshot;
+        std::vector<PipelineStage> pipeline_snapshot;
+        ExecutionReport report_snapshot;
+        GpuExecutionPolicy policy_snapshot;
+        std::vector<double> matrices_snapshot;
+        std::vector<double> rhs_snapshot;
+        std::vector<double> solution_snapshot;
+        std::vector<double> derivatives_snapshot;
+        std::vector<std::uint8_t> active_pairs;
+        std::vector<double> stage_voltages;
+        std::vector<double> thermal_filament_currents;
+#if defined(COILGUN_CUDA_AVAILABLE)
+        std::vector<DeviceStepStatus> compact_status;
 #endif
     };
 
@@ -885,16 +933,13 @@ private:
                         m = state_.m1[pair];
                         dm = state_.dm1[pair];
                     } else if (pair_active && !use_cached_mutual) {
-                        m = physics::mutual_inductance_coil(
+                        const auto mutual_pair = physics::mutual_detail::mutual_inductance_coil_pair(
                             geometry_.stage_inner_radii[s], geometry_.stage_outer_radii[s],
                             geometry_.stage_lengths[s], geometry_.stage_turns[s],
                             geometry_.filament_inner_radii[f], geometry_.filament_outer_radii[f],
                             geometry_.filament_lengths[f], 1, separation, 9, true);
-                        dm = physics::mutual_inductance_gradient_coil(
-                            geometry_.stage_inner_radii[s], geometry_.stage_outer_radii[s],
-                            geometry_.stage_lengths[s], geometry_.stage_turns[s],
-                            geometry_.filament_inner_radii[f], geometry_.filament_outer_radii[f],
-                            geometry_.filament_lengths[f], 1, separation, 9, true);
+                        m = mutual_pair.mutual;
+                        dm = mutual_pair.gradient;
                     }
                     state_.m1[pair] = m;
                     state_.dm1[pair] = dm;
@@ -921,7 +966,7 @@ private:
     void execute_solver_step();
     void execute_physical_pipeline();
     void execute_persistent_mutual();
-    GpuGraphVariantKey graph_key() const;
+    GpuGraphTopologyKey graph_key() const;
     void calibrate_solver();
     void record_runtime_failure(const SolverStatus& status);
     void shutdown_runtime() noexcept;
@@ -943,14 +988,13 @@ private:
                                PipelineStage::Force};
             const auto d = layout_.D;
             assemble_physical_system();
-            std::vector<double> candidate_solution(solution_);
             double solver_time_ms = 0.0;
             for (std::size_t b = 0; b < layout_.B; ++b) {
                 if (state_.active_mask[b] == 0) continue;
                 Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matrix(
                     matrices_.data() + b * d * d, static_cast<Eigen::Index>(d), static_cast<Eigen::Index>(d));
                 Eigen::Map<const Eigen::VectorXd> rhs(rhs_.data() + b * d, static_cast<Eigen::Index>(d));
-                Eigen::Map<Eigen::VectorXd> solution(candidate_solution.data() + b * d,
+                Eigen::Map<Eigen::VectorXd> solution(solution_.data() + b * d,
                                                      static_cast<Eigen::Index>(d));
                 const auto solver_start = std::chrono::steady_clock::now();
                 Eigen::LDLT<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> ldlt(matrix);
@@ -984,7 +1028,6 @@ private:
                     throw std::runtime_error("Eigen LDLT residual exceeds sanity tolerance");
                 }
             }
-            solution_ = std::move(candidate_solution);
             report_.solver_time_ms += solver_time_ms;
             current_derivatives_ = solution_;
             state_.current_derivatives = solution_;
@@ -1072,6 +1115,7 @@ private:
     std::vector<double> solution_;
     std::vector<double> current_derivatives_;
     std::vector<PipelineStage> pipeline_order_;
+    StepWorkspace step_workspace_;
 #if defined(COILGUN_CUDA_AVAILABLE)
     std::unique_ptr<GpuExecutionContext> context_;
     std::unique_ptr<GpuSolver> solver_;

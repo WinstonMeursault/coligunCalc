@@ -8,9 +8,29 @@
 
 #include "coilgun/physics/constants.hpp"
 
+#include <cstddef>
 #include <vector>
 
 namespace coilgun::components {
+
+/**
+ * @brief Geometry metadata for one armature filament.
+ *
+ * Axial and radial indices retain the public 1-based convention. The flat
+ * index is 0-based and is the stable row-major position in all per-filament
+ * arrays. axial_center is the current absolute axial centre; it follows
+ * armature motion while the remaining geometry fields stay unchanged.
+ */
+struct FilamentMetadata {
+    int axial_index = 0;
+    int radial_index = 0;
+    double inner_radius = 0.0;
+    double outer_radius = 0.0;
+    double mean_radius = 0.0;
+    double axial_center = 0.0;
+    double length = 0.0;
+    std::size_t flat_index = 0;
+};
 
 /**
  * @brief Solid cylindrical armature discretised into @em m &times; @em n
@@ -104,6 +124,16 @@ public:
      */
     double filament_axial_position(int i) const;
 
+    /**
+     * @brief Precomputed metadata in stable row-major flat-array order.
+     *
+     * The returned vector and its elements are owned by this armature and
+     * cannot be modified through this accessor. A pending position change is
+     * synchronized before the accessor returns; all other fields are
+     * construction-time geometry.
+     */
+    const std::vector<FilamentMetadata>& filament_metadata() const;
+
     // ---- Per-filament data (flat arrays, length m*n) ----
     //
     // Order: filament (i=1,j=1), (i=1,j=2), ..., (i=m,j=n) —
@@ -161,6 +191,8 @@ private:
     std::vector<double> R_;
     std::vector<double> L_;
     std::vector<double> mass_;
+    mutable std::vector<FilamentMetadata> metadata_;
+    mutable double metadata_synced_position_ = 0.0;
 };
 
 } // namespace coilgun::components

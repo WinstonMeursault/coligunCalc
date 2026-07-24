@@ -181,6 +181,61 @@ TEST_CASE("state kernels reduce independent batch members deterministically") {
     CHECK(position[1] == doctest::Approx(20.0 - 2.0 * dt));
 }
 
+TEST_CASE("state kernels parallelize high-dimensional masked current updates") {
+    if (!require_cuda()) return;
+
+    constexpr std::size_t B = 2;
+    constexpr std::size_t S = 1;
+    constexpr std::size_t F = 32;
+    constexpr std::size_t D = S + F;
+    constexpr double dt = 0.125;
+    constexpr double mass = 2.0;
+    std::vector<double> currents(B * D), derivative(B * D), dm1(B * S * F, 0.0);
+    for (std::size_t i = 0; i < currents.size(); ++i) {
+        currents[i] = static_cast<double>(i + 1);
+        derivative[i] = 0.25 * static_cast<double>(i + 1);
+    }
+    const auto initial_currents = currents;
+    std::vector<double> acceleration(B, 0.0), velocity{2.0, -3.0}, position{4.0, 5.0};
+    const std::array<std::uint8_t, B> active{1, 0};
+    double* d_currents = device_copy(currents.data(), currents.size());
+    double* d_derivative = device_copy(derivative.data(), derivative.size());
+    double* d_dm1 = device_copy(dm1.data(), dm1.size());
+    auto* d_active = device_copy(active.data(), active.size());
+    double* d_acceleration = device_copy(acceleration.data(), acceleration.size());
+    double* d_velocity = device_copy(velocity.data(), velocity.size());
+    double* d_position = device_copy(position.data(), position.size());
+    double* d_force = device_copy(acceleration.data(), acceleration.size());
+
+    REQUIRE(launch_state_update_masked(
+                B, S, F, d_currents, d_derivative, d_dm1, nullptr, d_active,
+                mass, dt, d_acceleration, d_velocity, d_position, d_force,
+                StateKernelConfig{true, 32}) == cudaSuccess);
+    REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+    REQUIRE(cudaMemcpy(currents.data(), d_currents, currents.size() * sizeof(double),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(cudaMemcpy(velocity.data(), d_velocity, velocity.size() * sizeof(double),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(cudaMemcpy(position.data(), d_position, position.size() * sizeof(double),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(cudaMemcpy(acceleration.data(), d_acceleration,
+                       acceleration.size() * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess);
+
+    for (std::size_t i = 0; i < D; ++i) {
+        CHECK(currents[i] == doctest::Approx(initial_currents[i] + dt * derivative[i]));
+        CHECK(currents[D + i] == doctest::Approx(initial_currents[D + i]));
+    }
+    CHECK(velocity[0] == doctest::Approx(2.0));
+    CHECK(velocity[1] == doctest::Approx(-3.0));
+    CHECK(position[0] == doctest::Approx(4.0 + dt * 2.0));
+    CHECK(position[1] == doctest::Approx(5.0));
+    CHECK(acceleration[0] == doctest::Approx(0.0));
+    CHECK(acceleration[1] == doctest::Approx(0.0));
+
+    cudaFree(d_currents); cudaFree(d_derivative); cudaFree(d_dm1); cudaFree(d_active);
+    cudaFree(d_acceleration); cudaFree(d_velocity); cudaFree(d_position); cudaFree(d_force);
+}
+
 TEST_CASE("persistent buffers expose generation protocol and are safely reusable") {
     PersistentBuffers buffers;
 
@@ -228,14 +283,16 @@ TEST_CASE("unavailable graph backend locks the engine to reported fallback") {
     CHECK(engine.report().fallback_count == 1);
 }
 
-TEST_CASE("requested persistent backend uses one persistent protocol across steps") {
+TEST_CASE("requested persistent backend reports runtime protocol failure") {
     if (!require_cuda()) return;
 
     auto geometry = gpu_test::geometry(1, 2);
     auto state = gpu_test::state(1, 1, 2);
     GpuExecutionConfig config;
     config.backend = BackendMode::Persistent;
-    GpuEngine engine(std::move(geometry), std::move(state), config);
+    GpuCapability capability;
+    capability.supports_persistent_control_stream = true;
+    GpuEngine engine(std::move(geometry), std::move(state), config, capability);
 
     REQUIRE(engine.report().requested_backend == BackendMode::Persistent);
     REQUIRE(engine.report().backend == BackendMode::Fallback);

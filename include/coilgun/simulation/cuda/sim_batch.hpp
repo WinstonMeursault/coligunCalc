@@ -95,6 +95,9 @@ public:
     /// @brief Number of simulations in the batch.
     int num_sims() const { return num_sims_; }
 
+    /// @brief Number of stable simulation rows still active at the last boundary.
+    std::size_t active_row_count() const noexcept { return active_indices_.size(); }
+
     /// @brief Resolved execution diagnostics for the shared engine.
     ///
     /// The report retains requested/resolved backend and solver modes,
@@ -123,18 +126,21 @@ private:
         bool                                     configured = false;
         MultiStageState                          state;
         MultiStageResult                         result;
-        std::vector<std::vector<double>>         stage_force_history;
+        std::vector<double>                      stage_force_scratch;
         int                                      step_count = 0;
         bool                                     active = true;
     };
 
     void configure_engine_boundary();
     void sync_states_from_engine();
+    void rebuild_active_indices();
+    void prune_active_indices();
     void check_triggers(SimInstance& sim);
     void extinguish_quiet_stages(SimInstance& sim);
-    std::vector<double> compute_stage_forces(std::size_t sim_id,
-                                             const std::vector<double>& currents,
-                                             const std::vector<double>& gradients) const;
+    void compute_stage_forces(std::size_t sim_id,
+                              const std::vector<double>& currents,
+                              const std::vector<double>& gradients,
+                              std::vector<double>& forces) const;
     void record_step(std::size_t sim_id,
                      const std::vector<double>& stage_forces);
     bool check_termination(SimInstance& sim, const TerminationPolicy& policy) const;
@@ -153,6 +159,8 @@ private:
 
     std::vector<SimInstance> sims_;
     std::unique_ptr<GpuEngine> engine_;
+    std::vector<std::size_t> active_indices_;
+    std::vector<double> active_pre_step_currents_;
 };
 
 } // namespace coilgun::simulation::cuda

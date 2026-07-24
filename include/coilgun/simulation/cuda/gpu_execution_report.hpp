@@ -127,6 +127,14 @@ struct ExecutionReport {
             thermal != other.thermal) metadata_conflict = true;
         if (profiling_enabled != other.profiling_enabled) metadata_conflict = true;
         if (!fallback_reason.empty() && !other.fallback_reason.empty() && fallback_reason != other.fallback_reason) metadata_conflict = true;
+        if (static_fallback_reason != FallbackReason::None &&
+            other.static_fallback_reason != FallbackReason::None &&
+            static_fallback_reason != other.static_fallback_reason)
+            metadata_conflict = true;
+        if (runtime_fallback_reason != FallbackReason::None &&
+            other.runtime_fallback_reason != FallbackReason::None &&
+            runtime_fallback_reason != other.runtime_fallback_reason)
+            metadata_conflict = true;
         if (device_id != other.device_id) metadata_conflict = true;
         if (threads_per_block != other.threads_per_block) metadata_conflict = true;
         calibrated = calibrated || other.calibrated;

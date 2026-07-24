@@ -55,3 +55,28 @@ TEST_CASE("struve — negative x symmetry") {
     CHECK(struve_h1(-5.0) == doctest::Approx(struve_h1(5.0)).epsilon(1e-10));
     CHECK(struve_h1(-10.0) == doctest::Approx(struve_h1(10.0)).epsilon(1e-8));
 }
+
+TEST_CASE("struve — crossover interval reference values") {
+    CHECK(struve_h0(8.0) == doctest::Approx(0.30198811171013773).epsilon(5e-8));
+    CHECK(struve_h0(12.0) == doctest::Approx(-0.17253413511998869).epsilon(5e-8));
+    CHECK(struve_h0(19.999) == doctest::Approx(0.094229731140534928).epsilon(5e-8));
+    CHECK(struve_h0(20.0) == doctest::Approx(0.094393698081323488).epsilon(5e-8));
+    CHECK(struve_h0(20.001) == doctest::Approx(0.094557594262829933).epsilon(5e-8));
+
+    CHECK(struve_h1(8.0) == doctest::Approx(0.48811604612142112).epsilon(5e-8));
+    CHECK(struve_h1(12.0) == doctest::Approx(0.58385732464244378).epsilon(5e-8));
+    CHECK(struve_h1(19.999) == doctest::Approx(0.47261750580294237).epsilon(5e-8));
+    CHECK(struve_h1(20.0) == doctest::Approx(0.47268818429104331).epsilon(5e-8));
+    CHECK(struve_h1(20.001) == doctest::Approx(0.47275902435447509).epsilon(5e-8));
+}
+
+TEST_CASE("struve — repeated asymptotic calls preserve results") {
+    constexpr int repetitions = 1000;
+    constexpr double h0_reference = -0.1018248201600232;
+    constexpr double h1_reference = 0.5388036213870831;
+
+    for (int i = 0; i < repetitions; ++i) {
+        CHECK(struve_h0(25.0) == doctest::Approx(h0_reference).epsilon(5e-8));
+        CHECK(struve_h1(25.0) == doctest::Approx(h1_reference).epsilon(5e-8));
+    }
+}

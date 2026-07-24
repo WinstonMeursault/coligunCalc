@@ -210,7 +210,7 @@ void initialize_mutual_pipeline_constants(cudaStream_t stream) {
         throw std::runtime_error("CUDA stream capture status query failed");
     if (capture_status != cudaStreamCaptureStatusNone)
         throw std::invalid_argument("quadrature constants must be initialized before graph capture");
-    const auto& quadrature = physics::gauss_legendre(9);
+    const auto& quadrature = physics::gauss_legendre_cached(9);
     const auto nodes = cudaMemcpyToSymbolAsync(
         pipeline_gl_nodes, quadrature.nodes.data(), 9 * sizeof(double), 0,
         cudaMemcpyHostToDevice, stream);

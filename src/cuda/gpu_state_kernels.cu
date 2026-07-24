@@ -8,6 +8,8 @@
 namespace coilgun::simulation::cuda {
 namespace {
 
+constexpr std::size_t kParallelStateDimension = 32;
+
 __global__ void force_reduction_kernel(
     std::size_t S, std::size_t F, const double* currents, const double* dm1,
     const unsigned char* trigger, double* force) {
@@ -69,6 +71,42 @@ __global__ void masked_state_update_kernel(
         const double* batch_derivative = current_derivative + batch * D;
         for (std::size_t i = 0; i < D; ++i) batch_currents[i] += dt * batch_derivative[i];
     }
+}
+
+__global__ void parallel_state_update_kernel(
+    std::size_t B, std::size_t D, const double* current_derivative, double dt,
+    const double* acceleration, double* currents, double* velocity, double* position) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::size_t total = B * D;
+    if (index >= total) return;
+    const std::size_t batch = index / D;
+    const std::size_t dimension = index - batch * D;
+    if (dimension == 0) {
+        const double old_velocity = velocity[batch];
+        position[batch] += dt * old_velocity;
+        velocity[batch] = old_velocity + dt * acceleration[batch];
+    }
+    if (current_derivative != nullptr)
+        currents[index] += dt * current_derivative[index];
+}
+
+__global__ void parallel_masked_state_update_kernel(
+    std::size_t B, std::size_t D, const double* current_derivative, double dt,
+    const double* acceleration, const unsigned char* active, double* currents,
+    double* velocity, double* position) {
+    const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    const std::size_t total = B * D;
+    if (index >= total) return;
+    const std::size_t batch = index / D;
+    if (active[batch] == 0) return;
+    const std::size_t dimension = index - batch * D;
+    if (dimension == 0) {
+        const double old_velocity = velocity[batch];
+        position[batch] += dt * old_velocity;
+        velocity[batch] = old_velocity + dt * acceleration[batch];
+    }
+    if (current_derivative != nullptr)
+        currents[index] += dt * current_derivative[index];
 }
 
 __global__ void assembly_kernel(DeviceAssemblyView view) {
@@ -392,19 +430,33 @@ cudaError_t launch_state_update(
     const double* current_derivative, const double* dm1, const unsigned char* trigger,
     double mass, double dt, double* acceleration, double* velocity, double* position,
     double* force, StateKernelConfig config, cudaStream_t stream) noexcept {
+    std::size_t dimension = 0, state_count = 0;
     if (B == 0 || S == 0 || F == 0 || !device_pointer(currents) || !device_pointer(dm1) ||
         (trigger != nullptr && !device_pointer(trigger)) ||
         !device_pointer(acceleration) || !device_pointer(velocity) || !device_pointer(position) || !device_pointer(force) ||
         !std::isfinite(dt) || dt <= 0.0 || !std::isfinite(mass) || mass <= 0.0 ||
-        B > std::numeric_limits<unsigned int>::max()) {
+        B > std::numeric_limits<unsigned int>::max() || S > std::numeric_limits<std::size_t>::max() - F) {
         return cudaErrorInvalidValue;
     }
+    dimension = S + F;
     cudaError_t status = launch_force_reduction(B, S, F, currents, dm1, trigger, force, config, stream);
     if (status != cudaSuccess) return status;
     status = launch_acceleration(B, force, mass, acceleration, stream);
     if (status != cudaSuccess) return status;
-    state_update_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
-        B, S + F, current_derivative, dt, acceleration, currents, velocity, position);
+    if (dimension <= kParallelStateDimension) {
+        if (B > std::numeric_limits<std::size_t>::max() - 255 ||
+            !valid_grid((B + 255) / 256))
+            return cudaErrorInvalidValue;
+        state_update_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
+            B, dimension, current_derivative, dt, acceleration, currents, velocity, position);
+    } else {
+        if (!checked_product(B, dimension, state_count) ||
+            state_count > std::numeric_limits<std::size_t>::max() - 255 ||
+            !valid_grid((state_count + 255) / 256))
+            return cudaErrorInvalidValue;
+        parallel_state_update_kernel<<<static_cast<unsigned int>((state_count + 255) / 256), 256, 0, stream>>>(
+            B, dimension, current_derivative, dt, acceleration, currents, velocity, position);
+    }
     return cudaGetLastError();
 }
 
@@ -414,21 +466,31 @@ cudaError_t launch_state_update_masked(
     const unsigned char* active, double mass, double dt, double* acceleration,
     double* velocity, double* position, double* force, StateKernelConfig config,
     cudaStream_t stream) noexcept {
-    std::size_t terms = 0;
+    std::size_t terms = 0, dimension = 0, state_count = 0;
     if (!device_pointer(active) || B == 0 || S == 0 || F == 0 || !device_pointer(currents) || !device_pointer(dm1) ||
         (trigger != nullptr && !device_pointer(trigger)) ||
         !device_pointer(acceleration) || !device_pointer(velocity) || !device_pointer(position) || !device_pointer(force) ||
         !std::isfinite(dt) || dt <= 0.0 || !std::isfinite(mass) || mass <= 0.0 ||
-        B > std::numeric_limits<unsigned int>::max() ||
+        B > std::numeric_limits<unsigned int>::max() || S > std::numeric_limits<std::size_t>::max() - F ||
         !checked_product(S, F, terms) || !checked_product(B, terms, terms) ||
         !valid_grid((B + 255) / 256))
         return cudaErrorInvalidValue;
+    dimension = S + F;
     auto status = launch_force_reduction(B, S, F, currents, dm1, trigger, force, config, stream);
     if (status != cudaSuccess) return status;
     status = launch_acceleration(B, force, mass, acceleration, stream);
     if (status != cudaSuccess) return status;
-    masked_state_update_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
-        B, S + F, current_derivative, dt, acceleration, active, currents, velocity, position);
+    if (dimension <= kParallelStateDimension) {
+        masked_state_update_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
+            B, dimension, current_derivative, dt, acceleration, active, currents, velocity, position);
+    } else {
+        if (!checked_product(B, dimension, state_count) ||
+            state_count > std::numeric_limits<std::size_t>::max() - 255 ||
+            !valid_grid((state_count + 255) / 256))
+            return cudaErrorInvalidValue;
+        parallel_masked_state_update_kernel<<<static_cast<unsigned int>((state_count + 255) / 256), 256, 0, stream>>>(
+            B, dimension, current_derivative, dt, acceleration, active, currents, velocity, position);
+    }
     return cudaGetLastError();
 }
 

@@ -14,7 +14,7 @@
 
 namespace coilgun::physics {
 
-QuadratureNodes gauss_legendre(int n) {
+static QuadratureNodes make_gauss_legendre(int n) {
     switch (n) {
     case 4: {
         QuadratureNodes q;
@@ -177,7 +177,7 @@ QuadratureNodes gauss_legendre(int n) {
     }
 }
 
-QuadratureNodes gauss_laguerre(int n) {
+static QuadratureNodes make_gauss_laguerre(int n) {
     switch (n) {
     case 15: {
         QuadratureNodes q;
@@ -290,6 +290,56 @@ QuadratureNodes gauss_laguerre(int n) {
             "gauss_laguerre: unsupported node count " + std::to_string(n)
             + " (supported: 15, 30)");
     }
+}
+
+const QuadratureNodes& gauss_legendre_cached(int n) {
+    switch (n) {
+    case 4: {
+        static const QuadratureNodes q = make_gauss_legendre(4);
+        return q;
+    }
+    case 9: {
+        static const QuadratureNodes q = make_gauss_legendre(9);
+        return q;
+    }
+    case 16: {
+        static const QuadratureNodes q = make_gauss_legendre(16);
+        return q;
+    }
+    case 32: {
+        static const QuadratureNodes q = make_gauss_legendre(32);
+        return q;
+    }
+    default:
+        throw std::invalid_argument(
+            "gauss_legendre: unsupported node count " + std::to_string(n)
+            + " (supported: 4, 9, 16, 32)");
+    }
+}
+
+const QuadratureNodes& gauss_laguerre_cached(int n) {
+    switch (n) {
+    case 15: {
+        static const QuadratureNodes q = make_gauss_laguerre(15);
+        return q;
+    }
+    case 30: {
+        static const QuadratureNodes q = make_gauss_laguerre(30);
+        return q;
+    }
+    default:
+        throw std::invalid_argument(
+            "gauss_laguerre: unsupported node count " + std::to_string(n)
+            + " (supported: 15, 30)");
+    }
+}
+
+QuadratureNodes gauss_legendre(int n) {
+    return gauss_legendre_cached(n);
+}
+
+QuadratureNodes gauss_laguerre(int n) {
+    return gauss_laguerre_cached(n);
 }
 
 } // namespace coilgun::physics

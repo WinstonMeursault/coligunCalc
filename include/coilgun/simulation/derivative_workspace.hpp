@@ -1,5 +1,6 @@
 #pragma once
 
+#include "coilgun/simulation/cpu_phase_timing.hpp"
 #include "coilgun/simulation/excitation_snapshot.hpp"
 #include "coilgun/simulation/integration_state.hpp"
 

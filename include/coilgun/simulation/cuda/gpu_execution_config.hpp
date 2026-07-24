@@ -78,6 +78,10 @@ struct GpuCapability {
     bool supports_batched_solver = true;
     bool supports_gpu_thermal = true;
     bool persistent_is_deterministic = false;
+    // The current engine does not own the dedicated control stream required
+    // by the resident persistent protocol. Keep this new field last so
+    // existing aggregate initializers retain their positional meaning.
+    bool supports_persistent_control_stream = false;
 };
 
 struct GpuExecutionPolicy {
@@ -124,8 +128,16 @@ public:
         result.precision = config.precision;
 
         if (config.backend == BackendMode::Persistent) {
-            result.backend = BackendMode::Fallback;
-            result.backend_fallback_reason = FallbackReason::MetadataConflict;
+            if (!capability.supports_persistent ||
+                !capability.supports_persistent_control_stream) {
+                result.backend = BackendMode::Fallback;
+                result.backend_fallback_reason = FallbackReason::CapabilityUnavailable;
+            } else if (config.deterministic && !capability.persistent_is_deterministic) {
+                result.backend = BackendMode::Fallback;
+                result.backend_fallback_reason = FallbackReason::DeterminismRequired;
+            } else {
+                result.backend = BackendMode::Persistent;
+            }
         } else if (config.backend == BackendMode::Graph) {
             result.backend = BackendMode::Fallback;
             result.backend_fallback_reason = capability.supports_graph

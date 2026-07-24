@@ -51,6 +51,8 @@ Armature::Armature(double inner_radius, double outer_radius, double length,
     if (!std::isfinite(x_)) throw std::invalid_argument("Armature position must be finite");
     if (m_ <= 0) throw std::invalid_argument("Armature m_axial must be positive");
     if (n_ <= 0) throw std::invalid_argument("Armature n_radial must be positive");
+    if (m_ > std::numeric_limits<int>::max() / n_)
+        throw std::invalid_argument("Armature filament count overflows");
     if (static_cast<std::size_t>(m_) > std::numeric_limits<std::size_t>::max() /
                                       static_cast<std::size_t>(n_))
         throw std::invalid_argument("Armature filament count overflows");
@@ -62,6 +64,7 @@ Armature::Armature(double inner_radius, double outer_radius, double length,
     R_.reserve(total);
     L_.reserve(total);
     mass_.reserve(total);
+    metadata_.reserve(static_cast<std::size_t>(total));
 
     // Precompute per-radial-layer values, then expand in row-major order
     // (i=1,j=1), (i=1,j=2), ..., (i=m,j=n) — matching Python's R * m pattern.
@@ -92,11 +95,24 @@ Armature::Armature(double inner_radius, double outer_radius, double length,
     // Expand to row-major flat array: repeat each entry m times
     for (int i = 0; i < m_; ++i) {
         for (int j = 0; j < n_; ++j) {
+            const auto flat = static_cast<std::size_t>(i * n_ + j);
+            const int axial = i + 1;
+            const int radial = j + 1;
             R_.push_back(R_layer[j]);
             L_.push_back(L_layer[j]);
             mass_.push_back(mass_layer[j]);
+            metadata_.push_back({
+                axial,
+                radial,
+                filament_inner_radius(radial),
+                filament_outer_radius(radial),
+                filament_mean_radius(radial),
+                filament_axial_position(axial),
+                dl_,
+                flat});
         }
     }
+    metadata_synced_position_ = x_;
 }
 
 double Armature::inner_radius() const { return ri_; }
@@ -120,6 +136,16 @@ double Armature::filament_mean_radius(int j) const {
 
 double Armature::filament_axial_position(int i) const {
     return x_ - 0.5 * l_ + (i - 0.5) * dl_;
+}
+
+const std::vector<FilamentMetadata>& Armature::filament_metadata() const {
+    const double delta = x_ - metadata_synced_position_;
+    if (delta != 0.0) {
+        for (auto& filament : metadata_)
+            filament.axial_center += delta;
+        metadata_synced_position_ = x_;
+    }
+    return metadata_;
 }
 
 const std::vector<double>& Armature::resistances() const { return R_; }

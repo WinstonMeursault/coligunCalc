@@ -101,7 +101,7 @@ GpuExecutionConfig make_config(GpuOptLevel opt_level, const GpuBackend& backend,
     config.precision = static_cast<PrecisionMode>(static_cast<int>(opt_level));
     config.thermal = thermal ? ThermalMode::Cpu : ThermalMode::Disabled;
     config.backend = effective_backend(backend, explicit_backend);
-    config.solver = SolverMode::Eigen;
+    config.solver = SolverMode::Auto;
     config.deterministic = config.backend != BackendMode::Persistent;
     config.device_id = backend.device_id;
     config.threads_per_block = backend.threads_per_block;
@@ -191,6 +191,16 @@ double GpuSingleStageSim<SP>::compute_force_at(
 }
 
 template<typename SP>
+double GpuSingleStageSim<SP>::compute_recorded_force() const {
+    const auto& gradients = engine_->state().dm1;
+    double force = 0.0;
+    for (std::size_t k = 0; k < engine_->layout().F; ++k)
+        force -= state_.currents(0) * state_.currents(static_cast<Eigen::Index>(k + 1)) *
+            gradients[k];
+    return force;
+}
+
+template<typename SP>
 void GpuSingleStageSim<SP>::record_step(double force) {
     SimStep entry;
     entry.time = step_count_ * dt_;
@@ -234,11 +244,10 @@ const SimStep& GpuSingleStageSim<SP>::step() {
     engine_->set_mutual_stage_mask({static_cast<std::uint8_t>(within_mutual_range ? 1 : 0)});
     engine_->set_stage_voltage(0, excitation_->voltage());
     const double pre_step_coil_current = state_.currents(0);
-    const double pre_step_position = state_.arm_position;
     engine_->step();
     sync_state_from_engine();
     excitation_->advance(dt_, pre_step_coil_current);
-    record_step(compute_force_at(pre_step_position, state_.currents));
+    record_step(compute_recorded_force());
     ++step_count_;
     return result_.history.back();
 }
@@ -275,7 +284,8 @@ template<typename SP>
 void GpuSingleStageSim<SP>::reset() {
     engine_->reset();
     excitation_->reset();
-    result_ = {};
+    result_.history.clear();
+    result_.summary = {};
     step_count_ = 0;
     sync_state_from_engine();
 }

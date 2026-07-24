@@ -62,6 +62,7 @@ private:
     void sync_state_from_engine();
     double compute_force() const;
     double compute_force_at(double position, const Eigen::VectorXd& currents) const;
+    double compute_recorded_force() const;
     void record_step(double force);
     bool check_termination(const TerminationPolicy& policy) const;
     void prepare_summary();

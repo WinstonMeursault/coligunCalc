@@ -18,6 +18,7 @@
 #include "coilgun/components/armature.hpp"
 #include <Eigen/Dense>
 #include <memory>
+#include <vector>
 
 namespace coilgun::simulation {
 
@@ -121,6 +122,11 @@ private:
     Eigen::VectorXd L_fil_;
     Eigen::VectorXd R_fil_ref_;
     Eigen::VectorXd mass_fil_;
+    std::vector<double> filament_inner_radii_;
+    std::vector<double> filament_outer_radii_;
+    std::vector<double> filament_mean_radii_;
+    std::vector<double> filament_relative_axial_positions_;
+    std::vector<double> filament_lengths_;
 
     IntegrationState integration_state_;
     IntegrationState initial_integration_state_;

@@ -153,7 +153,7 @@ void GpuAdaptor::setup(const std::vector<components::DrivingCoil>& coils,
             armature.filament_outer_radius(radial),
             armature.length() / static_cast<double>(armature.axial_filaments())};
     }
-    const auto& quadrature = physics::gauss_legendre(9);
+    const auto& quadrature = physics::gauss_legendre_cached(9);
 
     free_all();
     device_id_ = current_device;
