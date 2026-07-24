@@ -448,6 +448,7 @@ TEST_CASE("SimBatch — heterogeneous rows finish independently without compacti
 
 TEST_CASE("SimBatch — E3 fixed-capacity active_mask rows never compact or reindex") {
     SimBatch<EulerStepper> batch(make_coils(), make_arm(), 2, 1e-6, direct_backend());
+    CHECK(batch.active_row_count() == 2);
     std::vector<std::unique_ptr<coilgun::simulation::Excitation>> early;
     early.push_back(std::make_unique<coilgun::simulation::WaveformExcitation>(
         [](double) { return 0.0; }));
@@ -463,6 +464,7 @@ TEST_CASE("SimBatch — E3 fixed-capacity active_mask rows never compact or rein
     auto policy = coilgun::simulation::TerminationPolicy::defaults();
     policy.max_steps = 4;
     batch.run(policy);
+    CHECK(batch.active_row_count() == 0);
 
     const auto& early_result = batch.result(0);
     const auto& continuing_result = batch.result(1);

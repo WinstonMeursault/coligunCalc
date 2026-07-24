@@ -29,6 +29,8 @@ Licensed under GPLv3.
 - **Stage triggering** — position-based or time-delay, up to 50 stages
 - **LRU caching** — 4096-entry filament-level M and dM/dz caches
 - **OpenMP multicore support** — the CPU M/dM loop is parallelized when the filament count is at least 8; force and thermal update loops are currently serial
+- **Public state and diagnostics API** — `FilamentMetadata`, excitation snapshots, `IntegrationState`, reusable `DerivativeWorkspace`, and optional CPU phase timing
+- **Unified GPU execution API** — explicit backend/solver/precision/thermal policy, `ExecutionReport`, row-major `GpuStateLayout`, graph boundary masks, and stable batch-row diagnostics
 - **GPU acceleration (CUDA)** — synchronous Euler method surfaces align with the CPU API; stepping GPU single-/multi-stage RK4 instantiations currently throws `std::logic_error` and requires the CPU implementation
 
 ---
@@ -40,7 +42,7 @@ include/coilgun/   — Public headers (core types, physics, components, simulati
 src/               — Library implementation (static library libcoilgun.a)
 tests/             — Unit and integration tests (doctest/CTest)
 tools/             — T(q,p) lookup table generator
-docs/              — Documentation (API reference EN/CN, numerical model, design docs)
+docs/              — Documentation (API reference EN/CN, numerical model, review/performance reports, benchmarks)
 .references/       — Reference papers in PDF (gitignored, local-only)
 ```
 
@@ -95,7 +97,24 @@ double v = sim.result().summary.muzzle_velocity;
 
 The CUDA engine keeps the fixed-shape Euler state, matrix/RHS assembly, batched solve, force/motion update, optional thermal update, and compact device control in resident buffers. `Graph` captures and replays that complete fixed-shape device step; `Direct` launches the same resident stages directly. Runtime initialization, allocation, solver, capture, replay, or validation failures restore the pre-step state, record `FallbackReason::RuntimeFailure`, and lock the engine to the CPU/Eigen fallback. `Persistent` remains an explicit safe fallback until a dedicated resident control stream is implemented.
 
+Backend selection is explicit and observable through `ExecutionReport`. `Fallback`
+is CPU-only and does not create a CUDA context; `Graph` and `Direct` are the
+supported resident CUDA paths when the runtime is available. A requested GPU
+path is not proof of execution: check `gpu_executed` and the resolved backend.
+`SimBatch` keeps stable physical rows and exposes `active_row_count()` and
+`mutual_gradients()` for batch diagnostics. The CUDA wrappers remain Euler-only;
+RK4 is supported by the CPU simulators.
+
 GPU tests may be skipped when no CUDA device is available. A GPU validation run must additionally require `ExecutionReport::gpu_executed == true` and `ExecutionReport::backend != BackendMode::Fallback`; a requested backend or a passing CPU fallback is not proof of GPU execution.
+
+Optional CPU derivative phase timing can be enabled at configure time:
+
+```sh
+cmake --preset cpu-release -DCOILGUN_ENABLE_CPU_PHASE_TIMING=ON
+```
+
+The timing collector is disabled by default and adds no public runtime cost in
+the default build.
 
 ### Minimal Usage Example
 
@@ -177,6 +196,8 @@ GPU tests use a shared resource lock. Tests that require a physical CUDA device 
 - [API 参考 (中文)](docs/API_cn.md) — Chinese translation
 - [Numerical Model](docs/NumericalModel.md) — Detailed physics derivation and algorithm
 - [GPU Benchmark Record](docs/benchmarks/2026-07-19-unified-gpu-engine.md) — Machine-specific execution measurements and fallback status
+- [Performance Review](docs/PerformanceReview.md) — Whole-project performance findings and review closure
+- [Optimization Effectiveness](docs/benchmarks/2026-07-24-PerformanceOptimizationEffectiveness.md) — Before/after benchmark comparison for the optimization round
 
 ---
 
@@ -188,6 +209,8 @@ GPU tests use a shared resource lock. Tests that require a physical CUDA device 
 | `cpu-release` | Ninja | Release | `-march=native` | CPU only, tests ON |
 | `cuda-debug` | Ninja | Debug | `-march=native`, `-O2 -g` | CUDA ON, tests ON, compile_commands.json |
 | `cuda-release` | Ninja | Release | `-march=native` | CUDA ON, tests ON |
+| `cpu-release-library` | Ninja | Release | `-march=native` | CPU library only |
+| `cuda-release-library` | Ninja | Release | `-march=native` | CUDA library targets only |
 
 ---
 

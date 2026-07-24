@@ -148,11 +148,11 @@ public:
 private:
     void sync_state_from_engine();
     void configure_engine_boundary();
-    double compute_force(const std::vector<double>& pre_step_currents) const;
-    std::vector<double> compute_stage_forces(const std::vector<double>& pre_step_currents) const;
-    std::vector<double> compute_pre_step_gradients() const;
-    std::vector<double> compute_recorded_stage_forces(
-        const std::vector<double>& gradients) const;
+    double compute_force(const std::vector<double>& pre_step_currents);
+    void compute_stage_forces(const std::vector<double>& pre_step_currents,
+                              std::vector<double>& stage_forces);
+    void compute_recorded_stage_forces(const std::vector<double>& gradients,
+                                       std::vector<double>& stage_forces);
     void check_triggers(double pre_position, double post_position, double next_time);
     void extinguish_quiet_stages();
     void record_step();
@@ -179,7 +179,8 @@ private:
     std::vector<double> initial_stage_energies_;
     std::vector<std::uint8_t> active_stage_mask_;
     std::vector<std::uint8_t> mutual_stage_mask_;
-    std::vector<std::vector<double>> recorded_stage_force_history_;
+    std::vector<double> applied_stage_force_scratch_;
+    std::vector<double> recorded_stage_force_scratch_;
 
     std::unique_ptr<GpuEngine> engine_;
     MultiStageState state_;

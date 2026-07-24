@@ -67,7 +67,7 @@ double transformed_integrand(double u, double q, double p) {
 // estimated analytically as ~ q/(4 * x_last^4) from the asymptotic
 // behaviour U(x) ~ 1/x^3.
 double integrate_T_kernel(double q, double p) {
-    const auto& gl = gauss_legendre(16);
+    const auto& gl = gauss_legendre_cached(16);
     const int n_sub = 2048;
     const double du = 1.0 / n_sub;
 

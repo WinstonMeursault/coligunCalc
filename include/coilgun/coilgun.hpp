@@ -34,6 +34,7 @@
 #include "coilgun/simulation/excitation.hpp"
 #include "coilgun/simulation/excitation_snapshot.hpp"
 #include "coilgun/simulation/integration_state.hpp"
+#include "coilgun/simulation/cpu_phase_timing.hpp"
 #include "coilgun/simulation/derivative_workspace.hpp"
 #include "coilgun/simulation/time_stepper.hpp"
 #include "coilgun/simulation/sim_result.hpp"

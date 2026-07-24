@@ -29,7 +29,7 @@ __constant__ double d_gl_weights[9];
  * @param n_nodes Number of GL nodes per dimension (max 9).
  */
 void upload_gl_nodes(int n_nodes) {
-    const auto& gl = gauss_legendre(n_nodes);
+    const auto& gl = gauss_legendre_cached(n_nodes);
     cudaMemcpyToSymbol(d_gl_nodes, gl.nodes.data(), n_nodes * sizeof(double));
     cudaMemcpyToSymbol(d_gl_weights, gl.weights.data(), n_nodes * sizeof(double));
 }

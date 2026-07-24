@@ -23,9 +23,11 @@ using coilgun::simulation::cuda::GpuSingleStageSim;
 using coilgun::simulation::cuda::GpuOptLevel;
 using coilgun::simulation::cuda::BackendMode;
 using coilgun::simulation::cuda::ExecutionReport;
+using coilgun::simulation::cuda::FallbackReason;
 using coilgun::simulation::cuda::GpuBackend;
 using coilgun::simulation::cuda::GpuCapability;
 using coilgun::simulation::cuda::ThermalMode;
+using coilgun::simulation::cuda::SolverMode;
 
 static double run_cpu_single() {
     DrivingCoil coil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7);
@@ -74,6 +76,25 @@ TEST_CASE("GPU single-stage muzzle velocity matches CPU") {
 TEST_CASE("GPU single-stage muzzle velocity direction consistent") {
     double v_gpu = run_gpu_single();
     CHECK(v_gpu > 0.0);
+}
+
+TEST_CASE("GPU single-stage forwards Auto solver selection for large workloads" *
+          doctest::skip(!coilgun::simulation::cuda::cuda_device_available())) {
+    DrivingCoil coil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7);
+    Armature arm(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.120, 1, 128, 0.05);
+    auto exc = std::make_unique<CrowbarExcitation>(450.0, 0.001);
+    GpuBackend backend;
+    backend.backend = BackendMode::Direct;
+    backend.use_persistent = false;
+    GpuSingleStageSim<EulerStepper> sim(
+        coil, arm, std::move(exc), 1e-6, false, GpuOptLevel::Full, backend);
+
+    CHECK(sim.execution_report().requested_solver == SolverMode::Auto);
+    CHECK(sim.execution_report().solver == SolverMode::Batched);
+    sim.step();
+    REQUIRE(sim.execution_report().gpu_executed);
+    CHECK(sim.execution_report().solver == SolverMode::Batched);
 }
 
 TEST_CASE("GPU single-stage exposes the unified engine execution report") {
@@ -587,6 +608,8 @@ TEST_CASE("GPU single-stage persistent request safely falls back and matches exp
     REQUIRE(fallback.result().history.size() == 1);
     CHECK(persistent.result().history.front().force == doctest::Approx(fallback.result().history.front().force));
     CHECK(persistent.execution_report().requested_backend == BackendMode::Persistent);
+    CHECK(persistent.execution_report().static_fallback_reason == FallbackReason::CapabilityUnavailable);
+    CHECK(persistent.execution_report().runtime_fallback_reason == FallbackReason::None);
     CHECK_FALSE(persistent.execution_report().gpu_executed);
     CHECK(persistent.execution_report().backend == BackendMode::Fallback);
     CHECK(persistent.execution_report().fallback_count > 0);
@@ -776,10 +799,12 @@ TEST_CASE("GPU single-stage reset reruns the same first state, history, thermal,
     const auto first_history = sim.result().history.front();
     sim.step();
     const auto cumulative_report = sim.execution_report();
+    const auto history_capacity = sim.result().history.capacity();
     sim.reset();
 
     CHECK(sim.step_count() == 0);
     CHECK(sim.result().history.empty());
+    CHECK(sim.result().history.capacity() >= history_capacity);
     CHECK(sim.execution_report().backend == cumulative_report.backend);
     CHECK(sim.execution_report().solver == cumulative_report.solver);
     CHECK(sim.execution_report().thermal == cumulative_report.thermal);

@@ -57,6 +57,28 @@ TEST_CASE("fixed-shape graph replays complete resident step") {
     CHECK(std::find(order.begin(), order.end(), PipelineStage::State) != order.end());
 }
 
+TEST_CASE("graph replay updates runtime masks without recapture") {
+    using namespace coilgun::simulation::cuda;
+    if (!cuda_device_available()) return;
+    auto state = gpu_test::state(1, 1, 1, false);
+    state.stage_voltages = {25.0};
+    GpuExecutionConfig config;
+    config.backend = BackendMode::Graph;
+    config.solver = SolverMode::Batched;
+    GpuEngine engine(gpu_test::geometry(1, 1, false), std::move(state), config);
+
+    engine.step();
+    REQUIRE(engine.report().graph_rebuild_count == 1);
+    engine.set_mutual_stage_mask({0});
+    engine.step();
+
+    CHECK(engine.report().graph_rebuild_count == 1);
+    REQUIRE(engine.state().m1.size() == 1);
+    REQUIRE(engine.state().dm1.size() == 1);
+    CHECK(engine.state().m1[0] == doctest::Approx(0.0));
+    CHECK(engine.state().dm1[0] == doctest::Approx(0.0));
+}
+
 TEST_CASE("graph thermal pipeline matches direct resident thermal state") {
     using namespace coilgun::simulation::cuda;
     if (!cuda_device_available()) return;

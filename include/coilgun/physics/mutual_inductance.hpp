@@ -8,6 +8,27 @@
 
 namespace coilgun::physics {
 
+namespace mutual_detail {
+
+/**
+ * @brief Fused mutual inductance and spatial gradient result.
+ *
+ * Internal CPU physics interface. The public scalar wrappers below retain
+ * the established API while paired callers can evaluate both quantities in
+ * one coil-level quadrature traversal.
+ */
+struct MutualPairResult {
+    double mutual;
+    double gradient;
+};
+
+MutualPairResult mutual_inductance_coil_pair(
+        double r_inner_a, double r_outer_a, double length_a, int turns_a,
+        double r_inner_b, double r_outer_b, double length_b, int turns_b,
+        double separation, int n_nodes = 9, bool use_cache = false);
+
+} // namespace mutual_detail
+
 /**
  * @brief Mutual inductance between two coaxial circular current filament loops.
  * @param radius_a Radius of the first loop, m.

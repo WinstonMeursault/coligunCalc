@@ -283,6 +283,57 @@ TEST_CASE("CUDA device solver preserves assembly input and reports residual") {
     CHECK(residual < 1.0e-12);
 }
 
+TEST_CASE("CUDA device solver reuses a stable output view across repeated solves") {
+    if (!gpu_available()) {
+        MESSAGE("CUDA device unavailable; skipping repeated device solver test");
+        return;
+    }
+
+    GpuExecutionContext context;
+    GpuSolver solver(context, SolverMode::Batched, SolverBatchLayout{2, 2});
+    REQUIRE(solver.initialize_workspace().ok);
+    const std::array<double, 8> matrix{
+        2.0, 1.0, 1.0, 2.0,
+        3.0, 1.0, 1.0, 3.0};
+    const std::array<double, 4> rhs{5.0, 5.0, 8.0, 8.0};
+    std::array<double, 8> matrix_after{};
+    std::array<double, 4> solution{};
+    std::array<double, 2> residual{};
+    DeviceAllocation<double> device_matrix(matrix.size());
+    DeviceAllocation<double> device_rhs(rhs.size());
+    DeviceAllocation<double> device_solution(solution.size());
+    DeviceAllocation<double> device_residual(residual.size());
+    REQUIRE(cudaMemcpy(device_matrix.get(), matrix.data(), sizeof(matrix),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(cudaMemcpy(device_rhs.get(), rhs.data(), sizeof(rhs),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        const SolverStatus status = solver.solve_device(
+            DeviceMatrixView{device_matrix.get(), 2, 2},
+            DeviceVectorView{device_rhs.get(), 2, 2},
+            DeviceVectorView{device_solution.get(), 2, 2},
+            DeviceResidualView{device_residual.get(), 2});
+        REQUIRE(status.ok);
+        REQUIRE(solver.validate_device_result(
+                    DeviceResidualView{device_residual.get(), 2}).ok);
+    }
+
+    REQUIRE(cudaMemcpy(matrix_after.data(), device_matrix.get(), sizeof(matrix_after),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(cudaMemcpy(solution.data(), device_solution.get(), sizeof(solution),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    REQUIRE(cudaMemcpy(residual.data(), device_residual.get(), sizeof(residual),
+                       cudaMemcpyDeviceToHost) == cudaSuccess);
+    CHECK(matrix_after == matrix);
+    CHECK(solution[0] == doctest::Approx(5.0 / 3.0));
+    CHECK(solution[1] == doctest::Approx(5.0 / 3.0));
+    CHECK(solution[2] == doctest::Approx(2.0));
+    CHECK(solution[3] == doctest::Approx(2.0));
+    CHECK(residual[0] < 1.0e-12);
+    CHECK(residual[1] < 1.0e-12);
+}
+
 TEST_CASE("CUDA context operations preserve the caller's current device") {
     if (!gpu_available()) {
         MESSAGE("CUDA device unavailable; skipping context device guard test");

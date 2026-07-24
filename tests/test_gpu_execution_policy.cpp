@@ -230,7 +230,53 @@ TEST_CASE("Persistent execution resolves to fallback until engine runtime select
     capability.persistent_is_deterministic = true;
     const auto policy = GpuExecutionPlanner::plan(1, 1, 1, false, capability, config);
     CHECK(policy.backend == BackendMode::Fallback);
-    CHECK(policy.backend_fallback_reason == FallbackReason::MetadataConflict);
+    CHECK(policy.backend_fallback_reason == FallbackReason::CapabilityUnavailable);
+}
+
+TEST_CASE("Persistent planner requires a dedicated control stream capability") {
+    GpuExecutionConfig config;
+    config.backend = BackendMode::Persistent;
+    config.deterministic = false;
+
+    GpuCapability capability;
+    capability.supports_persistent = true;
+    capability.supports_persistent_control_stream = false;
+
+    const auto policy = GpuExecutionPlanner::plan(1, 1, 1, false, capability, config);
+    CHECK(policy.backend == BackendMode::Fallback);
+    CHECK(policy.backend_fallback_reason == FallbackReason::CapabilityUnavailable);
+}
+
+TEST_CASE("Persistent planner reports determinism rejection after capability checks") {
+    GpuExecutionConfig config;
+    config.backend = BackendMode::Persistent;
+    config.deterministic = true;
+
+    GpuCapability capability;
+    capability.supports_persistent = true;
+    capability.supports_persistent_control_stream = true;
+    capability.persistent_is_deterministic = false;
+
+    const auto policy = GpuExecutionPlanner::plan(1, 1, 1, false, capability, config);
+    CHECK(policy.backend == BackendMode::Fallback);
+    CHECK(policy.backend_fallback_reason == FallbackReason::DeterminismRequired);
+}
+
+TEST_CASE("Persistent capability rejection reaches the engine as static fallback") {
+    GpuExecutionConfig config;
+    config.backend = BackendMode::Persistent;
+
+    GpuEngine engine(gpu_test::geometry(), gpu_test::state(1, 1, 1), config);
+
+    CHECK(engine.policy().backend == BackendMode::Fallback);
+    CHECK(engine.policy().backend_fallback_reason == FallbackReason::CapabilityUnavailable);
+    CHECK(engine.report().backend == BackendMode::Fallback);
+    CHECK(engine.report().static_fallback_reason == FallbackReason::CapabilityUnavailable);
+    CHECK_FALSE(engine.context_available());
+
+    engine.step();
+    CHECK_FALSE(engine.report().gpu_executed);
+    CHECK(engine.report().runtime_fallback_reason == FallbackReason::None);
 }
 
 TEST_CASE("Planner reports requested and resolved modes with stable fallback reasons") {
@@ -273,6 +319,18 @@ TEST_CASE("Report merge records metadata conflicts and fallback reasons") {
     CHECK(total.metadata_conflict);
     CHECK(total.runtime_fallback_reason == FallbackReason::RuntimeFailure);
     CHECK(total.fallback_reason == "runtime failure");
+}
+
+TEST_CASE("Report merge detects conflicting fallback reason enums") {
+    ExecutionReport total;
+    total.static_fallback_reason = FallbackReason::CapabilityUnavailable;
+    ExecutionReport other;
+    other.static_fallback_reason = FallbackReason::MetadataConflict;
+
+    total.merge(other);
+
+    CHECK(total.metadata_conflict);
+    CHECK(total.static_fallback_reason == FallbackReason::CapabilityUnavailable);
 }
 
 TEST_CASE("Thermal policy is disabled independently of missing temperatures") {

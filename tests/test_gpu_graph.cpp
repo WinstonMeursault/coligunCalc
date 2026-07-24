@@ -28,7 +28,58 @@ TEST_CASE("graph variant key includes stage signature and execution modes") {
     CHECK_FALSE(first == changed);
 }
 
+TEST_CASE("graph boundary separates topology from runtime masks") {
+    GpuGraphBoundaryState first;
+    first.topology.stage_signature = 0x11;
+    first.topology.batch_capacity = 8;
+    first.topology.layout_signature = 0x22;
+    first.runtime_masks.stage_mask = {1, 1, 0};
+    first.runtime_masks.mutual_stage_mask = {1, 0, 0};
+
+    auto mask_changed = first;
+    mask_changed.runtime_masks.stage_mask[0] = 0;
+    CHECK_FALSE(first.runtime_masks == mask_changed.runtime_masks);
+    CHECK_FALSE(mask_changed.requires_rebuild_from(first));
+
+    auto topology_changed = mask_changed;
+    topology_changed.topology.layout_signature++;
+    CHECK(topology_changed.requires_rebuild_from(first));
+}
+
 #if defined(COILGUN_CUDA_AVAILABLE)
+TEST_CASE("graph cache reuses topology across runtime mask changes") {
+    GpuGraphCache cache;
+    GpuGraphBoundaryState first;
+    first.topology.batch_capacity = 4;
+    first.runtime_masks.stage_mask = {1, 1};
+    first.runtime_masks.mutual_stage_mask = {1, 1};
+    auto mask_changed = first;
+    mask_changed.runtime_masks.stage_mask[1] = 0;
+
+    int captures = 0;
+    REQUIRE(cache.select_or_capture(first, [&] {
+        ++captures;
+        return GraphCaptureStatus::success();
+    }) == GraphCaptureStatus::success());
+    REQUIRE(cache.select_or_capture(mask_changed, [&] {
+        ++captures;
+        return GraphCaptureStatus::success();
+    }) == GraphCaptureStatus::success());
+    CHECK(captures == 1);
+    CHECK(cache.variant_count() == 1);
+    CHECK(cache.capture_count() == 1);
+
+    auto topology_changed = mask_changed;
+    topology_changed.topology.layout_signature = 9;
+    REQUIRE(cache.select_or_capture(topology_changed, [&] {
+        ++captures;
+        return GraphCaptureStatus::success();
+    }) == GraphCaptureStatus::success());
+    CHECK(captures == 2);
+    CHECK(cache.variant_count() == 2);
+    CHECK(cache.capture_count() == 2);
+}
+
 TEST_CASE("graph cache reuses a captured variant at step boundaries") {
     GpuGraphCache cache;
     GpuGraphVariantKey key;
@@ -124,9 +175,12 @@ TEST_CASE("CUDA graph capture instantiates once and replays repeatedly") {
     REQUIRE(cudaMalloc(reinterpret_cast<void**>(&device_value), sizeof(int)) == cudaSuccess);
 
     GpuGraphCache cache;
-    GpuGraphVariantKey key;
+    GpuGraphBoundaryState boundary;
+    boundary.topology.batch_capacity = 1;
+    boundary.runtime_masks.stage_mask = {1};
+    boundary.runtime_masks.mutual_stage_mask = {1};
     const auto captured = cache.capture_and_select(
-        key, stream,
+        boundary, stream,
         [&](cudaStream_t captured_stream) {
             return cudaMemsetAsync(device_value, 0, sizeof(int), captured_stream) == cudaSuccess
                 ? GraphCaptureStatus::success()

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(coilgunCalc VERSION 3.1.0 LANGUAGES CXX C)
+project(coilgunCalc VERSION 3.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,6 +45,8 @@ target_link_libraries(coilgun PUBLIC OpenMP::OpenMP_CXX)
 
 # --- CUDA acceleration (optional) ---
 option(COILGUN_ENABLE_CUDA "Build GPU-accelerated backend" OFF)
+option(COILGUN_ENABLE_CPU_PHASE_TIMING
+       "Enable low-overhead CPU derivative phase instrumentation" OFF)
 if(COILGUN_ENABLE_CUDA)
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 20)

@@ -644,9 +644,9 @@ void GpuEngine::execute_physical_pipeline() {
     const std::size_t B = layout_.B;
     const std::size_t S = layout_.S;
     const std::size_t F = layout_.F;
-    const auto state_snapshot = state_;
+    const auto& state_snapshot = step_workspace_.state_snapshot;
     bool solver_done = false;
-    std::vector<std::uint8_t> active(B * S * F, 0);
+    auto& active = step_workspace_.active_pairs;
     for (std::size_t b = 0; b < B; ++b) {
         for (std::size_t s = 0; s < S; ++s) {
             for (std::size_t f = 0; f < F; ++f) {
@@ -708,8 +708,11 @@ void GpuEngine::execute_physical_pipeline() {
                  cudaMemcpyHostToDevice, "stage mask upload");
             copy(d_mutual_stage_mask, mutual_stage_mask_.data(), sizeof(std::uint8_t) * B * S,
                  cudaMemcpyHostToDevice, "mutual stage mask upload");
-            std::vector<double> stage_voltages = state_.stage_voltages;
-            if (stage_voltages.empty()) stage_voltages.assign(B * S, 0.0);
+            auto& stage_voltages = step_workspace_.stage_voltages;
+            if (state_.stage_voltages.empty())
+                std::fill(stage_voltages.begin(), stage_voltages.end(), 0.0);
+            else
+                stage_voltages = state_.stage_voltages;
             copy(d_stage_voltage, stage_voltages.data(), sizeof(double) * B * S,
                  cudaMemcpyHostToDevice, "stage voltage upload");
             if (policy_.thermal != ThermalMode::Gpu && state_.resistances.size() == B * F)
@@ -827,10 +830,13 @@ void GpuEngine::execute_physical_pipeline() {
                     fault_injection_.fail_graph_capture = false;
                     throw std::runtime_error("injected CUDA graph capture failure");
                 }
-                const auto key = graph_key();
+                GpuGraphBoundaryState boundary;
+                boundary.topology = graph_key();
+                boundary.runtime_masks.stage_mask = stage_mask_;
+                boundary.runtime_masks.mutual_stage_mask = mutual_stage_mask_;
                 const auto capture_count = graph_cache_->capture_count();
                 const auto selected = graph_cache_->capture_and_select(
-                    key, context_->stream(), launch_device_step,
+                    boundary, context_->stream(), launch_device_step,
                     GraphWorkspace{reinterpret_cast<std::uintptr_t>(d_status),
                                    B * sizeof(DeviceStepStatus)});
                 if (!selected.ok)
@@ -910,7 +916,8 @@ void GpuEngine::execute_physical_pipeline() {
                     DeviceResidualView{d_residual, B});
                 if (!solver_status.ok) throw std::runtime_error(solver_status.message);
             }
-            std::vector<DeviceStepStatus> compact_status(B);
+            auto& compact_status = step_workspace_.compact_status;
+            compact_status.resize(B);
             copy(compact_status.data(), d_status, B * sizeof(DeviceStepStatus),
                  cudaMemcpyDeviceToHost, "compact status download");
             for (std::size_t batch = 0; batch < B; ++batch) {
@@ -969,7 +976,8 @@ void GpuEngine::execute_physical_pipeline() {
                 state_.resistances.resize(B * F);
                 state_.joule_energy.resize(B * F);
                 if (policy_.thermal == ThermalMode::Cpu) {
-                    std::vector<double> filament_currents(B * F, 0.0);
+                    auto& filament_currents = step_workspace_.thermal_filament_currents;
+                    std::fill(filament_currents.begin(), filament_currents.end(), 0.0);
                     for (std::size_t b = 0; b < B; ++b)
                         if (state_.active_mask[b] != 0)
                             std::copy_n(state_snapshot.currents.data() + b * layout_.D + S,
@@ -1008,7 +1016,8 @@ void GpuEngine::execute_physical_pipeline() {
     if (policy_.thermal != ThermalMode::Disabled && !solver_done) {
         pipeline_order_.push_back(PipelineStage::Thermal);
         if (!state_.temperatures.empty()) {
-            std::vector<double> filament_currents(B * F, 0.0);
+            auto& filament_currents = step_workspace_.thermal_filament_currents;
+            std::fill(filament_currents.begin(), filament_currents.end(), 0.0);
             for (std::size_t b = 0; b < B; ++b)
                 std::copy_n(state_.currents.data() + b * layout_.D + S,
                             F, filament_currents.data() + b * F);
@@ -1039,17 +1048,15 @@ void GpuEngine::execute_physical_pipeline() {
          std::chrono::duration<double, std::milli>(gpu_stop - gpu_start).count();
 }
 
-GpuGraphVariantKey GpuEngine::graph_key() const {
-    GpuGraphVariantKey key;
+GpuGraphTopologyKey GpuEngine::graph_key() const {
+    GpuGraphTopologyKey key;
     key.batch_capacity = layout_.B;
     key.layout_signature = static_cast<std::uint64_t>(layout_.D) * 1099511628211ull ^ layout_.S ^ (layout_.F << 16);
+    key.stage_signature = static_cast<std::uint64_t>(layout_.S) ^
+        (static_cast<std::uint64_t>(layout_.F) << 32);
     key.precision = policy_.precision;
     key.thermal = policy_.thermal;
     key.solver = policy_.solver;
-    for (const auto bit : stage_mask_)
-        key.stage_signature = key.stage_signature * 1315423911u + bit + 1;
-    for (const auto bit : mutual_stage_mask_)
-        key.stage_signature = key.stage_signature * 1315423911u + bit + 1;
     return key;
 }
 

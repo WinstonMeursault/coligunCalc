@@ -19,14 +19,6 @@ constexpr double kEventTimeTolerance = 1e-12;
 constexpr int kMaxEventBisections = 64;
 constexpr int kMaxEventSegments = 16;
 
-double filament_axial_sep(const components::Armature& arm, int first, int second) {
-    const int radial = arm.radial_filaments();
-    const int first_axial = first / radial + 1;
-    const int second_axial = second / radial + 1;
-    return std::abs(arm.filament_axial_position(first_axial) -
-                    arm.filament_axial_position(second_axial));
-}
-
 bool snapshot_finished(const ExcitationSnapshot& snapshot) {
     if (const auto* value = dynamic_cast<const CapacitorSnapshot*>(&snapshot))
         return value->finished;
@@ -59,10 +51,22 @@ SingleStageSim<SP>::SingleStageSim(
     R_fil_ref_.resize(N_fil_);
     L_fil_.resize(N_fil_);
     mass_fil_.resize(N_fil_);
+    filament_inner_radii_.resize(N_fil_);
+    filament_outer_radii_.resize(N_fil_);
+    filament_mean_radii_.resize(N_fil_);
+    filament_relative_axial_positions_.resize(N_fil_);
+    filament_lengths_.resize(N_fil_);
+    const auto& metadata = armature_.filament_metadata();
     for (int filament = 0; filament < N_fil_; ++filament) {
         R_fil_ref_(filament) = armature_.resistances()[filament];
         L_fil_(filament) = armature_.inductances()[filament];
         mass_fil_(filament) = armature_.masses()[filament];
+        filament_inner_radii_[filament] = metadata[filament].inner_radius;
+        filament_outer_radii_[filament] = metadata[filament].outer_radius;
+        filament_mean_radii_[filament] = metadata[filament].mean_radius;
+        filament_relative_axial_positions_[filament] =
+            metadata[filament].axial_center - armature_.position();
+        filament_lengths_[filament] = metadata[filament].length;
     }
 
     build_filament_M_matrix();
@@ -89,14 +93,14 @@ SingleStageSim<SP>::SingleStageSim(
 template<typename SP>
 void SingleStageSim<SP>::build_filament_M_matrix() {
     M_mat_ = Eigen::MatrixXd::Zero(N_fil_, N_fil_);
-    const int radial = armature_.radial_filaments();
     for (int first = 0; first < N_fil_; ++first) {
-        const double first_radius = armature_.filament_mean_radius(first % radial + 1);
+        const double first_radius = filament_mean_radii_[first];
         for (int second = first + 1; second < N_fil_; ++second) {
-            const double second_radius = armature_.filament_mean_radius(second % radial + 1);
+            const double second_radius = filament_mean_radii_[second];
             const double mutual = physics::mutual_inductance_filament(
                 first_radius, second_radius,
-                filament_axial_sep(armature_, first, second), false);
+                std::abs(filament_relative_axial_positions_[first] -
+                         filament_relative_axial_positions_[second]), false);
             M_mat_(first, second) = mutual;
             M_mat_(second, first) = mutual;
         }
@@ -133,35 +137,49 @@ DerivativeResult SingleStageSim<SP>::evaluate_derivatives(
     const ExcitationSnapshot& excitation,
     DerivativeWorkspace& workspace,
     bool circuit_active) const {
+#if COILGUN_ENABLE_CPU_PHASE_TIMING
+    CpuPhaseTimingScope orchestration_timing(CpuPhase::Orchestration);
+#endif
     workspace.resize(1, static_cast<std::size_t>(N_fil_));
     auto& matrix = workspace.system_matrix;
     auto& rhs = workspace.rhs;
     auto& mutual = workspace.mutual;
     auto& gradient = workspace.mutual_gradient;
+    const double coil_current = state.currents(0);
+    const double velocity = state.arm_velocity;
+#if COILGUN_ENABLE_CPU_PHASE_TIMING
+    if (enable_thermal_) {
+        CpuPhaseTimingScope thermal_timing(CpuPhase::Thermal);
+        workspace.resistance = derive_resistance(state);
+    } else {
+        workspace.resistance = derive_resistance(state);
+    }
+#else
     workspace.resistance = derive_resistance(state);
+#endif
 
-    const int radial = armature_.radial_filaments();
-    const double initial_center = armature_.position();
+{
+#if COILGUN_ENABLE_CPU_PHASE_TIMING
+    CpuPhaseTimingScope mutual_timing(CpuPhase::Mutual);
+#endif
 #pragma omp parallel for if (N_fil_ >= 8)
     for (int filament = 0; filament < N_fil_; ++filament) {
-        const int axial = filament / radial + 1;
-        const int radial_index = filament % radial + 1;
-        const double relative = armature_.filament_axial_position(axial) - initial_center;
-        const double separation = state.arm_position + relative - coil_.position();
-        const double filament_length =
-            armature_.length() / static_cast<double>(armature_.axial_filaments());
-        mutual(filament) = physics::mutual_inductance_coil(
+        const double separation = state.arm_position +
+            filament_relative_axial_positions_[filament] - coil_.position();
+        const auto pair = physics::mutual_detail::mutual_inductance_coil_pair(
             coil_.inner_radius(), coil_.outer_radius(), coil_.length(), coil_.turns(),
-            armature_.filament_inner_radius(radial_index),
-            armature_.filament_outer_radius(radial_index), filament_length, 1,
+            filament_inner_radii_[filament], filament_outer_radii_[filament],
+            filament_lengths_[filament], 1,
             separation, 9, false);
-        gradient(filament) = physics::mutual_inductance_gradient_coil(
-            coil_.inner_radius(), coil_.outer_radius(), coil_.length(), coil_.turns(),
-            armature_.filament_inner_radius(radial_index),
-            armature_.filament_outer_radius(radial_index), filament_length, 1,
-            separation, 9, false);
+        mutual(filament) = pair.mutual;
+        gradient(filament) = pair.gradient;
     }
+}
 
+{
+#if COILGUN_ENABLE_CPU_PHASE_TIMING
+    CpuPhaseTimingScope assembly_timing(CpuPhase::Assembly);
+#endif
     matrix.setZero();
     matrix(0, 0) = circuit_active ? L_d_ : 1.0;
     for (int filament = 0; filament < N_fil_; ++filament) {
@@ -174,8 +192,6 @@ DerivativeResult SingleStageSim<SP>::evaluate_derivatives(
             if (filament != other) matrix(filament + 1, other + 1) = M_mat_(filament, other);
     }
 
-    const double coil_current = state.currents(0);
-    const double velocity = state.arm_velocity;
     double motional_emf = 0.0;
     for (int filament = 0; filament < N_fil_; ++filament)
         motional_emf += gradient(filament) * state.currents(filament + 1);
@@ -187,9 +203,14 @@ DerivativeResult SingleStageSim<SP>::evaluate_derivatives(
             state.currents(filament + 1) -
             velocity * gradient(filament) * coil_current;
     }
+}
 
     DerivativeResult result;
     result.physical_derivative.currents.resize(N_fil_ + 1);
+{
+#if COILGUN_ENABLE_CPU_PHASE_TIMING
+    CpuPhaseTimingScope solve_timing(CpuPhase::Solve);
+#endif
     Eigen::LDLT<Eigen::MatrixXd> solver(matrix);
     if (solver.info() == Eigen::Success)
         result.physical_derivative.currents = solver.solve(rhs);
@@ -197,12 +218,16 @@ DerivativeResult SingleStageSim<SP>::evaluate_derivatives(
         result.physical_derivative.currents = matrix.colPivHouseholderQr().solve(rhs);
     if (!result.physical_derivative.currents.allFinite())
         throw std::runtime_error("single-stage circuit solve produced non-finite derivatives");
+}
 
     result.force = circuit_active ? compute_force(state, gradient) : 0.0;
     result.mutual_gradient = gradient;
     result.physical_derivative.arm_position = state.arm_velocity;
     result.physical_derivative.arm_velocity = result.force / armature_.mass();
     if (enable_thermal_) {
+#if COILGUN_ENABLE_CPU_PHASE_TIMING
+        CpuPhaseTimingScope thermal_timing(CpuPhase::Thermal);
+#endif
         result.physical_derivative.filament_temperatures.resize(N_fil_);
         for (int filament = 0; filament < N_fil_; ++filament) {
             const double current = state.currents(filament + 1);

@@ -195,6 +195,7 @@ SimBatch<SP>::SimBatch(std::vector<components::DrivingCoil> coils,
         sim.initial_stage_energies.assign(static_cast<std::size_t>(n_stages_), 0.0);
         sim.active = true;
     }
+    rebuild_active_indices();
     sync_states_from_engine();
 }
 
@@ -232,24 +233,40 @@ void SimBatch<SP>::set_excitations(int sim_id,
                 0.5 * capacitor->capacitance() * capacitor->initial_voltage() * capacitor->initial_voltage();
     }
     sim.result = MultiStageResult{};
-    sim.stage_force_history.clear();
     sim.step_count = 0;
     sim.active = true;
     sim.configured = true;
+    rebuild_active_indices();
 }
 
 template<typename SP>
 void SimBatch<SP>::sync_states_from_engine() {
     const auto& source = engine_->state();
     const auto D = static_cast<std::size_t>(n_stages_ + N_fil_);
-    for (int id = 0; id < num_sims_; ++id) {
-        auto& state = sims_[static_cast<std::size_t>(id)].state;
-        const auto b = static_cast<std::size_t>(id);
+    for (const auto b : active_indices_) {
+        auto& state = sims_[b].state;
         state.currents = Eigen::Map<const Eigen::VectorXd>(source.currents.data() + b * D,
                                                             static_cast<Eigen::Index>(D));
         state.arm_position = armature_.position() - source.position[b];
         state.arm_velocity = -source.velocity[b];
     }
+}
+
+template<typename SP>
+void SimBatch<SP>::rebuild_active_indices() {
+    active_indices_.clear();
+    active_indices_.reserve(sims_.size());
+    for (std::size_t sim_id = 0; sim_id < sims_.size(); ++sim_id) {
+        if (sims_[sim_id].active) active_indices_.push_back(sim_id);
+    }
+}
+
+template<typename SP>
+void SimBatch<SP>::prune_active_indices() {
+    active_indices_.erase(
+        std::remove_if(active_indices_.begin(), active_indices_.end(),
+                       [this](const std::size_t sim_id) { return !sims_[sim_id].active; }),
+        active_indices_.end());
 }
 
 template<typename SP>
@@ -339,13 +356,13 @@ void SimBatch<SP>::configure_engine_boundary() {
     const auto S = static_cast<std::size_t>(n_stages_);
     std::vector<std::uint8_t> active(B, 0), trigger(B * S, 0), stage(B * S, 0), mutual(B * S, 0);
     std::vector<double> voltages(B * S, 0.0);
-    for (std::size_t b = 0; b < B; ++b) {
+    for (const auto b : active_indices_) {
         auto& sim = sims_[b];
-        active[b] = sim.active ? 1 : 0;
+        active[b] = 1;
         for (std::size_t s = 0; s < S; ++s) {
             const auto index = b * S + s;
             trigger[index] = sim.triggered[s] ? 1 : 0;
-            if (!sim.active || !sim.triggered[s] || sim.stage_completed[s]) continue;
+            if (!sim.triggered[s] || sim.stage_completed[s]) continue;
             stage[index] = 1;
             mutual[index] = is_stage_within_range(static_cast<int>(s), sim) ? 1 : 0;
             voltages[index] = sim.excitation_finished[s]
@@ -362,7 +379,7 @@ void SimBatch<SP>::configure_engine_boundary() {
     std::vector<double> trigger_times(B * S, 0.0);
     std::vector<double> trigger_positions(B * S, armature_.position());
     std::vector<double> position_offsets(B, armature_.position());
-    for (std::size_t b = 0; b < B; ++b) {
+    for (const auto b : active_indices_) {
         const auto& sim = sims_[b];
         for (std::size_t s = 0; s < S; ++s) {
             const auto index = b * S + s;
@@ -384,12 +401,13 @@ void SimBatch<SP>::configure_engine_boundary() {
 }
 
 template<typename SP>
-std::vector<double> SimBatch<SP>::compute_stage_forces(std::size_t sim_id,
-    const std::vector<double>& currents, const std::vector<double>& gradients) const {
+void SimBatch<SP>::compute_stage_forces(std::size_t sim_id,
+    const std::vector<double>& currents, const std::vector<double>& gradients,
+    std::vector<double>& forces) const {
     const auto S = static_cast<std::size_t>(n_stages_);
     const auto F = static_cast<std::size_t>(N_fil_);
     const auto D = S + F;
-    std::vector<double> forces(S, 0.0);
+    forces.assign(S, 0.0);
     const auto& sim = sims_[sim_id];
     for (std::size_t s = 0; s < S; ++s) {
         if (!sim.triggered[s] || sim.stage_completed[s]) continue;
@@ -397,7 +415,6 @@ std::vector<double> SimBatch<SP>::compute_stage_forces(std::size_t sim_id,
             forces[s] -= currents[sim_id * D + s] * currents[sim_id * D + S + f] *
                          gradients[(sim_id * S + s) * F + f];
     }
-    return forces;
 }
 
 template<typename SP>
@@ -421,7 +438,6 @@ void SimBatch<SP>::record_step(std::size_t sim_id, const std::vector<double>& st
     }
     entry.stage_forces = stage_forces;
     sim.result.history.push_back(std::move(entry));
-    sim.stage_force_history.push_back(stage_forces);
     ++sim.step_count;
 }
 
@@ -433,6 +449,7 @@ void SimBatch<SP>::prepare_summary(SimInstance& sim) {
     if (sim.result.history.empty()) return;
     summary.total_time = sim.result.history.back().state.time;
     summary.muzzle_velocity = sim.result.history.back().state.arm_velocity;
+    bool global_summary_scanned = false;
     for (std::size_t s = 0; s < static_cast<std::size_t>(n_stages_); ++s) {
         if (!sim.triggered[s]) continue;
         PerStageSummary per;
@@ -443,10 +460,17 @@ void SimBatch<SP>::prepare_summary(SimInstance& sim) {
         for (std::size_t h = 0; h < sim.result.history.size(); ++h) {
             const auto& entry = sim.result.history[h];
             per.peak_current = std::max(per.peak_current, entry.coil_currents[s]);
-            if (h < sim.stage_force_history.size()) per.max_force = std::max(per.max_force, std::abs(sim.stage_force_history[h][s]));
+            if (s < entry.stage_forces.size())
+                per.max_force = std::max(per.max_force, std::abs(entry.stage_forces[s]));
             if (entry.coil_currents[s] > 1e-6) active = true;
             if (active) ++per.step_count_active;
+            if (!global_summary_scanned) {
+                summary.max_force = std::max(summary.max_force, std::abs(entry.state.force));
+                for (const double current : entry.coil_currents)
+                    summary.peak_coil_current = std::max(summary.peak_coil_current, current);
+            }
         }
+        global_summary_scanned = true;
         if (const auto* capacitor = dynamic_cast<const CapacitorExcitation*>(sim.excitations[s].get())) {
             per.energy_depleted = sim.initial_stage_energies[s] -
                 0.5 * capacitor->capacitance() * capacitor->capacitor_voltage() * capacitor->capacitor_voltage();
@@ -457,9 +481,12 @@ void SimBatch<SP>::prepare_summary(SimInstance& sim) {
     for (const auto& excitation : sim.excitations)
         if (const auto* capacitor = dynamic_cast<const CapacitorExcitation*>(excitation.get()))
             input_energy += 0.5 * capacitor->capacitance() * capacitor->initial_voltage() * capacitor->initial_voltage();
-    for (const auto& entry : sim.result.history) {
-        summary.max_force = std::max(summary.max_force, std::abs(entry.state.force));
-        for (const double current : entry.coil_currents) summary.peak_coil_current = std::max(summary.peak_coil_current, current);
+    if (!global_summary_scanned) {
+        for (const auto& entry : sim.result.history) {
+            summary.max_force = std::max(summary.max_force, std::abs(entry.state.force));
+            for (const double current : entry.coil_currents)
+                summary.peak_coil_current = std::max(summary.peak_coil_current, current);
+        }
     }
     const double kinetic = 0.5 * armature_.mass() * summary.muzzle_velocity * summary.muzzle_velocity;
     summary.efficiency = input_energy > 0.0 ? kinetic / input_energy : 0.0;
@@ -476,31 +503,33 @@ void SimBatch<SP>::run(const TerminationPolicy& policy) {
         for (const auto& sim : sims_)
             if (!sim.configured) throw std::logic_error("SimBatch: set_excitations must configure every simulation before run");
 
-        bool any_active = true;
-        while (any_active) {
-            any_active = false;
-            for (auto& sim : sims_) {
-                if (!sim.active) continue;
+        rebuild_active_indices();
+        while (!active_indices_.empty()) {
+            for (const auto sim_id : active_indices_) {
+                auto& sim = sims_[sim_id];
                 if (check_termination(sim, policy)) sim.active = false;
-                else any_active = true;
             }
-            if (!any_active) break;
-            for (auto& sim : sims_) {
-                if (!sim.active) continue;
+            prune_active_indices();
+            if (active_indices_.empty()) break;
+            for (const auto sim_id : active_indices_) {
+                auto& sim = sims_[sim_id];
                 if (engine_->report().backend == BackendMode::Fallback) check_triggers(sim);
                 extinguish_quiet_stages(sim);
             }
             configure_engine_boundary();
-            std::vector<std::uint8_t> stepped(sims_.size(), 0);
-            for (std::size_t b = 0; b < sims_.size(); ++b)
-                stepped[b] = sims_[b].active ? 1 : 0;
-            const auto pre_step_currents = engine_->state().currents;
+            const auto dimension = static_cast<std::size_t>(n_stages_ + N_fil_);
+            active_pre_step_currents_.resize(active_indices_.size() * dimension);
+            for (std::size_t active_id = 0; active_id < active_indices_.size(); ++active_id) {
+                const auto b = active_indices_[active_id];
+                std::copy_n(engine_->state().currents.data() + b * dimension, dimension,
+                            active_pre_step_currents_.data() + active_id * dimension);
+            }
             engine_->step();
-            const auto boundary_gradients = engine_->state().dm1;
+            const auto& boundary_gradients = engine_->state().dm1;
             sync_states_from_engine();
             if (engine_->report().backend != BackendMode::Fallback) {
                 const auto& engine_state = engine_->state();
-                for (std::size_t b = 0; b < sims_.size(); ++b) {
+                for (const auto b : active_indices_) {
                     auto& sim = sims_[b];
                     sim.active = engine_state.active_mask[b] != 0;
                     for (std::size_t s = 0; s < static_cast<std::size_t>(n_stages_); ++s) {
@@ -512,14 +541,13 @@ void SimBatch<SP>::run(const TerminationPolicy& policy) {
                     }
                 }
             }
-            for (std::size_t b = 0; b < sims_.size(); ++b) {
+            for (std::size_t active_id = 0; active_id < active_indices_.size(); ++active_id) {
+                const auto b = active_indices_[active_id];
                 auto& sim = sims_[b];
-                if (stepped[b] == 0) continue;
                 for (std::size_t s = 0; s < static_cast<std::size_t>(n_stages_); ++s) {
                     if (sim.triggered[s] && !sim.excitation_finished[s]) {
-                        const auto dimension = static_cast<std::size_t>(n_stages_ + N_fil_);
                         sim.excitations[s]->advance(
-                            dt_, pre_step_currents[b * dimension + s]);
+                            dt_, active_pre_step_currents_[active_id * dimension + s]);
                         if (sim.excitations[s]->finished())
                             sim.excitation_finished[s] = true;
                     }
@@ -534,10 +562,11 @@ void SimBatch<SP>::run(const TerminationPolicy& policy) {
                 // Recorded history uses post-step currents with the gradient
                 // cached at the pre-position step boundary, masked after
                 // excitation advancement.
-                const auto forces = compute_stage_forces(b, engine_->state().currents,
-                                                         boundary_gradients);
-                record_step(b, forces);
+                compute_stage_forces(b, engine_->state().currents, boundary_gradients,
+                                     sim.stage_force_scratch);
+                record_step(b, sim.stage_force_scratch);
             }
+            prune_active_indices();
         }
         for (auto& sim : sims_) prepare_summary(sim);
     }

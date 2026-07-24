@@ -76,7 +76,7 @@ double struve_h1_power_series(double x) {
 
 // K0(x) = (2/pi) * integral_0^inf  e^{-u} / sqrt(u^2 + x^2)  du
 double k0_integral(double x) {
-    const auto& gl = gauss_laguerre(30);
+    const auto& gl = gauss_laguerre_cached(30);
     double result = 0.0;
     for (std::size_t i = 0; i < gl.nodes.size(); ++i) {
         const double u = gl.nodes[i];
@@ -87,7 +87,7 @@ double k0_integral(double x) {
 
 // K1(x) = (2/pi) * integral_0^inf  e^{-u} * sqrt(1 + (u/x)^2)  du
 double k1_integral(double x) {
-    const auto& gl = gauss_laguerre(30);
+    const auto& gl = gauss_laguerre_cached(30);
     double result = 0.0;
     for (std::size_t i = 0; i < gl.nodes.size(); ++i) {
         const double u = gl.nodes[i];

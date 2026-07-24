@@ -64,6 +64,28 @@
         "COILGUN_ENABLE_CUDA": "ON",
         "CMAKE_CUDA_ARCHITECTURES": "native"
       }
+    },
+    {
+      "name": "cpu-release-library",
+      "displayName": "CPU Release Library Only",
+      "inherits": "cpu-release",
+      "binaryDir": "${sourceDir}/build/cpu-release-library",
+      "cacheVariables": {
+        "COILGUN_BUILD_TESTS": "OFF",
+        "COILGUN_BUILD_GENERATOR": "OFF",
+        "COILGUN_BUILD_GENERATOR_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "cuda-release-library",
+      "displayName": "CUDA Release Library Only",
+      "inherits": "cuda-release",
+      "binaryDir": "${sourceDir}/build/cuda-release-library",
+      "cacheVariables": {
+        "COILGUN_BUILD_TESTS": "OFF",
+        "COILGUN_BUILD_GENERATOR": "OFF",
+        "COILGUN_BUILD_GENERATOR_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -86,6 +108,18 @@
       "name": "cuda-release",
       "displayName": "CUDA Release",
       "configurePreset": "cuda-release"
+    },
+    {
+      "name": "cpu-release-library",
+      "displayName": "CPU Release Library Only",
+      "configurePreset": "cpu-release-library",
+      "targets": ["coilgun"]
+    },
+    {
+      "name": "cuda-release-library",
+      "displayName": "CUDA Release Library Only",
+      "configurePreset": "cuda-release-library",
+      "targets": ["coilgun", "coilgun_cuda"]
     }
   ],
   "testPresets": [
@@ -120,6 +154,68 @@
       "output": {
         "outputOnFailure": true
       }
+    },
+    {
+      "name": "cpu-quick",
+      "displayName": "CPU Quick Tests",
+      "configurePreset": "cpu-release",
+      "filter": {"include": {"label": "quick"}},
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "cpu-parallel",
+      "displayName": "CPU Parallel Tests",
+      "configurePreset": "cpu-release",
+      "filter": {"include": {"label": "quick|validation"}},
+      "execution": {"jobs": 4},
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "cpu-slow",
+      "displayName": "CPU Slow Tests",
+      "configurePreset": "cpu-release",
+      "filter": {"include": {"label": "slow"}},
+      "execution": {"jobs": 1},
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "cpu-integration",
+      "displayName": "CPU Integration Tests",
+      "configurePreset": "cpu-release",
+      "filter": {"include": {"label": "integration"}},
+      "execution": {"jobs": 1},
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "cuda-quick",
+      "displayName": "CUDA Quick Tests",
+      "configurePreset": "cuda-release",
+      "filter": {"include": {"label": "quick"}},
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "cuda-parallel",
+      "displayName": "CUDA Parallel Tests",
+      "configurePreset": "cuda-release",
+      "filter": {"include": {"label": "quick|validation"}},
+      "execution": {"jobs": 4},
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "cuda-slow",
+      "displayName": "CUDA Slow Tests",
+      "configurePreset": "cuda-release",
+      "filter": {"include": {"label": "slow"}},
+      "execution": {"jobs": 1},
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "cuda-integration",
+      "displayName": "CUDA Integration Tests",
+      "configurePreset": "cuda-release",
+      "filter": {"include": {"label": "integration"}},
+      "execution": {"jobs": 1},
+      "output": {"outputOnFailure": true}
     }
   ]
 }

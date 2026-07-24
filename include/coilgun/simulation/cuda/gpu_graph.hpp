@@ -20,7 +20,8 @@
 
 namespace coilgun::simulation::cuda {
 
-struct GpuGraphVariantKey {
+/** Immutable Graph topology/layout identity. Runtime masks are not included. */
+struct GpuGraphTopologyKey {
     std::uint64_t stage_signature = 0;
     std::size_t batch_capacity = 0;
     std::uint64_t layout_signature = 0;
@@ -28,7 +29,7 @@ struct GpuGraphVariantKey {
     ThermalMode thermal = ThermalMode::Disabled;
     SolverMode solver = SolverMode::Eigen;
 
-    bool operator==(const GpuGraphVariantKey& other) const noexcept {
+    bool operator==(const GpuGraphTopologyKey& other) const noexcept {
         return stage_signature == other.stage_signature &&
                batch_capacity == other.batch_capacity &&
                layout_signature == other.layout_signature &&
@@ -37,14 +38,39 @@ struct GpuGraphVariantKey {
     }
 };
 
-struct GpuGraphVariantKeyHash {
-    std::size_t operator()(const GpuGraphVariantKey& key) const noexcept {
+using GpuGraphVariantKey = GpuGraphTopologyKey;
+
+struct GpuGraphTopologyKeyHash {
+    std::size_t operator()(const GpuGraphTopologyKey& key) const noexcept {
         std::size_t hash = static_cast<std::size_t>(key.stage_signature);
         hash = hash * 31u + key.batch_capacity;
         hash = hash * 31u + static_cast<std::size_t>(key.layout_signature);
         hash = hash * 31u + static_cast<std::size_t>(key.precision);
         hash = hash * 31u + static_cast<std::size_t>(key.thermal);
         return hash * 31u + static_cast<std::size_t>(key.solver);
+    }
+};
+
+using GpuGraphVariantKeyHash = GpuGraphTopologyKeyHash;
+
+/** Mutable step-boundary inputs consumed by a fixed-shape Graph. */
+struct GpuGraphRuntimeMasks {
+    std::vector<std::uint8_t> stage_mask;
+    std::vector<std::uint8_t> mutual_stage_mask;
+
+    bool operator==(const GpuGraphRuntimeMasks& other) const noexcept {
+        return stage_mask == other.stage_mask &&
+               mutual_stage_mask == other.mutual_stage_mask;
+    }
+};
+
+/** Topology key plus runtime inputs; only topology controls cache selection. */
+struct GpuGraphBoundaryState {
+    GpuGraphTopologyKey topology{};
+    GpuGraphRuntimeMasks runtime_masks{};
+
+    bool requires_rebuild_from(const GpuGraphBoundaryState& previous) const noexcept {
+        return !(topology == previous.topology);
     }
 };
 
@@ -116,10 +142,16 @@ public:
 
     GraphCaptureStatus select_or_capture(const GpuGraphVariantKey& key,
                                           const CaptureFn& capture);
+    GraphCaptureStatus select_or_capture(const GpuGraphBoundaryState& boundary,
+                                          const CaptureFn& capture);
     GraphCaptureStatus replay(const ReplayFn& replay);
 #if defined(COILGUN_CUDA_AVAILABLE)
     using CudaCaptureBody = std::function<GraphCaptureStatus(cudaStream_t)>;
     GraphCaptureStatus capture_and_select(const GpuGraphVariantKey& key,
+                                          cudaStream_t stream,
+                                          const CudaCaptureBody& body,
+                                          GraphWorkspace workspace = {});
+    GraphCaptureStatus capture_and_select(const GpuGraphBoundaryState& boundary,
                                           cudaStream_t stream,
                                           const CudaCaptureBody& body,
                                           GraphWorkspace workspace = {});

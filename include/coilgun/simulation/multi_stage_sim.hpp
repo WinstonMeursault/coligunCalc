@@ -169,6 +169,11 @@ private:
     Eigen::VectorXd R_fil_ref_;    // [N_fil]
     Eigen::VectorXd mass_fil_;     // [N_fil]
     Eigen::MatrixXd M_mat_;        // [N_fil x N_fil], inter-filament mutual
+    std::vector<double> filament_inner_radii_;
+    std::vector<double> filament_outer_radii_;
+    std::vector<double> filament_mean_radii_;
+    std::vector<double> filament_relative_axial_positions_;
+    std::vector<double> filament_lengths_;
 
     IntegrationState integration_state_;
     IntegrationState initial_integration_state_;

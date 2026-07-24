@@ -101,6 +101,9 @@ public:
     SolverStatus solve_batch(const double* matrices,
                              const double* rhs,
                              double* solutions);
+    // Preserves the input matrix/RHS views. Non-capture calls write the
+    // solution directly into the caller's output view; graph capture keeps a
+    // stable solver-owned RHS scratch path.
     SolverStatus solve_device(const DeviceMatrixView& matrix,
                               const DeviceVectorView& rhs,
                               DeviceVectorView solution,

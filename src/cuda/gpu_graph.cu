@@ -47,6 +47,11 @@ GraphCaptureStatus GpuGraphCache::select_or_capture(const GpuGraphVariantKey& ke
     return status;
 }
 
+GraphCaptureStatus GpuGraphCache::select_or_capture(const GpuGraphBoundaryState& boundary,
+                                                     const CaptureFn& capture) {
+    return select_or_capture(boundary.topology, capture);
+}
+
 GraphCaptureStatus GpuGraphCache::replay(const ReplayFn& replay_fn) {
     if (fallback_locked_) {
         return GraphCaptureStatus::failed(GraphCapturePhase::Replay, 0,
@@ -120,6 +125,13 @@ GraphCaptureStatus GpuGraphCache::capture_and_select(const GpuGraphVariantKey& k
     current_ = &inserted.first->second;
     ++capture_count_;
     return GraphCaptureStatus::success(workspace.pointer, workspace.bytes);
+}
+
+GraphCaptureStatus GpuGraphCache::capture_and_select(const GpuGraphBoundaryState& boundary,
+                                                      cudaStream_t stream,
+                                                      const CudaCaptureBody& body,
+                                                      GraphWorkspace workspace) {
+    return capture_and_select(boundary.topology, stream, body, workspace);
 }
 
 GraphCaptureStatus GpuGraphCache::replay(cudaStream_t stream) {

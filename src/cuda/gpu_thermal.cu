@@ -30,10 +30,11 @@ __host__ __device__ double rho_value(int material, double temperature) {
 template <typename T>
 __device__ T table_interpolate(const double* temperatures, const double* values,
                                std::size_t count, double minimum, double maximum,
+                               double inverse_range,
                                T temperature, bool log_linear) {
     const T clamped = max(static_cast<T>(minimum), min(static_cast<T>(maximum), temperature));
-    const T position = (clamped - static_cast<T>(minimum)) /
-                       (static_cast<T>(maximum - minimum)) * static_cast<T>(count - 1);
+    const T position = (clamped - static_cast<T>(minimum)) *
+                       static_cast<T>(inverse_range) * static_cast<T>(count - 1);
     const std::size_t lower = min(count - 2, static_cast<std::size_t>(position));
     const T fraction = position - static_cast<T>(lower);
     T left = static_cast<T>(values[lower]);
@@ -48,7 +49,8 @@ __device__ T table_interpolate(const double* temperatures, const double* values,
 
 __global__ void thermal_kernel(const double* table_t, const double* cp_al, const double* cp_cu,
                                 const double* rho_al, const double* rho_cu, std::size_t table_count,
-                                double minimum, double maximum, int precision, std::size_t count,
+                                double minimum, double maximum, double inverse_range,
+                                int precision, std::size_t count,
                                 const double* currents, std::size_t current_stride,
                                 std::size_t current_offset, const std::uint8_t* active_mask,
                                 std::size_t filament_count, const double* masses,
@@ -72,11 +74,12 @@ __global__ void thermal_kernel(const double* table_t, const double* cp_al, const
         const float m = static_cast<float>(masses[index]);
         const float r = static_cast<float>(old_resistance);
         const float cp = table_interpolate(table_t, material ? cp_cu : cp_al, table_count,
-                                           minimum, maximum, t, false);
+                                           minimum, maximum, inverse_range, t, false);
         const float next_t = t + i * i * r * static_cast<float>(dt) / (m * cp);
         temperatures[index] = next_t;
         resistivities[index] = static_cast<float>(table_interpolate(
-            table_t, material ? rho_cu : rho_al, table_count, minimum, maximum, next_t, false));
+            table_t, material ? rho_cu : rho_al, table_count, minimum, maximum,
+            inverse_range, next_t, false));
         resistances[index] = static_cast<float>(reference_resistances[index] *
             (1.0f + (material ? 4.1e-3f : 4.2e-3f) * (next_t - static_cast<float>(T_REFERENCE))));
         joule_energy[index] = i * i * r * static_cast<float>(dt);
@@ -87,12 +90,12 @@ __global__ void thermal_kernel(const double* table_t, const double* cp_al, const
     const double cp = standard
         ? cp_value(material, old_temperature)
         : table_interpolate(table_t, material ? cp_cu : cp_al, table_count,
-                            minimum, maximum, old_temperature, false);
+                            minimum, maximum, inverse_range, old_temperature, false);
     const double next_temperature = old_temperature +
         current * current * old_resistance * dt / (masses[index] * cp);
     temperatures[index] = next_temperature;
     resistivities[index] = table_interpolate(table_t, material ? rho_cu : rho_al, table_count,
-                                             minimum, maximum, next_temperature, false);
+                                             minimum, maximum, inverse_range, next_temperature, false);
     resistances[index] = reference_resistances[index] *
         (1.0 + (material ? 4.1e-3 : 4.2e-3) * (next_temperature - T_REFERENCE));
     joule_energy[index] = joule;
@@ -199,6 +202,7 @@ void ThermalWorkspace::update(const MaterialTables& tables, ThermalPrecision pre
     check_cuda(cudaMemcpyAsync(impl_->r, resistances, count * sizeof(double), cudaMemcpyHostToDevice, stream), "state resistance copy");
     thermal_kernel<<<static_cast<unsigned>((count + 255) / 256), 256, 0, stream>>>(impl_->t, impl_->cp_al, impl_->cp_cu,
         impl_->rho_al, impl_->rho_cu, n, tables.minimum_temperature, tables.maximum_temperature,
+        1.0 / (tables.maximum_temperature - tables.minimum_temperature),
         static_cast<int>(precision), count, impl_->i, filament_count, 0, nullptr,
         filament_count, impl_->m, impl_->r0, impl_->material, dt,
         impl_->temp, impl_->rho, impl_->r, impl_->q);
@@ -252,6 +256,7 @@ cudaError_t ThermalWorkspace::launch_device(
     thermal_kernel<<<static_cast<unsigned>((count + 255) / 256), 256, 0, stream>>>(
         impl_->t, impl_->cp_al, impl_->cp_cu, impl_->rho_al, impl_->rho_cu,
         impl_->table_count, key_.min_temperature, key_.max_temperature,
+        1.0 / (key_.max_temperature - key_.min_temperature),
         static_cast<int>(precision), count, currents, stage_count + filament_count,
         stage_count, active_mask, filament_count, impl_->m, impl_->r0,
         impl_->material, dt, impl_->temp, impl_->rho, impl_->r, impl_->q);
