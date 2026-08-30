@@ -1240,7 +1240,7 @@ target_link_libraries(your_target PRIVATE coilgun_cuda coilgun CUDA::cudart)
 namespace coilgun::simulation::cuda {
 
 struct GpuBackend {
-    int     device_id         = 0;     ///< cudaSetDevice 目标。
+    int     device_id         = -1;    ///< cudaSetDevice 目标；-1 自动选择第一块独立 GPU。
     int     threads_per_block = 512;   ///< 4D 积分 kernel 的每 block 线程数。
     size_t  max_batch_sims    = 256;   ///< 批量仿真缓冲区的预分配上限。
     bool    enable_profiling  = false; ///< 保留 profiling 请求元数据；主机墙钟计时字段始终采集。不保证 NVTX。
@@ -1253,7 +1253,7 @@ struct GpuBackend {
 
 | 字段 | 说明 | 默认值 |
 |-------|---------|---------|
-| `device_id` | 选择目标物理 GPU（多 GPU 系统相关）。 | `0` |
+| `device_id` | 选择目标物理 GPU（多 GPU 系统相关）。`-1` 表示自动放置：优先第一块独立（非集成）CUDA 设备，否则回落到设备 0。 | `-1`（自动） |
 | `threads_per_block` | 4D GL 积分 kernel 请求的每 block 线程数。必须是不大于 512 的正数 2 的幂；1、128、256、512 均有效。 | `512` |
 | `max_batch_sims` | `SimBatch` 中的最大仿真数。`SimBatch` 对超过该值的 `num_sims` 抛出 `std::invalid_argument`；该字段本身不负责分配缓冲区。 | `256` |
 | `enable_profiling` | 为 true 时，在 `ExecutionReport::profiling_enabled` 中保留请求。主机墙钟计时类别独立于此标志始终采集。本构建不承诺 NVTX 标记，也不引入 NVTX 依赖。 | `false` |
@@ -1268,7 +1268,8 @@ struct GpuBackend {
 
 ```cpp
 coilgun::simulation::cuda::GpuBackend be;
-be.device_id = 0;
+// be.device_id 默认 -1（自动：优先第一块独立 GPU）。
+be.device_id = 1;   // 或在多 GPU 系统上显式指定索引
 be.threads_per_block = 256;   // 不大于 512 的任意正数 2 的幂
 ```
 
@@ -1325,7 +1326,7 @@ struct GpuExecutionConfig {
     ThermalMode thermal = ThermalMode::Auto;
     bool enable_calibration = false;
     bool deterministic = false;
-    int device_id = 0;
+    int device_id = -1;   // -1：自动选择第一块独立 GPU
     int threads_per_block = 512;
     bool enable_profiling = false;
     void validate() const;
@@ -1530,7 +1531,8 @@ RHS 是快照，不借用引擎存储。
 设备指针生命周期约束，也不是推荐的应用层 API。这里列出它们以明确完整的公共头文件
 边界。
 
-**CUDA 执行上下文。** `GpuExecutionContextConfig` 包含 `device_id`、非阻塞
+**CUDA 执行上下文。** `GpuExecutionContextConfig` 包含 `device_id`（`-1` 通过
+`preferred_cuda_device()` 自动解析为第一块独立 CUDA 设备）、非阻塞
 `stream_flags`、可选的 `workspace_bytes` 和 profiling 请求元数据。
 `GpuExecutionContext` 是 move-only 的 RAII 对象，拥有一个 CUDA stream、起止 event、
 cuBLAS/cuSOLVER handle 和 workspace。handle/指针访问器返回借用资源；
@@ -1641,7 +1643,7 @@ public:
 | `backend` | GPU 后端配置 | `{}`（默认值） |
 | `explicit_backend` | 可选的构造函数级后端覆盖。`Auto` 保留 `GpuBackend` 的解析结果；其他值同时覆盖 `backend` 和 `use_persistent`。 | `BackendMode::Auto` |
 
-当激励源为空、`dt` 非有限或不为正、`device_id` 为负、`threads_per_block` 无效、`max_batch_sims == 0`、激励电压非有限、几何/状态维度无效或 stage 电压非有限时，构造函数抛出 `std::invalid_argument`。启用 CUDA 时还会验证目标设备存在，并在分配资源前确认该设备仍被选中。`GpuSingleStageSim<RK4Stepper>` 为保持源码兼容仍可构造，但由于 RK4 不受支持，`step()` 抛出 `std::logic_error`。
+当激励源为空、`dt` 非有限或不为正、`device_id < -1`、`threads_per_block` 无效、`max_batch_sims == 0`、激励电压非有限、几何/状态维度无效或 stage 电压非有限时，构造函数抛出 `std::invalid_argument`。启用 CUDA 时还会验证目标设备存在，并在分配资源前确认该设备仍被选中。`GpuSingleStageSim<RK4Stepper>` 为保持源码兼容仍可构造，但由于 RK4 不受支持，`step()` 抛出 `std::logic_error`。
 
 **方法**：
 
@@ -1706,7 +1708,7 @@ struct GpuBackend {
 
 ```cpp
 struct GpuBackend {
-    int device_id = 0;
+    int device_id = -1; // 自动：优先第一块独立 GPU
     int threads_per_block = 512;
     size_t max_batch_sims = 256;
     bool enable_profiling = false; // 元数据和主机计时；不保证 NVTX

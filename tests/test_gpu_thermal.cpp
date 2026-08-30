@@ -2,6 +2,7 @@
 
 #include "coilgun/physics/constants.hpp"
 #include "coilgun/simulation/cuda/gpu_thermal.hpp"
+#include "coilgun/simulation/cuda/gpu_execution_context.hpp"
 
 #include <cuda_runtime.h>
 #include <vector>
@@ -18,8 +19,7 @@ TEST_CASE("GPU thermal tables interpolate CPU material properties") {
 }
 
 TEST_CASE("GPU thermal batch returns temperature resistance rho and Joule energy") {
-    int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping thermal-kernel test");
         return;
     }
@@ -43,8 +43,7 @@ TEST_CASE("GPU thermal batch returns temperature resistance rho and Joule energy
 }
 
 TEST_CASE("GPU thermal precision modes stay within CPU reference thresholds") {
-    int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping thermal precision test");
         return;
     }
@@ -87,8 +86,7 @@ TEST_CASE("GPU thermal precision modes stay within CPU reference thresholds") {
 }
 
 TEST_CASE("resident GPU thermal workspace reuses buffers across repeated launches") {
-    int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping resident thermal workspace test");
         return;
     }

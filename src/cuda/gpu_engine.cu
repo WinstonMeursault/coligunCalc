@@ -275,8 +275,11 @@ GpuAssemblySnapshot GpuEngine::assemble_device_for_test() {
 }
 
 bool cuda_device_available() noexcept {
-    int count = 0;
-    return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
+    const int device = preferred_cuda_device();
+    if (device < 0) return false;
+    // Make the preferred device current so callers that run raw runtime APIs
+    // after this gate (tests allocate buffers directly) land on it.
+    return cudaSetDevice(device) == cudaSuccess;
 }
 
 std::unique_ptr<GpuExecutionContext> make_gpu_execution_context() {

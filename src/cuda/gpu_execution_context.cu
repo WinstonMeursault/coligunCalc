@@ -54,8 +54,24 @@ struct ScopedDevice {
 
 } // namespace
 
+int preferred_cuda_device() noexcept {
+    static const int cached = []() noexcept -> int {
+        int count = 0;
+        if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0) return -1;
+        for (int device = 0; device < count; ++device) {
+            cudaDeviceProp properties{};
+            if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) continue;
+            if (properties.major == 9999 && properties.minor == 9999) continue;
+            if (properties.integrated == 0) return device;
+        }
+        return 0;
+    }();
+    return cached;
+}
+
 struct GpuExecutionContext::Impl {
-    explicit Impl(GpuExecutionContextConfig config) : device_id(config.device_id) {
+    explicit Impl(GpuExecutionContextConfig config)
+        : device_id(config.device_id >= 0 ? config.device_id : preferred_cuda_device()) {
         check_cuda(cudaGetDevice(&previous_device), "cudaGetDevice");
         check_cuda(cudaSetDevice(device_id), "cudaSetDevice");
 

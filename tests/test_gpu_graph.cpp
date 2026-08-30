@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #if defined(COILGUN_CUDA_AVAILABLE)
+#include "coilgun/simulation/cuda/gpu_execution_context.hpp"
 #include <cuda_runtime_api.h>
 #endif
 
@@ -162,8 +163,7 @@ TEST_CASE("graph cache preserves workspace identity across replays") {
 
 #if defined(COILGUN_CUDA_AVAILABLE)
 TEST_CASE("CUDA graph capture instantiates once and replays repeatedly") {
-    int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (!coilgun::simulation::cuda::cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping graph capture test");
         return;
     }

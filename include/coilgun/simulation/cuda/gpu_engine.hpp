@@ -56,7 +56,6 @@ struct GpuEngineFaultInjection {
 enum class PipelineStage { Mutual, Matrix, Solver, Force, Thermal, State };
 
 #if defined(COILGUN_CUDA_AVAILABLE)
-bool cuda_device_available() noexcept;
 std::unique_ptr<GpuExecutionContext> make_gpu_execution_context();
 #endif
 
@@ -227,6 +226,12 @@ public:
                                                 config.thermal == ThermalMode::Gpu,
                                                  capability,
                                                   config_)) {
+#if defined(COILGUN_CUDA_AVAILABLE)
+          // device_id < 0 requests automatic placement: the first discrete
+          // (non-integrated) CUDA device, resolved once so every runtime path
+          // observes the same concrete device.
+          if (config_.device_id < 0) config_.device_id = preferred_cuda_device();
+#endif
           fault_injection_ = fault_injection;
           if (geometry_.stage_mutual_inductances.empty()) {
               geometry_.stage_mutual_inductances.assign(

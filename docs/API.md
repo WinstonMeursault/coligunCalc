@@ -1270,7 +1270,7 @@ The `coilgun_cuda` target depends on `coilgun` transitively — both libraries a
 namespace coilgun::simulation::cuda {
 
 struct GpuBackend {
-    int     device_id         = 0;     ///< cudaSetDevice target.
+    int     device_id         = -1;    ///< cudaSetDevice target; -1 selects the first discrete GPU automatically.
     int     threads_per_block = 512;   ///< Threads per block for the 4D integration kernel.
     size_t  max_batch_sims    = 256;   ///< Pre-allocation cap for batch simulation buffers.
     bool    enable_profiling  = false; ///< Retain profiling-request metadata; host-wall timing fields are always collected. No NVTX guarantee.
@@ -1283,7 +1283,7 @@ struct GpuBackend {
 
 | Field | Purpose | Default |
 |-------|---------|---------|
-| `device_id` | Selects which physical GPU to target (relevant on multi-GPU systems). | `0` |
+| `device_id` | Selects which physical GPU to target (relevant on multi-GPU systems). `-1` requests automatic placement: the first discrete (non-integrated) CUDA device, or device 0 when only integrated devices exist. | `-1` (automatic) |
 | `threads_per_block` | Requested number of threads per block for the 4D GL integration kernel. Must be a positive power of two no greater than 512; 1, 128, 256 and 512 are valid. | `512` |
 | `max_batch_sims` | Maximum number of simulations in a `SimBatch`. `SimBatch` rejects a larger `num_sims` with `std::invalid_argument`; the field itself does not allocate buffers. | `256` |
 | `enable_profiling` | When true, retains the request in `ExecutionReport::profiling_enabled`. Host-wall timing categories are collected independently of this flag. This build does not promise NVTX annotations or require an NVTX dependency. | `false` |
@@ -1298,7 +1298,8 @@ Fault-injection controls are not part of `GpuExecutionConfig`. Focused tests use
 
 ```cpp
 coilgun::simulation::cuda::GpuBackend be;
-be.device_id = 0;
+// be.device_id defaults to -1 (automatic: first discrete GPU).
+be.device_id = 1;   // or pin an explicit index on multi-GPU systems
 be.threads_per_block = 256;   // any positive power of two <= 512
 ```
 
@@ -1355,7 +1356,7 @@ struct GpuExecutionConfig {
     ThermalMode thermal = ThermalMode::Auto;
     bool enable_calibration = false;
     bool deterministic = false;
-    int device_id = 0;
+    int device_id = -1;   // -1: automatic first-discrete-GPU placement
     int threads_per_block = 512;
     bool enable_profiling = false;
     void validate() const;
@@ -1576,9 +1577,10 @@ but are CUDA-only, require the caller to respect device-pointer lifetimes, and
 are not the recommended application API. They are documented here so the
 public header surface is explicit.
 
-**CUDA execution context.** `GpuExecutionContextConfig` contains `device_id`,
-non-blocking `stream_flags`, optional `workspace_bytes`, and profiling request
-metadata. `GpuExecutionContext` is move-only RAII ownership of one CUDA stream,
+**CUDA execution context.** `GpuExecutionContextConfig` contains `device_id`
+(`-1` resolves automatically to the first discrete CUDA device via
+`preferred_cuda_device()`), non-blocking `stream_flags`, optional
+`workspace_bytes`, and profiling request metadata. `GpuExecutionContext` is move-only RAII ownership of one CUDA stream,
 start/stop events, cuBLAS/cuSOLVER handles, and workspace. Handle and pointer
 accessors return borrowed resources. `reserve_workspace()` may replace the
 workspace; `synchronize()`, event recording, and quadrature initialization
@@ -1705,7 +1707,7 @@ public:
 | `backend` | GPU backend configuration | `{}` (defaults) |
 | `explicit_backend` | Optional constructor-level backend override. `Auto` preserves the `GpuBackend` resolution; another value overrides both `backend` and `use_persistent`. | `BackendMode::Auto` |
 
-The constructor throws `std::invalid_argument` for a null excitation, non-finite or non-positive `dt`, negative `device_id`, invalid `threads_per_block`, `max_batch_sims == 0`, non-finite excitation voltage, invalid geometry/state dimensions, or non-finite stage voltages. CUDA-enabled construction also validates that the configured device exists and remains selected before allocation. `GpuSingleStageSim<RK4Stepper>` remains constructible for source compatibility, but `step()` throws `std::logic_error` because RK4 is unsupported.
+The constructor throws `std::invalid_argument` for a null excitation, non-finite or non-positive `dt`, `device_id < -1`, invalid `threads_per_block`, `max_batch_sims == 0`, non-finite excitation voltage, invalid geometry/state dimensions, or non-finite stage voltages. CUDA-enabled construction also validates that the configured device exists and remains selected before allocation. `GpuSingleStageSim<RK4Stepper>` remains constructible for source compatibility, but `step()` throws `std::logic_error` because RK4 is unsupported.
 
 **Methods**:
 
@@ -1770,7 +1772,7 @@ Current declaration and defaults:
 
 ```cpp
 struct GpuBackend {
-    int device_id = 0;
+    int device_id = -1; // automatic first-discrete-GPU placement
     int threads_per_block = 512;
     size_t max_batch_sims = 256;
     bool enable_profiling = false; // metadata and host timings; no NVTX promise
