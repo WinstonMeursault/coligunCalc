@@ -58,8 +58,9 @@ mutual_detail::MutualPairResult compute_filament_pair_with_sqrt_ab(
     k = std::clamp(k, k_min, k_max);
     const double m = k * k;
     const double one_minus_m = 1.0 - m;
-    const double K = elliptic_k(m);
-    const double E = elliptic_e(m);
+    const auto ke = elliptic_ke(m);
+    const double K = ke.k;
+    const double E = ke.e;
     const double inv2k = 2.0 / k;
     const double mutual = MU0 * sqrt_ab
         * ((inv2k - k) * K - inv2k * E);
