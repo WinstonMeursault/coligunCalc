@@ -950,7 +950,7 @@ private:
                             geometry_.stage_inner_radii[s], geometry_.stage_outer_radii[s],
                             geometry_.stage_lengths[s], geometry_.stage_turns[s],
                             geometry_.filament_inner_radii[f], geometry_.filament_outer_radii[f],
-                            geometry_.filament_lengths[f], 1, separation, 9, true);
+                            geometry_.filament_lengths[f], 1, separation, 9, false);
                         m = mutual_pair.mutual;
                         dm = mutual_pair.gradient;
                     }
