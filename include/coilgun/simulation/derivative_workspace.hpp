@@ -34,6 +34,9 @@ struct DerivativeWorkspace {
     Eigen::MatrixXd system_matrix;
     Eigen::VectorXd rhs;
     Eigen::VectorXd resistance;
+    // Factorization storage persists across evaluations; compute() reuses the
+    // internal buffers once the dimension is stable.
+    Eigen::LDLT<Eigen::MatrixXd> ldlt;
     std::vector<int> active_stages;
 
     void resize(std::size_t stages, std::size_t filaments);
