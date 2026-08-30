@@ -603,8 +603,18 @@ void GpuEngine::record_runtime_failure(const SolverStatus& status) {
     select_graph_variant_at_boundary();
 }
 
+void GpuEngine::take_solver_state_snapshots() {
+    auto& workspace = step_workspace_;
+    if (workspace.solver_snapshots_valid) return;
+    workspace.matrices_snapshot = matrices_;
+    workspace.rhs_snapshot = rhs_;
+    workspace.solution_snapshot = solution_;
+    workspace.solver_snapshots_valid = true;
+}
+
 void GpuEngine::execute_solver_step() {
     if (!solver_) return;
+    take_solver_state_snapshots();
 
     const auto B = layout_.B;
     const auto D = layout_.D;
