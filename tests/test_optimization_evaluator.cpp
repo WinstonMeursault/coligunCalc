@@ -37,6 +37,27 @@ public:
     }
 };
 
+class CandidateThrowingBatchEvaluator final : public BatchEvaluator {
+public:
+    std::size_t calls = 0;
+
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& candidates,
+                                                 const EvaluationContext&) override {
+        ++calls;
+        for (const auto& candidate : candidates) {
+            if (candidate.values.front() < 0.0) throw std::runtime_error("bad candidate");
+        }
+        std::vector<EvaluationResult> results;
+        results.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"value", candidate.values.front(), true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+};
+
 class EmptyBatchEvaluator final : public BatchEvaluator {
 public:
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>&,
@@ -133,6 +154,34 @@ TEST_CASE("cached batch evaluation isolates delegate exceptions and malformed ou
     REQUIRE(malformed.size() == 1);
     CHECK(malformed[0].status == EvaluationStatus::Failed);
     CHECK(malformed[0].diagnostics[0].code == "evaluation_batch_output");
+}
+
+TEST_CASE("cached batch retries thrown batches per candidate") {
+    auto delegate = std::make_shared<CandidateThrowingBatchEvaluator>();
+    CachedBatchEvaluator adapter{delegate, std::make_shared<InMemoryEvaluationCache>()};
+    const EvaluationContext context{5, false};
+
+    const auto results = adapter.evaluate_batch({cv(1.0), cv(-1.0), cv(2.0)}, context);
+    REQUIRE(results.size() == 3);
+    CHECK(results[0].status == EvaluationStatus::Success);
+    CHECK(results[0].objectives.front().value == 1.0);
+    CHECK(results[1].status == EvaluationStatus::Failed);
+    CHECK(results[1].diagnostics.front().code == "evaluation_exception");
+    CHECK(results[2].status == EvaluationStatus::Success);
+    CHECK(results[2].objectives.front().value == 2.0);
+    CHECK(delegate->calls == 4);
+    CHECK(adapter.statistics().evaluations == 3);
+    CHECK(adapter.statistics().successful_evaluations == 2);
+    CHECK(adapter.statistics().failed_evaluations == 1);
+
+    const auto cached = adapter.evaluate_batch({cv(1.0), cv(-1.0), cv(2.0)}, context);
+    REQUIRE(cached.size() == 3);
+    CHECK(cached[0].status == EvaluationStatus::Success);
+    CHECK(cached[1].status == EvaluationStatus::Failed);
+    CHECK(cached[2].status == EvaluationStatus::Success);
+    CHECK(delegate->calls == 4);
+    CHECK(adapter.statistics().evaluations == 3);
+    CHECK(adapter.statistics().cache_hits == 3);
 }
 
 TEST_CASE("cached evaluator batches misses once and restores input order") {

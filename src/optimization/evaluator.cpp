@@ -20,22 +20,26 @@ EvaluationResult normalize_result(EvaluationResult result) {
     return result;
 }
 
+std::vector<EvaluationResult> normalize_batch(std::vector<EvaluationResult> results,
+                                               std::size_t candidate_count) {
+    if (results.size() < candidate_count) {
+        const auto missing = candidate_count - results.size();
+        for (std::size_t i = 0; i < missing; ++i) {
+            results.push_back(EvaluationResult::failed(
+                "evaluation_batch_output", "batch evaluator returned too few results"));
+        }
+    }
+    if (results.size() > candidate_count) results.resize(candidate_count);
+    for (auto& result : results) result = normalize_result(std::move(result));
+    return results;
+}
+
 std::vector<EvaluationResult> safe_batch(BatchEvaluator& evaluator,
                                          const std::vector<CandidateVariables>& candidates,
                                          const EvaluationContext& context) {
     if (candidates.empty()) return {};
     try {
-        auto results = evaluator.evaluate_batch(candidates, context);
-        if (results.size() < candidates.size()) {
-            const auto missing = candidates.size() - results.size();
-            for (std::size_t i = 0; i < missing; ++i) {
-                results.push_back(EvaluationResult::failed(
-                    "evaluation_batch_output", "batch evaluator returned too few results"));
-            }
-        }
-        if (results.size() > candidates.size()) results.resize(candidates.size());
-        for (auto& result : results) result = normalize_result(std::move(result));
-        return results;
+        return normalize_batch(evaluator.evaluate_batch(candidates, context), candidates.size());
     } catch (const std::exception& error) {
         std::vector<EvaluationResult> results;
         results.reserve(candidates.size());
@@ -45,6 +49,23 @@ std::vector<EvaluationResult> safe_batch(BatchEvaluator& evaluator,
         std::vector<EvaluationResult> results;
         results.reserve(candidates.size());
         for (std::size_t i = 0; i < candidates.size(); ++i) results.push_back(unknown_exception_result());
+        return results;
+    }
+}
+
+std::vector<EvaluationResult> safe_batch_with_isolation(
+    BatchEvaluator& evaluator, const std::vector<CandidateVariables>& candidates,
+    const EvaluationContext& context) {
+    if (candidates.empty()) return {};
+    try {
+        return normalize_batch(evaluator.evaluate_batch(candidates, context), candidates.size());
+    } catch (...) {
+        std::vector<EvaluationResult> results;
+        results.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            const auto single = safe_batch(evaluator, {candidate}, context);
+            results.push_back(single.front());
+        }
         return results;
     }
 }
@@ -116,7 +137,7 @@ std::vector<EvaluationResult> CachedBatchEvaluator::evaluate_batch(const std::ve
         miss_candidate_indices.push_back(i);
         miss_result_indices.push_back(pending_it->second);
     }
-    const auto fresh = safe_batch(*evaluator_, misses, x);
+    const auto fresh = safe_batch_with_isolation(*evaluator_, misses, x);
     for (std::size_t i = 0; i < fresh.size(); ++i) {
         const auto result = normalize_result(fresh[i]);
         cache_->put(miss_keys[i], result);
