@@ -44,6 +44,8 @@ struct ConstraintReport {
     double violation = 0.0;
     double normalized_violation = 0.0;
     bool satisfied = true;
+    // Lower values represent higher precedence in Lexicographic comparisons.
+    int priority = 0;
 };
 
 struct EvaluationResult {
