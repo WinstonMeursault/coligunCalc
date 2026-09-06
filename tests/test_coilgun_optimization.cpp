@@ -4,6 +4,7 @@
 #include "coilgun/physics/constants.hpp"
 
 #include <cmath>
+#include <iomanip>
 #include <memory>
 
 using namespace coilgun::optimization;
@@ -42,6 +43,10 @@ TEST_CASE("coilgun adapter decodes bindings and extracts simulation metrics") {
         VariableSpec::continuous("voltage", 100.0, 1000.0),
     });
     auto config = make_config();
+    config.coil_specs = {
+        {0.005, 0.010, 0.010, 12, COPPER.resistivity_ref, 1e-6, 0.7, 0.0, false},
+        {0.005, 0.010, 0.010, 12, COPPER.resistivity_ref, 1e-6, 0.7, 0.03, false},
+    };
     config.bindings = {
         {"turns", CoilgunParameter::CoilTurns, 0},
         {"trigger", CoilgunParameter::TriggerValue, 0},
@@ -110,4 +115,53 @@ TEST_CASE("coilgun adapter rejects malformed variables and non-finite GPU output
     REQUIRE(non_finite.size() == 2);
     CHECK(non_finite.front().status == EvaluationStatus::Failed);
     CHECK(non_finite.front().diagnostics.front().code == "non_finite_result");
+}
+
+TEST_CASE("fixed coils preserve their original inductance semantics") {
+    VariableSchema schema({VariableSpec::continuous("voltage", 100.0, 1000.0)});
+    auto fixed = make_config();
+    fixed.coils.erase(fixed.coils.begin() + 1, fixed.coils.end());
+    fixed.coils[0] = DrivingCoil(0.005, 0.010, 0.010, 12,
+                                 COPPER.resistivity_ref, 1e-6, 0.7, 0.0, true);
+    fixed.excitations.resize(1);
+    fixed.excitations[0] = {10000.0, 1e-3, true};
+    fixed.triggers.clear();
+    fixed.dt = 1e-5;
+    fixed.termination.max_steps = 1000;
+    fixed.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
+
+    auto explicit_specs = fixed;
+    explicit_specs.coil_specs.push_back({0.005, 0.010, 0.010, 12,
+                                         COPPER.resistivity_ref, 1e-6, 0.7, 0.0, true});
+
+    CoilgunOptimizationProblem fixed_problem(schema, fixed);
+    CoilgunOptimizationProblem specs_problem(schema, std::move(explicit_specs));
+    const auto fixed_result = fixed_problem.evaluate(CandidateVariables{{600.0}});
+    const auto specs_result = specs_problem.evaluate(CandidateVariables{{600.0}});
+
+    REQUIRE(fixed_result.status == EvaluationStatus::Success);
+    REQUIRE(specs_result.status == EvaluationStatus::Success);
+    INFO("fixed=" << std::setprecision(17) << fixed_result.objectives.front().value << ", specs=" <<
+         specs_result.objectives.front().value);
+    CHECK(fixed_result.objectives.front().value == specs_result.objectives.front().value);
+}
+
+TEST_CASE("armature mass bindings are rejected during configuration validation") {
+    VariableSchema schema({VariableSpec::continuous("mass", 0.001, 0.010)});
+    auto config = make_config();
+    config.bindings = {{"mass", CoilgunParameter::ArmatureMass, 0}};
+
+    CHECK_THROWS_WITH_AS(CoilgunOptimizationProblem(schema, std::move(config)),
+                         "ArmatureMass bindings are not supported",
+                         std::invalid_argument);
+}
+
+TEST_CASE("coil geometry bindings require complete coil specs") {
+    VariableSchema schema({VariableSpec::integer("turns", 10, 20)});
+    auto config = make_config();
+    config.bindings = {{"turns", CoilgunParameter::CoilTurns, 0}};
+
+    CHECK_THROWS_WITH_AS(CoilgunOptimizationProblem(schema, std::move(config)),
+                         "coil geometry bindings require coil_specs",
+                         std::invalid_argument);
 }

@@ -6,7 +6,6 @@
 #include <cmath>
 #include <iomanip>
 #include <limits>
-#include <numbers>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -58,6 +57,8 @@ CoilgunOptimizationProblem::CoilgunOptimizationProblem(VariableSchema schema, Co
         case CoilgunParameter::CoilTurns:
         case CoilgunParameter::CoilPosition:
             if (binding.index >= stage_count) throw std::out_of_range("coil binding index out of range");
+            if (config_.coil_specs.empty())
+                throw std::invalid_argument("coil geometry bindings require coil_specs");
             break;
         case CoilgunParameter::ExcitationVoltage:
         case CoilgunParameter::ExcitationCapacitance:
@@ -66,6 +67,8 @@ CoilgunOptimizationProblem::CoilgunOptimizationProblem(VariableSchema schema, Co
         case CoilgunParameter::TriggerValue:
             if (binding.index >= config_.triggers.size()) throw std::out_of_range("trigger binding index out of range");
             break;
+        case CoilgunParameter::ArmatureMass:
+            throw std::invalid_argument("ArmatureMass bindings are not supported");
         default: break;
         }
     }
@@ -84,24 +87,24 @@ EvaluationResult CoilgunOptimizationProblem::invalid_result(const std::string& c
 
 std::vector<components::DrivingCoil> CoilgunOptimizationProblem::make_coils(
     const std::vector<double>& values) const {
-    const auto stage_count = config_.coil_specs.empty() ? config_.coils.size() : config_.coil_specs.size();
+    const bool has_geometry_binding = std::any_of(
+        config_.bindings.begin(), config_.bindings.end(), [](const auto& binding) {
+            switch (binding.parameter) {
+            case CoilgunParameter::CoilInnerRadius:
+            case CoilgunParameter::CoilOuterRadius:
+            case CoilgunParameter::CoilLength:
+            case CoilgunParameter::CoilTurns:
+            case CoilgunParameter::CoilPosition:
+                return true;
+            default:
+                return false;
+            }
+        });
+    if (!has_geometry_binding && !config_.coils.empty()) return config_.coils;
+    if (config_.coil_specs.empty()) return config_.coils;
+
     std::vector<CoilgunCoilSpec> specs;
-    if (!config_.coil_specs.empty()) {
-        specs = config_.coil_specs;
-    } else {
-        specs.reserve(stage_count);
-        for (const auto& coil : config_.coils) {
-            const double rho = 1.0;
-            const double area = std::sqrt(std::max(
-                rho * 0.7 * std::numbers::pi *
-                    (coil.outer_radius() * coil.outer_radius() -
-                     coil.inner_radius() * coil.inner_radius()) * coil.length() /
-                    std::max(coil.resistance(), 1e-12),
-                std::numeric_limits<double>::min()));
-            specs.push_back({coil.inner_radius(), coil.outer_radius(), coil.length(), coil.turns(),
-                             rho, area, 0.7, coil.position(), false});
-        }
-    }
+    specs = config_.coil_specs;
     auto excitations = config_.excitations;
     auto triggers = config_.triggers;
     auto set_value = [&](const CoilgunVariableBinding& binding, double value) {
