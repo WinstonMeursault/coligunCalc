@@ -1,5 +1,7 @@
 #include "coilgun/optimization/genetic_optimizer.hpp"
 
+#include "coilgun/optimization/nsga2.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -70,12 +72,11 @@ struct EvaluatedBatch {
     std::size_t failed = 0;
     bool objective_schema_set = false;
     bool schema_error = false;
-    std::string objective_id;
-    bool maximize = true;
+    std::vector<std::pair<std::string, bool>> objective_schema;
 };
 
 EvaluatedBatch assign_results(Population& population, const std::vector<EvaluationResult>& results,
-                              std::optional<std::pair<std::string, bool>> objective_schema) {
+                              std::optional<std::vector<std::pair<std::string, bool>>> objective_schema) {
     EvaluatedBatch summary;
     auto active_schema = objective_schema;
     for (std::size_t i = 0; i < population.size(); ++i) {
@@ -96,29 +97,37 @@ EvaluatedBatch assign_results(Population& population, const std::vector<Evaluati
             ++summary.failed;
             continue;
         }
-        if (evaluation->objectives.size() != 1) {
+        if (evaluation->objectives.empty()) {
             mark_failure(candidate, EvaluationStatus::Invalid, "single_objective_required",
-                         "single-objective optimization requires exactly one objective");
-            summary.schema_error = true;
-            ++summary.failed;
-            continue;
-        }
-        const auto& objective = evaluation->objectives.front();
-        if (objective.id.empty() || !std::isfinite(objective.value)) {
-            mark_failure(candidate, EvaluationStatus::Invalid, "invalid_objective",
-                         "objective id must be non-empty and objective value finite");
+                         "optimization requires at least one objective");
             summary.schema_error = true;
             ++summary.failed;
             continue;
         }
         if (!active_schema) {
+            std::vector<std::pair<std::string, bool>> discovered;
+            discovered.reserve(evaluation->objectives.size());
+            for (const auto& objective : evaluation->objectives)
+                discovered.emplace_back(objective.id, objective.maximize);
+            active_schema = discovered;
             summary.objective_schema_set = true;
-            summary.objective_id = objective.id;
-            summary.maximize = objective.maximize;
-            active_schema = std::make_pair(objective.id, objective.maximize);
-        } else if (objective.id != active_schema->first || objective.maximize != active_schema->second) {
+            summary.objective_schema = discovered;
+        }
+        bool valid_objectives = evaluation->objectives.size() == active_schema->size();
+        if (valid_objectives) {
+            for (std::size_t objective_index = 0; objective_index < evaluation->objectives.size(); ++objective_index) {
+                const auto& objective = evaluation->objectives[objective_index];
+                if (objective.id.empty() || !std::isfinite(objective.value) ||
+                    objective.id != (*active_schema)[objective_index].first ||
+                    objective.maximize != (*active_schema)[objective_index].second) {
+                    valid_objectives = false;
+                    break;
+                }
+            }
+        }
+        if (!valid_objectives) {
             mark_failure(candidate, EvaluationStatus::Invalid, "objective_schema_mismatch",
-                         "objective id and direction must remain fixed during a run");
+                         "objective count, ids, and directions must remain fixed during a run");
             summary.schema_error = true;
             ++summary.failed;
             continue;
@@ -145,6 +154,24 @@ void fill_result(OptimizationResult& result, const Candidate& best) {
     if (best.evaluation_status != EvaluationStatus::Success || best.objectives.size() != 1) return;
     result.pareto_front = {best};
     result.best_by_objective[best.objectives.front().id] = best;
+}
+
+std::vector<ObjectiveDefinition> objective_definitions(
+    const std::vector<std::pair<std::string, bool>>& schema) {
+    std::vector<ObjectiveDefinition> definitions;
+    definitions.reserve(schema.size());
+    for (const auto& [id, maximize] : schema) definitions.push_back({id, maximize, 1.0});
+    return definitions;
+}
+
+void fill_multi_result(OptimizationResult& result, const Population& population,
+                       const std::vector<ObjectiveDefinition>& definitions) {
+    std::vector<Candidate> candidates(population.begin(), population.end());
+    if (candidates.empty()) return;
+    const auto ranking = nsga2_rank(candidates, definitions);
+    if (ranking.fronts.empty()) return;
+    result.pareto_front.clear();
+    for (const auto index : ranking.fronts.front()) result.pareto_front.push_back(candidates[index]);
 }
 
 void copy_evaluator_statistics(OptimizationResult& result, const BatchEvaluator& evaluator) {
@@ -210,8 +237,6 @@ OptimizationResult GeneticOptimizer::optimize() {
     try {
         config_.validate();
         termination_.validate();
-        if (config_.strategy == SelectionStrategy::NSGA2)
-            throw std::invalid_argument("NSGA2 strategy is not valid for single-objective optimization");
     } catch (const std::exception& error) {
         result.termination.reason = TerminationReason::ConfigurationError;
         result.termination.message = error.what();
@@ -222,7 +247,9 @@ OptimizationResult GeneticOptimizer::optimize() {
     Population population = Population::initialize(schema_, config_.population_size, rng);
     const std::size_t max_generations = termination_.max_generations == 0
         ? config_.max_generations : termination_.max_generations;
-    std::optional<std::pair<std::string, bool>> objective_schema;
+    std::optional<std::vector<std::pair<std::string, bool>>> objective_schema;
+    std::optional<SelectionStrategy> resolved_strategy;
+    std::optional<Population> pending_parents;
     std::optional<Candidate> best;
     std::size_t no_improvement = 0;
     std::size_t evaluations = 0;
@@ -253,7 +280,7 @@ OptimizationResult GeneticOptimizer::optimize() {
 
         const auto summary = assign_results(population, evaluated, objective_schema);
         if (!objective_schema && summary.objective_schema_set)
-            objective_schema = std::make_pair(summary.objective_id, summary.maximize);
+            objective_schema = summary.objective_schema;
         result.statistics.evaluations = evaluations;
         result.statistics.successful_evaluations += summary.successful;
         result.statistics.failed_evaluations += summary.failed;
@@ -262,7 +289,7 @@ OptimizationResult GeneticOptimizer::optimize() {
 
         if (summary.schema_error) {
             result.termination = {TerminationReason::ConfigurationError,
-                                  "single-objective objective schema is invalid", generation};
+                                  "objective count, ids, and directions must remain fixed during a run", generation};
             return result;
         }
         if (summary.successful == 0) {
@@ -271,8 +298,37 @@ OptimizationResult GeneticOptimizer::optimize() {
             return result;
         }
 
+        if (!resolved_strategy && objective_schema) {
+            const std::size_t objective_count = objective_schema->size();
+            if (config_.strategy == SelectionStrategy::Auto) {
+                resolved_strategy = objective_count == 1 ? SelectionStrategy::SingleObjective
+                                                         : SelectionStrategy::NSGA2;
+            } else if (config_.strategy == SelectionStrategy::SingleObjective && objective_count != 1) {
+                result.termination = {TerminationReason::ConfigurationError,
+                                      "SingleObjective strategy requires exactly one objective", generation};
+                return result;
+            } else if (config_.strategy == SelectionStrategy::NSGA2 && objective_count < 2) {
+                result.termination = {TerminationReason::ConfigurationError,
+                                      "NSGA2 strategy requires at least two objectives", generation};
+                return result;
+            } else {
+                resolved_strategy = config_.strategy;
+            }
+        }
+
+        if (resolved_strategy == SelectionStrategy::NSGA2 && pending_parents) {
+            population = nsga2_select(*pending_parents, population, config_.population_size,
+                                      objective_definitions(*objective_schema));
+            pending_parents.reset();
+        }
+
+        if (resolved_strategy == SelectionStrategy::NSGA2) {
+            fill_multi_result(result, population, objective_definitions(*objective_schema));
+        }
+
         const Candidate current_best = best_candidate(population, comparator_);
-        if (current_best.evaluation_status == EvaluationStatus::Success) {
+        if (resolved_strategy == SelectionStrategy::SingleObjective &&
+            current_best.evaluation_status == EvaluationStatus::Success) {
             const bool improved = !best ||
                                   non_objective_is_better(current_best, *best, comparator_) ||
                                   (non_objective_is_tied(current_best, *best, comparator_) &&
@@ -313,8 +369,12 @@ OptimizationResult GeneticOptimizer::optimize() {
         }
 
         Population next;
-        const auto elites = population.elites(config_.elite_count, comparator_);
-        for (auto elite : elites) next.push_back(std::move(elite));
+        if (resolved_strategy == SelectionStrategy::NSGA2) {
+            pending_parents = population;
+        } else {
+            const auto elites = population.elites(config_.elite_count, comparator_);
+            for (auto elite : elites) next.push_back(std::move(elite));
+        }
         while (next.size() < config_.population_size) {
             const auto parent_a = tournament_select(population, comparator_, rng);
             const auto parent_b = tournament_select(population, comparator_, rng);

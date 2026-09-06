@@ -244,9 +244,18 @@ TEST_CASE("single objective optimizer supports target, evaluation, and no-improv
     CHECK(converged.statistics.generations == 2);
 }
 
-TEST_CASE("single objective optimizer rejects multiple objectives and all failed evaluations") {
+TEST_CASE("automatic routing selects NSGA-II and explicit single objective rejects multiple objectives") {
     auto multiple = std::make_shared<TwoObjectiveEvaluator>();
-    const auto invalid = GeneticOptimizer(one_variable_schema(), multiple, test_config()).optimize();
+    const auto automatic = GeneticOptimizer(one_variable_schema(), multiple, test_config()).optimize();
+    CHECK(automatic.termination.reason == TerminationReason::MaxGenerations);
+    CHECK(automatic.pareto_front.size() >= 2);
+    CHECK(automatic.best_by_objective.empty());
+
+    auto explicit_single_config = test_config();
+    explicit_single_config.strategy = SelectionStrategy::SingleObjective;
+    auto explicit_single = std::make_shared<TwoObjectiveEvaluator>();
+    const auto invalid = GeneticOptimizer(
+        one_variable_schema(), explicit_single, explicit_single_config).optimize();
     CHECK(invalid.termination.reason == TerminationReason::ConfigurationError);
     CHECK(invalid.pareto_front.empty());
 
