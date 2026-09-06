@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "coilgun/optimization/coilgun_problem.hpp"
+#include "coilgun/optimization/genetic_optimizer.hpp"
 #include "coilgun/physics/constants.hpp"
 
 #include <cmath>
@@ -89,6 +90,57 @@ TEST_CASE("coilgun adapter isolates invalid candidates and falls back from GPU b
     CHECK(results[0].status == EvaluationStatus::Success);
     CHECK(results[1].status == EvaluationStatus::Success);
     CHECK(problem.last_batch_used_fallback());
+}
+
+TEST_CASE("coilgun adapter dispatches injected batch evaluator through genetic optimizer") {
+    VariableSchema schema({VariableSpec::continuous("voltage", 100.0, 1000.0)});
+    auto config = make_config();
+    config.coils.erase(config.coils.begin() + 1, config.coils.end());
+    config.excitations.resize(1);
+    config.triggers.clear();
+    config.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
+    CoilgunOptimizationProblem problem(schema, std::move(config));
+
+    std::size_t callback_calls = 0;
+    problem.set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>& candidates,
+                                                      const EvaluationContext&) {
+        ++callback_calls;
+        std::vector<EvaluationResult> results;
+        results.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            (void)candidate;
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"muzzle_velocity", 1.0, true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    });
+
+    OptimizationConfig optimization;
+    optimization.population_size = 2;
+    optimization.max_generations = 1;
+    TerminationConfig termination;
+    termination.max_generations = 1;
+    const auto result = GeneticOptimizer(schema, problem, optimization, termination).optimize();
+
+    CHECK(result.termination.reason == TerminationReason::MaxGenerations);
+    CHECK(callback_calls > 0);
+}
+
+TEST_CASE("coilgun adapter peak voltage includes initial excitation voltage") {
+    VariableSchema schema({VariableSpec::continuous("voltage", 100.0, 1000.0)});
+    auto config = make_config();
+    config.coils.erase(config.coils.begin() + 1, config.coils.end());
+    config.excitations.resize(1);
+    config.triggers.clear();
+    config.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
+    config.termination.max_steps = 0;
+    CoilgunOptimizationProblem problem(schema, std::move(config));
+
+    const auto result = problem.evaluate(CandidateVariables{{750.0}});
+
+    REQUIRE(result.status == EvaluationStatus::Success);
+    CHECK(std::stod(result.metadata.at("peak_voltage")) == doctest::Approx(750.0));
 }
 
 TEST_CASE("coilgun adapter rejects malformed variables and non-finite GPU output") {

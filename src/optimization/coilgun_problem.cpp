@@ -146,6 +146,8 @@ double CoilgunOptimizationProblem::metric_value(
     case CoilgunMetric::PeakCurrent: return result.summary.peak_coil_current;
     case CoilgunMetric::PeakVoltage: {
         double maximum = 0.0;
+        for (const auto& excitation : excitations)
+            maximum = std::max(maximum, std::abs(excitation.initial_voltage));
         for (const auto& step : result.history)
             for (double voltage : step.cap_voltages) maximum = std::max(maximum, std::abs(voltage));
         return maximum;
@@ -248,6 +250,11 @@ EvaluationResult CoilgunOptimizationProblem::evaluate(const CandidateVariables& 
 EvaluationResult CoilgunOptimizationProblem::evaluate(const CandidateVariables& variables,
                                                        const EvaluationContext&) const {
     return evaluate_cpu(variables);
+}
+
+std::vector<EvaluationResult> CoilgunOptimizationProblem::evaluate_batch(
+    const std::vector<CandidateVariables>& variables, const EvaluationContext& context) {
+    return static_cast<const CoilgunOptimizationProblem&>(*this).evaluate_batch(variables, context);
 }
 
 std::vector<EvaluationResult> CoilgunOptimizationProblem::evaluate_batch(

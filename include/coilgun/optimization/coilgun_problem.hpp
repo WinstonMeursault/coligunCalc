@@ -59,7 +59,7 @@ struct CoilgunMetricConstraint {
     ConstraintDefinition definition;
 };
 
-class CoilgunOptimizationProblem final : public OptimizationProblem, public Evaluator {
+class CoilgunOptimizationProblem final : public OptimizationProblem, public Evaluator, public BatchEvaluator {
 public:
     struct Config {
         // `coils` is the convenient fixed-geometry path. `coil_specs`, when
@@ -86,6 +86,9 @@ public:
     EvaluationResult evaluate(const CandidateVariables& variables) const override;
     EvaluationResult evaluate(const CandidateVariables& variables,
                               const EvaluationContext&) const override;
+    std::vector<EvaluationResult> evaluate_batch(
+        const std::vector<CandidateVariables>& variables,
+        const EvaluationContext& context = {}) override;
     std::vector<EvaluationResult> evaluate_batch(
         const std::vector<CandidateVariables>& variables,
         const EvaluationContext& context = {}) const;

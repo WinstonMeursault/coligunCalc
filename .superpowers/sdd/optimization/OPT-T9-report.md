@@ -10,25 +10,25 @@ velocity as the default maximize objective and exposes maximum temperature,
 peak current, peak voltage, efficiency, and energy loss as named metadata and
 optional metric constraints.
 
-The adapter also implements the context-aware `Evaluator` interface and has an
-injectable GPU batch callback. A callback that throws or returns malformed
-batch output falls back to isolated CPU evaluations; non-finite successful GPU
-values are converted to per-candidate failures.
+The adapter implements both the context-aware `Evaluator` and `BatchEvaluator`
+interfaces, so it can be passed directly to `GeneticOptimizer` while preserving
+the injectable GPU callback and CPU fallback path. Peak voltage includes the
+absolute initial excitation voltages as well as recorded history.
 
 ## TDD Evidence
 
 ### RED
 
-Added `tests/test_coilgun_optimization.cpp` and registered it in
-`tests/CMakeLists.txt`. The focused target initially failed because
-`coilgun/optimization/coilgun_problem.hpp` did not exist.
+Extended `tests/test_coilgun_optimization.cpp` with regression coverage for
+direct `GeneticOptimizer` construction and initial peak voltage. Before the fix,
+the callback count remained zero and a zero-step simulation reported 0 V.
 
 ### GREEN
 
-Implemented the adapter and registered `src/optimization/coilgun_problem.cpp`
-in the library target. The focused test now covers variable decoding and
-metrics, malformed candidates, GPU callback fallback, and non-finite GPU
-results.
+`CoilgunOptimizationProblem` now provides the required non-const
+`BatchEvaluator` override plus a const forwarding overload. `GeneticOptimizer`
+has a dedicated overload that selects the batch path without base-class
+overload ambiguity.
 
 ## Verification
 
@@ -37,11 +37,11 @@ cmake --build --preset cpu-debug --target test_coilgun_optimization -j2
 ./build/cpu-debug/tests/test_coilgun_optimization
 ```
 
-Result: 3 test cases passed, 16 assertions passed.
+Result: 8 test cases passed, 25 assertions passed.
 
 ```text
 cmake --build --preset cpu-debug -j2
 ctest --preset cpu-debug --output-on-failure
 ```
 
-Result: 30/30 CPU tests passed, including the new adapter suite.
+Result: 30/30 CPU tests passed, including the adapter suite.

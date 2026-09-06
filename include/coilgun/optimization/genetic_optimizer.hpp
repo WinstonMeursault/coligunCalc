@@ -7,6 +7,8 @@
 #include "coilgun/optimization/termination.hpp"
 
 #include <memory>
+#include <type_traits>
+#include <utility>
 
 namespace coilgun::optimization {
 
@@ -24,6 +26,16 @@ public:
                      OptimizationConfig config = OptimizationConfig::defaults(),
                      TerminationConfig termination = {},
                      FeasibilityComparator comparator = FeasibilityComparator{});
+    template <typename Problem,
+              std::enable_if_t<std::is_base_of_v<OptimizationProblem, Problem> &&
+                                   std::is_base_of_v<BatchEvaluator, Problem>,
+                               int> = 0>
+    GeneticOptimizer(VariableSchema schema, Problem& problem,
+                     OptimizationConfig config = OptimizationConfig::defaults(),
+                     TerminationConfig termination = {},
+                     FeasibilityComparator comparator = FeasibilityComparator{})
+        : GeneticOptimizer(std::move(schema), static_cast<BatchEvaluator&>(problem), config,
+                           std::move(termination), std::move(comparator)) {}
 
     [[nodiscard]] OptimizationResult optimize();
     [[nodiscard]] OptimizationResult run() { return optimize(); }
