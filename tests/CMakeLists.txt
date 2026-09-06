@@ -47,6 +47,7 @@ add_coilgun_test(test_optimization_constraints)
 add_coilgun_test(test_optimization_variables)
 add_coilgun_test(test_optimization_operators)
 add_coilgun_test(test_optimization_evaluator)
+add_coilgun_test(test_optimization_single)
 add_coilgun_test(test_optimization_nsga2)
 add_validation_test(test_coupled_integrator)
 

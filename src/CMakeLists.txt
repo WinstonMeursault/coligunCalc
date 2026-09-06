@@ -27,6 +27,7 @@ add_library(coilgun STATIC
   optimization/cache.cpp
   optimization/evaluator.cpp
   optimization/genetic_operators.cpp
+  optimization/genetic_optimizer.cpp
   optimization/nsga2.cpp
 )
 
