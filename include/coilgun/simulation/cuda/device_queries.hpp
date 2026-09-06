@@ -25,7 +25,7 @@ inline bool device_max_grid(std::size_t (&limits)[3]) {
     if (cudaGetDevice(&device) != cudaSuccess || device < 0) return false;
     if (device < kCachedDevices) {
         const CachedLimits& entry = cache[device];
-        if (entry.valid.load(std::memory_order_relaxed)) {
+        if (entry.valid.load(std::memory_order_acquire)) {
             limits[0] = entry.x.load(std::memory_order_relaxed);
             limits[1] = entry.y.load(std::memory_order_relaxed);
             limits[2] = entry.z.load(std::memory_order_relaxed);
@@ -42,7 +42,7 @@ inline bool device_max_grid(std::size_t (&limits)[3]) {
         entry.x.store(limits[0], std::memory_order_relaxed);
         entry.y.store(limits[1], std::memory_order_relaxed);
         entry.z.store(limits[2], std::memory_order_relaxed);
-        entry.valid.store(true, std::memory_order_relaxed);
+        entry.valid.store(true, std::memory_order_release);
     }
     return true;
 }

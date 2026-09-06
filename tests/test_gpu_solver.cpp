@@ -183,7 +183,7 @@ TEST_CASE("Moved-from solver is safe to query and use") {
 }
 
 TEST_CASE("CUDA solver performs FP64 column-major batched LU without solve allocations") {
-    if (cuda_device_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping batched LU test");
         return;
     }
@@ -216,7 +216,7 @@ TEST_CASE("CUDA solver performs FP64 column-major batched LU without solve alloc
 }
 
 TEST_CASE("CUDA solver reports the failed batch and backend info") {
-    if (cuda_device_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping batched LU diagnostics test");
         return;
     }
@@ -238,7 +238,7 @@ TEST_CASE("CUDA solver reports the failed batch and backend info") {
 }
 
 TEST_CASE("CUDA device solver preserves assembly input and reports residual") {
-    if (cuda_device_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping device solver test");
         return;
     }
@@ -280,7 +280,7 @@ TEST_CASE("CUDA device solver preserves assembly input and reports residual") {
 }
 
 TEST_CASE("CUDA device solver reuses a stable output view across repeated solves") {
-    if (cuda_device_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping repeated device solver test");
         return;
     }
@@ -331,7 +331,7 @@ TEST_CASE("CUDA device solver reuses a stable output view across repeated solves
 }
 
 TEST_CASE("CUDA context operations preserve the caller's current device") {
-    if (cuda_device_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping context device guard test");
         return;
     }
@@ -353,7 +353,7 @@ TEST_CASE("CUDA context operations preserve the caller's current device") {
 }
 
 TEST_CASE("CUDA batched solver reuses host staging after initialization") {
-    if (cuda_device_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping staging reuse test");
         return;
     }
@@ -395,7 +395,7 @@ TEST_CASE("Engine exposes one resolved policy and one calibration report") {
 }
 
 TEST_CASE("Engine reports fallback when graph execution is not implemented") {
-    if (cuda_device_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping engine resource test");
         return;
     }

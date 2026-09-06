@@ -30,7 +30,7 @@ EllipticKe elliptic_ke(double m) {
     double sum = 0.5 * c * c;
     double power = 0.5;
     for (int iteration = 0;
-         iteration < 10 && c > std::numeric_limits<double>::epsilon() * a;
+         iteration < 64 && c > std::numeric_limits<double>::epsilon() * a;
          ++iteration) {
         const double a_next = 0.5 * (a + b);
         const double b_next = std::sqrt(a * b);
