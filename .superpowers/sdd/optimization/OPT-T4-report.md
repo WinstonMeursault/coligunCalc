@@ -38,3 +38,16 @@ Replacement verification from the isolated worktree:
 `./build/cpu-debug/tests/test_optimization_evaluator`
 
 Result: 6 test cases passed, 47 assertions passed.
+
+## Optimization Review Follow-up
+
+`CachedBatchEvaluator` now gathers unique cache misses and invokes its delegate
+once per request batch. Results are mapped back to every original input
+position, including duplicate misses, while cache hits retain their positions.
+Short delegate output fills only missing positions with failed
+`evaluation_batch_output` results; exceptions remain isolated as per-candidate
+failed results. Default `Unevaluated` results are normalized to failed results
+and counted in failure statistics.
+
+The evaluator suite covers delegate call count and miss order, short output,
+duplicate miss reuse, and unevaluated-result accounting.

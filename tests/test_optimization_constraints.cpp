@@ -162,3 +162,16 @@ TEST_CASE("non-success statuses have deterministic violation ordering") {
         CHECK(comparator.better(failed, unevaluated));
     }
 }
+
+TEST_CASE("lexicographic status ordering precedes non-success constraint priorities") {
+    auto invalid = candidate(0.0, {ConstraintDefinition{"hard", ConstraintKind::Hard,
+                                                         ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                      .evaluate(2.0)});
+    invalid.evaluation_status = EvaluationStatus::Invalid;
+    auto failed = candidate(0.0);
+    failed.evaluation_status = EvaluationStatus::Failed;
+
+    const FeasibilityComparator comparator{FeasibilityStrategy::Lexicographic};
+    CHECK(comparator.better(invalid, failed));
+    CHECK_FALSE(comparator.better(failed, invalid));
+}

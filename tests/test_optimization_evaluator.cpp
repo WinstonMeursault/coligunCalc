@@ -44,6 +44,44 @@ public:
         return {};
     }
 };
+
+class RecordingBatchEvaluator final : public BatchEvaluator {
+public:
+    std::size_t calls = 0;
+    std::vector<double> batches;
+
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& candidates,
+                                                 const EvaluationContext&) override {
+        ++calls;
+        std::vector<EvaluationResult> results;
+        for (const auto& candidate : candidates) {
+            batches.push_back(candidate.values.front());
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"value", candidate.values.front(), true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+};
+
+class UnevaluatedBatchEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& candidates,
+                                                 const EvaluationContext&) override {
+        return std::vector<EvaluationResult>(candidates.size());
+    }
+};
+
+class ShortBatchEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& candidates,
+                                                 const EvaluationContext&) override {
+        if (candidates.empty()) return {};
+        auto result = EvaluationResult::success();
+        result.objectives.push_back({"value", candidates.front().values.front(), true});
+        return {std::move(result)};
+    }
+};
 }
 
 TEST_CASE("serial adapter preserves order, isolates failures, and accepts empty batches") {
@@ -71,7 +109,7 @@ TEST_CASE("cache key is stable and cached adapter reports hits") {
     const auto second = adapter.evaluate_batch(std::vector<CandidateVariables>{cv(2.0)}, context);
     REQUIRE(first.size() == 2);
     CHECK(second[0].objectives[0].value == 2.0);
-    CHECK(adapter.statistics().cache_hits == 2);
+    CHECK(adapter.statistics().cache_hits == 1);
     CHECK(make_cache_key(CandidateVariables{{2.0}}, context) == make_cache_key(CandidateVariables{{2.0}}, context));
     CHECK(make_cache_key(CandidateVariables{{2.0}}, EvaluationContext{11, false}) !=
           make_cache_key(CandidateVariables{{2.0}}, EvaluationContext{12, false}));
@@ -86,14 +124,56 @@ TEST_CASE("cached batch evaluation isolates delegate exceptions and malformed ou
     REQUIRE(results.size() == 3);
     CHECK(results[0].status == EvaluationStatus::Success);
     CHECK(results[1].status == EvaluationStatus::Failed);
-    CHECK(results[1].diagnostics[0].code == "evaluation_exception");
-    CHECK(results[2].status == EvaluationStatus::Success);
+    CHECK(results[1].diagnostics[0].code == "evaluation_batch_output");
+    CHECK(results[2].status == EvaluationStatus::Failed);
+    CHECK(results[2].diagnostics[0].code == "evaluation_batch_output");
 
     CachedBatchEvaluator empty{std::make_shared<EmptyBatchEvaluator>(), std::make_shared<InMemoryEvaluationCache>()};
     const auto malformed = empty.evaluate_batch({cv(3.0)}, EvaluationContext{4, false});
     REQUIRE(malformed.size() == 1);
     CHECK(malformed[0].status == EvaluationStatus::Failed);
     CHECK(malformed[0].diagnostics[0].code == "evaluation_batch_output");
+}
+
+TEST_CASE("cached evaluator batches misses once and restores input order") {
+    auto delegate = std::make_shared<RecordingBatchEvaluator>();
+    auto cache = std::make_shared<InMemoryEvaluationCache>();
+    const EvaluationContext context{8, false};
+    auto cached = EvaluationResult::success();
+    cached.objectives.push_back({"value", 10.0, true});
+    cache->put(make_cache_key(cv(10.0), context), cached);
+
+    CachedBatchEvaluator adapter{delegate, cache};
+    const auto results = adapter.evaluate_batch({cv(10.0), cv(2.0), cv(3.0), cv(10.0)}, context);
+    REQUIRE(results.size() == 4);
+    CHECK(delegate->calls == 1);
+    CHECK(delegate->batches == std::vector<double>{2.0, 3.0});
+    CHECK(results[0].objectives.front().value == 10.0);
+    CHECK(results[1].objectives.front().value == 2.0);
+    CHECK(results[2].objectives.front().value == 3.0);
+    CHECK(results[3].objectives.front().value == 10.0);
+}
+
+TEST_CASE("unevaluated delegate results are normalized as failures") {
+    CachedBatchEvaluator adapter{std::make_shared<UnevaluatedBatchEvaluator>(),
+                                 std::make_shared<InMemoryEvaluationCache>()};
+    const auto results = adapter.evaluate_batch({cv(1.0)}, EvaluationContext{12, false});
+    REQUIRE(results.size() == 1);
+    CHECK(results.front().status == EvaluationStatus::Failed);
+    CHECK(results.front().diagnostics.front().code == "evaluation_unevaluated");
+    CHECK(adapter.statistics().failed_evaluations == 1);
+}
+
+TEST_CASE("short delegate batches preserve returned results and fail only missing candidates") {
+    StatisticsBatchEvaluator adapter{std::make_shared<ShortBatchEvaluator>()};
+    const auto results = adapter.evaluate_batch({cv(4.0), cv(5.0)}, EvaluationContext{13, false});
+    REQUIRE(results.size() == 2);
+    CHECK(results[0].status == EvaluationStatus::Success);
+    CHECK(results[0].objectives.front().value == 4.0);
+    CHECK(results[1].status == EvaluationStatus::Failed);
+    CHECK(results[1].diagnostics.front().code == "evaluation_batch_output");
+    CHECK(adapter.statistics().successful_evaluations == 1);
+    CHECK(adapter.statistics().failed_evaluations == 1);
 }
 
 TEST_CASE("cached statistics count misses, statuses, cache hits, fallback, and duration") {
@@ -105,14 +185,14 @@ TEST_CASE("cached statistics count misses, statuses, cache hits, fallback, and d
     CHECK(adapter.statistics().evaluations == 2);
     CHECK(adapter.statistics().successful_evaluations == 1);
     CHECK(adapter.statistics().failed_evaluations == 1);
-    CHECK(adapter.statistics().cache_hits == 1);
+    CHECK(adapter.statistics().cache_hits == 0);
     CHECK(adapter.statistics().fallbacks == 1);
     CHECK(adapter.statistics().seed == 9);
     CHECK(adapter.statistics().elapsed_seconds >= 0.0);
 
     adapter.evaluate_batch({cv(1.0), cv(-1.0)}, context);
     CHECK(adapter.statistics().evaluations == 2);
-    CHECK(adapter.statistics().cache_hits == 3);
+    CHECK(adapter.statistics().cache_hits == 2);
     CHECK(adapter.statistics().successful_evaluations == 1);
     CHECK(adapter.statistics().failed_evaluations == 1);
     CHECK(adapter.statistics().fallbacks == 2);

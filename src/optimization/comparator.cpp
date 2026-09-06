@@ -50,6 +50,11 @@ int FeasibilityComparator::compare(const Candidate& lhs, const Candidate& rhs) c
         if (!lf) {
             if (strategy_ == FeasibilityStrategy::Lexicographic) {
                 if (lhs_success != rhs_success) return lhs_success ? -1 : 1;
+                if (!lhs_success) {
+                    const int lhs_rank = status_rank(lhs.evaluation_status);
+                    const int rhs_rank = status_rank(rhs.evaluation_status);
+                    if (lhs_rank != rhs_rank) return lhs_rank < rhs_rank ? -1 : 1;
+                }
                 const int hard_comparison = compare_constraint_priorities(lhs.constraints, rhs.constraints,
                                                                            ConstraintKind::Hard);
                 if (hard_comparison != 0) return hard_comparison;

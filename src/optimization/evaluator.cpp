@@ -1,6 +1,8 @@
 #include "coilgun/optimization/evaluator.hpp"
 #include <chrono>
 #include <stdexcept>
+#include <unordered_map>
+#include <utility>
 namespace coilgun::optimization {
 namespace {
 EvaluationResult exception_result(const std::exception& error) {
@@ -11,13 +13,11 @@ EvaluationResult unknown_exception_result() {
     return EvaluationResult::failed("evaluation_exception", "unknown exception");
 }
 
-std::vector<EvaluationResult> malformed_batch(std::size_t count, const char* message) {
-    std::vector<EvaluationResult> results;
-    results.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        results.push_back(EvaluationResult::failed("evaluation_batch_output", message));
+EvaluationResult normalize_result(EvaluationResult result) {
+    if (result.status == EvaluationStatus::Unevaluated) {
+        return EvaluationResult::failed("evaluation_unevaluated", "evaluator returned an unevaluated result");
     }
-    return results;
+    return result;
 }
 
 std::vector<EvaluationResult> safe_batch(BatchEvaluator& evaluator,
@@ -26,9 +26,15 @@ std::vector<EvaluationResult> safe_batch(BatchEvaluator& evaluator,
     if (candidates.empty()) return {};
     try {
         auto results = evaluator.evaluate_batch(candidates, context);
-        if (results.size() != candidates.size()) {
-            return malformed_batch(candidates.size(), "batch evaluator returned an unexpected number of results");
+        if (results.size() < candidates.size()) {
+            const auto missing = candidates.size() - results.size();
+            for (std::size_t i = 0; i < missing; ++i) {
+                results.push_back(EvaluationResult::failed(
+                    "evaluation_batch_output", "batch evaluator returned too few results"));
+            }
         }
+        if (results.size() > candidates.size()) results.resize(candidates.size());
+        for (auto& result : results) result = normalize_result(std::move(result));
         return results;
     } catch (const std::exception& error) {
         std::vector<EvaluationResult> results;
@@ -46,7 +52,7 @@ std::vector<EvaluationResult> safe_batch(BatchEvaluator& evaluator,
 EvaluationResult one(const Evaluator& evaluator, const CandidateVariables& variables,
                      const EvaluationContext& context) {
     try {
-        return evaluator.evaluate(variables, context);
+        return normalize_result(evaluator.evaluate(variables, context));
     } catch (const std::exception& error) {
         return exception_result(error);
     } catch (...) {
@@ -57,7 +63,8 @@ EvaluationResult one(const Evaluator& evaluator, const CandidateVariables& varia
 void record_status(EvaluationStatistics& statistics, const EvaluationResult& result) {
     if (result.status == EvaluationStatus::Success) {
         ++statistics.successful_evaluations;
-    } else if (result.status == EvaluationStatus::Failed || result.status == EvaluationStatus::Invalid) {
+    } else if (result.status == EvaluationStatus::Failed || result.status == EvaluationStatus::Invalid ||
+               result.status == EvaluationStatus::Unevaluated) {
         ++statistics.failed_evaluations;
     }
 }
@@ -81,24 +88,44 @@ std::vector<EvaluationResult> CachedBatchEvaluator::evaluate_batch(const std::ve
     const auto start = std::chrono::steady_clock::now();
     std::vector<EvaluationResult> results;
     results.reserve(c.size());
-    std::uint64_t misses = 0;
     statistics_.seed = x.seed;
     if (x.fallback) ++statistics_.fallbacks;
-    for (const auto& variables : c) {
+    std::vector<CandidateVariables> misses;
+    std::vector<std::size_t> miss_candidate_indices;
+    std::vector<std::size_t> miss_result_indices;
+    std::vector<std::string> miss_keys;
+    std::unordered_map<std::string, std::size_t> pending;
+    misses.reserve(c.size());
+    miss_candidate_indices.reserve(c.size());
+    miss_result_indices.reserve(c.size());
+    miss_keys.reserve(c.size());
+    results.resize(c.size());
+    for (std::size_t i = 0; i < c.size(); ++i) {
+        const auto& variables = c[i];
         const auto key = make_cache_key(variables, x);
         if (auto hit = cache_->get(key)) {
-            results.push_back(*hit);
+            results[i] = normalize_result(*hit);
             ++statistics_.cache_hits;
             continue;
         }
-        const auto fresh = safe_batch(*evaluator_, {variables}, x);
-        const auto& result = fresh.front();
-        results.push_back(result);
-        cache_->put(key, result);
-        ++misses;
+        const auto [pending_it, inserted] = pending.emplace(key, misses.size());
+        if (inserted) {
+            misses.push_back(variables);
+            miss_keys.push_back(key);
+        }
+        miss_candidate_indices.push_back(i);
+        miss_result_indices.push_back(pending_it->second);
+    }
+    const auto fresh = safe_batch(*evaluator_, misses, x);
+    for (std::size_t i = 0; i < fresh.size(); ++i) {
+        const auto result = normalize_result(fresh[i]);
+        cache_->put(miss_keys[i], result);
         record_status(statistics_, result);
     }
-    statistics_.evaluations += misses;
+    for (std::size_t i = 0; i < miss_candidate_indices.size(); ++i) {
+        results[miss_candidate_indices[i]] = fresh[miss_result_indices[i]];
+    }
+    statistics_.evaluations += misses.size();
     statistics_.elapsed_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     return results;
 }

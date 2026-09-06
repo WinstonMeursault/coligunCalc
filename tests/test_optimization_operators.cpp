@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 #include "coilgun/optimization/genetic_operators.hpp"
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 using namespace coilgun::optimization;
 
@@ -40,6 +42,30 @@ TEST_CASE("zero probabilities leave genetic values unchanged") {
     CHECK(sbx_crossover(x, y, schema, rng, 0.0, 2.0).values == x.values);
     auto before = x; polynomial_mutation(x, schema, rng, 0.0, 20.0);
     CHECK(x.values == before.values);
+}
+
+TEST_CASE("genetic operators validate finite rates and honor exact boundaries") {
+    VariableSchema schema({VariableSpec::continuous("x", 0, 1)});
+    CandidateVariables a{{0.25}}, b{{0.75}};
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    RandomContext crossover_nan_rng(1);
+    RandomContext mutation_nan_rng(2);
+    CHECK_THROWS_AS(sbx_crossover(a, b, schema, crossover_nan_rng, nan, 2.0), std::invalid_argument);
+    CHECK_THROWS_AS(polynomial_mutation(a, schema, mutation_nan_rng, nan, 20.0), std::invalid_argument);
+
+    RandomContext zero_rng(3);
+    RandomContext control_rng(3);
+    CHECK(sbx_crossover(a, b, schema, zero_rng, 0.0, 2.0).values == a.values);
+    CHECK(zero_rng.uniform() == control_rng.uniform());
+    auto unchanged = a;
+    polynomial_mutation(unchanged, schema, zero_rng, 0.0, 20.0);
+    CHECK(unchanged.values == a.values);
+
+    auto crossed = sbx_crossover(a, b, schema, control_rng, 1.0, 2.0);
+    CHECK(crossed.values[0] != a.values[0]);
+    auto mutated = a;
+    polynomial_mutation(mutated, schema, control_rng, 1.0, 20.0);
+    CHECK(mutated.values[0] != a.values[0]);
 }
 
 TEST_CASE("elite preservation keeps best candidates and population size") {

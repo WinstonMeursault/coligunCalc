@@ -40,3 +40,11 @@ Result: 4 test cases passed, 63 assertions passed.
 
 The combined focused optimization suite (`types|constraints|variables|operators|evaluator`)
 also passed 5/5 tests after building all five targets.
+
+## Optimization Review Follow-up
+
+Crossover and mutation rates now require finite values in the inclusive
+`[0, 1]` range. A zero rate returns without consuming an RNG gate or applying
+an operation, while a one rate retains the normal RNG gate and always proceeds
+under the generator's `[0, 1]` semantics. NaN and exact-boundary behavior are
+covered by operator tests.

@@ -128,3 +128,13 @@ cmake --build --preset cpu-debug --target test_optimization_constraints -j2
 ```
 
 Result: 10 test cases and 48 assertions passed.
+
+## Optimization Review Follow-up
+
+Lexicographic comparison now orders `Invalid`, `Failed`, and `Unevaluated`
+statuses before comparing hard or soft constraint priority levels when both
+candidates are non-successful. This prevents an invalid candidate with a
+violation report from being ranked below a failed candidate with no reports.
+
+The focused constraints suite passed with the added invalid-versus-failed
+regression test.

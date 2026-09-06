@@ -47,7 +47,8 @@ CandidateVariables sbx_crossover(const CandidateVariables& a, const CandidateVar
                                  const VariableSchema& schema, RandomContext& rng,
                                  double rate, double di) {
     if (a.values.size() != schema.size() || b.values.size() != schema.size()) throw std::invalid_argument("parent dimensionality mismatch");
-    if (rate < 0 || rate > 1 || di <= 0 || !std::isfinite(di)) throw std::invalid_argument("invalid crossover parameters");
+    if (!std::isfinite(rate) || rate < 0 || rate > 1 || di <= 0 || !std::isfinite(di)) throw std::invalid_argument("invalid crossover parameters");
+    if (rate == 0.0) return schema.repair(a);
     if (rng.uniform() > rate) return schema.repair(a);
     CandidateVariables child; child.values.resize(schema.size());
     for (std::size_t i = 0; i < schema.size(); ++i) {
@@ -64,9 +65,11 @@ CandidateVariables sbx_crossover(const CandidateVariables& a, const CandidateVar
 void polynomial_mutation(CandidateVariables& values, const VariableSchema& schema, RandomContext& rng,
                          double rate, double di) {
     if (values.values.size() != schema.size()) throw std::invalid_argument("candidate dimensionality mismatch");
-    if (rate < 0 || rate > 1 || di <= 0 || !std::isfinite(di)) throw std::invalid_argument("invalid mutation parameters");
+    if (!std::isfinite(rate) || rate < 0 || rate > 1 || di <= 0 || !std::isfinite(di)) throw std::invalid_argument("invalid mutation parameters");
     for (std::size_t i = 0; i < schema.size(); ++i) {
-        const auto& v = schema.at(i); if (rng.uniform() > rate) continue;
+        const auto& v = schema.at(i);
+        if (rate == 0.0) continue;
+        if (rng.uniform() > rate) continue;
         if (v.type == VariableType::Continuous) {
             const double y = std::clamp(values.values[i], v.lower_bound, v.upper_bound);
             const double d = v.upper_bound - v.lower_bound; if (d == 0) continue;
