@@ -50,6 +50,7 @@ add_coilgun_test(test_optimization_evaluator)
 add_coilgun_test(test_optimization_single)
 add_coilgun_test(test_optimization_nsga2)
 add_coilgun_test(test_optimization_routing)
+add_coilgun_test(test_coilgun_optimization)
 add_validation_test(test_coupled_integrator)
 
 if(COILGUN_BUILD_GENERATOR_TESTS)
