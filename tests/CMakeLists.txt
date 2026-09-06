@@ -42,6 +42,7 @@ add_coilgun_test(test_gpu_thermal_cpu)
 add_coilgun_test(test_simulation_contracts)
 add_coilgun_test(test_input_validation)
 add_coilgun_test(test_cpu_phase_timing)
+add_coilgun_test(test_optimization_types)
 add_validation_test(test_coupled_integrator)
 
 if(COILGUN_BUILD_GENERATOR_TESTS)
