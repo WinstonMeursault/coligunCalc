@@ -2,6 +2,7 @@
 
 #include "coilgun/optimization/genetic_optimizer.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -114,6 +115,37 @@ public:
     }
 
     std::size_t calls = 0;
+};
+
+class ElitePropagationEvaluator final : public BatchEvaluator {
+public:
+    std::vector<double> first_generation_values;
+    double elite_value = 0.0;
+    std::size_t elite_occurrences_in_second_generation = 0;
+    std::size_t calls = 0;
+
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        if (calls++ == 0) {
+            first_generation_values.reserve(values.size());
+            for (const auto& value : values) first_generation_values.push_back(value.values.front());
+            elite_value = *std::max_element(first_generation_values.begin(), first_generation_values.end());
+        } else {
+            elite_occurrences_in_second_generation = static_cast<std::size_t>(std::count_if(
+                values.begin(), values.end(), [&](const CandidateVariables& value) {
+                    return value.values.front() == elite_value;
+                }));
+        }
+
+        std::vector<EvaluationResult> results;
+        results.reserve(values.size());
+        for (const auto& value : values) {
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"score", value.values.front(), true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
 };
 
 class FeasibilityFirstEvaluator final : public BatchEvaluator {
@@ -257,6 +289,23 @@ TEST_CASE("single objective optimizer preserves the actual elite across generati
     REQUIRE(result.best_by_objective.count("score") == 1);
     CHECK(result.best_by_objective.at("score").objectives.front().value > 1.0);
     CHECK(result.termination.reason == TerminationReason::MaxGenerations);
+}
+
+TEST_CASE("single objective elite propagation inserts the elite into the next generation") {
+    auto evaluator = std::make_shared<ElitePropagationEvaluator>();
+    auto config = test_config();
+    config.population_size = 8;
+    config.max_generations = 2;
+    config.elite_count = 1;
+    config.crossover_rate = 0.0;
+    config.mutation_rate = 1.0;
+    config.random_seed = 31;
+
+    const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config).optimize();
+
+    REQUIRE(result.termination.reason == TerminationReason::MaxGenerations);
+    REQUIRE(evaluator->first_generation_values.size() == config.population_size);
+    CHECK(evaluator->elite_occurrences_in_second_generation == config.elite_count);
 }
 
 TEST_CASE("single objective optimizer keeps feasible incumbent ahead of infeasible objective gain") {
