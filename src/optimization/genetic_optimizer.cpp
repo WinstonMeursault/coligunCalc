@@ -375,9 +375,18 @@ OptimizationResult GeneticOptimizer::optimize() {
             const auto elites = population.elites(config_.elite_count, comparator_);
             for (auto elite : elites) next.push_back(std::move(elite));
         }
+        std::optional<Nsga2Ranking> mating_ranking;
+        if (resolved_strategy == SelectionStrategy::NSGA2) {
+            const std::vector<Candidate> candidates(population.begin(), population.end());
+            mating_ranking = nsga2_rank(candidates, objective_definitions(*objective_schema));
+        }
         while (next.size() < config_.population_size) {
-            const auto parent_a = tournament_select(population, comparator_, rng);
-            const auto parent_b = tournament_select(population, comparator_, rng);
+            const auto parent_a = resolved_strategy == SelectionStrategy::NSGA2
+                ? nsga2_tournament_select(population, *mating_ranking, rng)
+                : tournament_select(population, comparator_, rng);
+            const auto parent_b = resolved_strategy == SelectionStrategy::NSGA2
+                ? nsga2_tournament_select(population, *mating_ranking, rng)
+                : tournament_select(population, comparator_, rng);
             Candidate child;
             child.id = next_id++;
             child.variables = sbx_crossover(parent_a.variables, parent_b.variables, schema_, rng, config_.crossover_rate);

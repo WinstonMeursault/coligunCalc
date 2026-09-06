@@ -3,6 +3,7 @@
 #include "coilgun/optimization/genetic_optimizer.hpp"
 
 #include <memory>
+#include <limits>
 #include <vector>
 
 using namespace coilgun::optimization;
@@ -76,6 +77,36 @@ public:
     std::size_t calls = 0;
 };
 
+class SchemaMutationEvaluator final : public BatchEvaluator {
+public:
+    enum class Mutation { Id, Direction, NonFinite };
+
+    explicit SchemaMutationEvaluator(Mutation mutation) : mutation_(mutation) {}
+
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        const bool second_generation = calls++ > 0;
+        std::vector<EvaluationResult> results;
+        results.reserve(values.size());
+        for (const auto& value : values) {
+            const double x = value.values.front();
+            auto result = EvaluationResult::success();
+            const bool mutate_id = second_generation && mutation_ == Mutation::Id;
+            const bool mutate_direction = second_generation && mutation_ == Mutation::Direction;
+            const bool mutate_value = second_generation && mutation_ == Mutation::NonFinite;
+            result.objectives.push_back({mutate_id ? "changed" : "left", x, !mutate_direction});
+            result.objectives.push_back({"right", mutate_value
+                ? std::numeric_limits<double>::quiet_NaN() : 1.0 - x, true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+
+private:
+    Mutation mutation_;
+    std::size_t calls = 0;
+};
+
 } // namespace
 
 TEST_CASE("Auto routing is equivalent to explicit single-objective optimization") {
@@ -124,4 +155,15 @@ TEST_CASE("Auto routing freezes objective count for the whole run") {
 
     CHECK(result.termination.reason == TerminationReason::ConfigurationError);
     CHECK(result.termination.message.find("objective") != std::string::npos);
+}
+
+TEST_CASE("Auto routing freezes objective IDs, directions, and finite values") {
+    for (const auto mutation : {SchemaMutationEvaluator::Mutation::Id,
+                                SchemaMutationEvaluator::Mutation::Direction,
+                                SchemaMutationEvaluator::Mutation::NonFinite}) {
+        auto evaluator = std::make_shared<SchemaMutationEvaluator>(mutation);
+        const auto result = GeneticOptimizer(schema(), evaluator, config()).optimize();
+        CHECK(result.termination.reason == TerminationReason::ConfigurationError);
+        CHECK(result.termination.message.find("objective") != std::string::npos);
+    }
 }

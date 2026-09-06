@@ -137,3 +137,28 @@ TEST_CASE("NSGA-II validates fixed objective count") {
                                 ObjectiveDefinition{"c", true, 1.0}}),
                     std::invalid_argument);
 }
+
+TEST_CASE("NSGA-II mating tournaments prefer Pareto rank over first objective") {
+    Candidate low_first_rank_zero = candidate(0, 0.0, 100.0);
+    Candidate high_first_rank_one = candidate(1, 100.0, 0.0);
+    Candidate rank_zero_dominator = candidate(2, 101.0, 1.0);
+    Population population;
+    population.push_back(low_first_rank_zero);
+    population.push_back(high_first_rank_one);
+    population.push_back(rank_zero_dominator);
+
+    const std::vector<ObjectiveDefinition> definitions{{"first", true, 1.0},
+                                                       {"second", true, 1.0}};
+    const auto ranking = nsga2_rank({low_first_rank_zero, high_first_rank_one,
+                                     rank_zero_dominator}, definitions);
+    RandomContext rng(1234);
+    std::size_t low_first_selected = 0;
+    std::size_t high_first_selected = 0;
+    for (std::size_t i = 0; i < 2000; ++i) {
+        const auto selected = nsga2_tournament_select(population, ranking, rng);
+        if (selected.id == low_first_rank_zero.id) ++low_first_selected;
+        if (selected.id == high_first_rank_one.id) ++high_first_selected;
+    }
+
+    CHECK(low_first_selected > high_first_selected);
+}

@@ -201,6 +201,28 @@ std::vector<double> crowding_distances(
     return crowding_for_front(candidates, front, view);
 }
 
+Candidate nsga2_tournament_select(
+    const Population& population,
+    const Nsga2Ranking& ranking,
+    RandomContext& rng,
+    std::size_t tournament_size) {
+    if (population.empty()) throw std::invalid_argument("cannot select from empty population");
+    if (ranking.ranks.size() != population.size() ||
+        ranking.crowding_distances.size() != population.size())
+        throw std::invalid_argument("NSGA-II ranking does not match population");
+    std::size_t best_index = rng.index(population.size());
+    const auto better = [&](std::size_t lhs_index, std::size_t rhs_index) {
+        if (ranking.ranks[lhs_index] != ranking.ranks[rhs_index])
+            return ranking.ranks[lhs_index] < ranking.ranks[rhs_index];
+        return ranking.crowding_distances[lhs_index] > ranking.crowding_distances[rhs_index];
+    };
+    for (std::size_t i = 1; i < std::max<std::size_t>(1, tournament_size); ++i) {
+        const auto contender_index = rng.index(population.size());
+        if (better(contender_index, best_index)) best_index = contender_index;
+    }
+    return population[best_index];
+}
+
 std::vector<Candidate> nsga2_select(
     const std::vector<Candidate>& parents,
     const std::vector<Candidate>& offspring,
