@@ -33,7 +33,10 @@ cmake --build --preset cpu-debug --target test_optimization_routing -j2
 ./build/cpu-debug/tests/test_optimization_routing
 ```
 
-Result: 4 test cases and 25 assertions passed.
+Initial result: 4 test cases and 25 assertions passed.
+
+Follow-up routing and frozen-schema tests added. Final routing result: 5 test
+cases and 31 assertions passed; full CPU-debug CTest passed 29/29.
 
 The existing single-objective suite was updated to assert the required default
 `Auto` to NSGA-II routing and to retain explicit `SingleObjective` mismatch
