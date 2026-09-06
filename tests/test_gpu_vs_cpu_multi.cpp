@@ -104,6 +104,8 @@ TEST_CASE("GPU multi-stage primary muzzle velocity comparison requires CUDA" *
     double v_gpu = run_gpu_multi(&report);
     REQUIRE(report.gpu_executed);
     REQUIRE(report.backend == BackendMode::Direct);
+    CHECK(report.requested_solver == SolverMode::Auto);
+    CHECK(report.solver == SolverMode::Eigen);
     CHECK(gpu_test::numerically_equal(v_gpu, v_cpu,
                                       gpu_test::tolerance_for(GpuOptLevel::Standard)));
 }
@@ -1071,6 +1073,8 @@ TEST_CASE("GPU multi-stage primary comparison requires CUDA execution" *
         const double previous_gpu_velocity = gpu.state().arm_velocity;
         const auto& cpu_step = cpu.step();
         const auto& gpu_step = gpu.step();
+        if (i == 0)
+            CHECK(gpu.state().currents(0) > 0.0);
         REQUIRE(gpu.execution_report().gpu_executed);
         REQUIRE(gpu.execution_report().backend == BackendMode::Direct);
         REQUIRE(cpu.state().currents.size() == gpu.state().currents.size());
@@ -1225,6 +1229,8 @@ TEST_CASE("GPU multi-stage reset deterministically replays the first step") {
     CHECK(sim.state().currents(0) ==
           doctest::Approx(sim.result().history.front().coil_currents.front()));
     CHECK(sim.execution_report().fallback_count == report.fallback_count);
+    CHECK(sim.execution_report().requested_solver == report.requested_solver);
+    CHECK(sim.execution_report().solver == report.solver);
 }
 
 TEST_CASE("GPU multi-stage reports safe fallback when no CUDA device is available" *

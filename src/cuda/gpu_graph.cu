@@ -98,7 +98,17 @@ GraphCaptureStatus GpuGraphCache::capture_and_select(const GpuGraphVariantKey& k
             cudaGetErrorString(error)));
     }
 
-    GraphCaptureStatus body_status = body(stream);
+    GraphCaptureStatus body_status;
+    try {
+        body_status = body(stream);
+    } catch (const std::exception& error) {
+        body_status = GraphCaptureStatus::failed(
+            GraphCapturePhase::CaptureBody, cudaErrorUnknown, error.what());
+    } catch (...) {
+        body_status = GraphCaptureStatus::failed(
+            GraphCapturePhase::CaptureBody, cudaErrorUnknown,
+            "CUDA graph capture body failed with an unknown exception");
+    }
     cudaGraph_t graph = nullptr;
     error = cudaStreamEndCapture(stream, &graph);
     if (!body_status.ok) {
@@ -106,6 +116,7 @@ GraphCaptureStatus GpuGraphCache::capture_and_select(const GpuGraphVariantKey& k
         return lock_failure(key, std::move(body_status));
     }
     if (error != cudaSuccess) {
+        if (graph != nullptr) cudaGraphDestroy(graph);
         return lock_failure(key, GraphCaptureStatus::failed(
             GraphCapturePhase::EndCapture, static_cast<int>(error),
             cudaGetErrorString(error)));

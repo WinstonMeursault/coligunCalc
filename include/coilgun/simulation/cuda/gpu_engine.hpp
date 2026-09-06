@@ -327,7 +327,8 @@ public:
         report_.backend = policy_.backend;
         report_.solver = policy_.solver;
         report_.precision = policy_.precision;
-         report_.thermal = policy_.thermal;
+        report_.thermal = policy_.thermal;
+        report_.backend_selection_reason = policy_.backend_selection_reason;
          report_.device_id = config_.device_id;
          report_.threads_per_block = config_.threads_per_block;
          report_.profiling_enabled = config_.enable_profiling;
@@ -499,6 +500,7 @@ public:
         result_ = {};
         stage_mask_ = state_.stage_mask;
         mutual_stage_mask_ = state_.mutual_stage_mask;
+        pending_stage_completions_.clear();
         select_graph_variant_at_boundary();
 #if defined(COILGUN_CUDA_AVAILABLE)
         sync_runtime_state_after_reset();
@@ -627,6 +629,10 @@ public:
         state_.stage_voltages[stage] = voltage;
     }
     void complete_stage(std::size_t batch, std::size_t stage);
+    /** Number of device stage-current clears queued for the next step. */
+    std::size_t pending_stage_completion_count() const noexcept {
+        return pending_stage_completions_.size();
+    }
     std::size_t calibration_count() const noexcept { return calibration_count_; }
     GpuAssemblySnapshot assemble_reference_for_test();
 #if defined(COILGUN_CUDA_AVAILABLE)
@@ -675,6 +681,7 @@ private:
         std::vector<double> derivatives_snapshot;
         std::vector<std::uint8_t> active_pairs;
         std::vector<double> stage_voltages;
+        double control_time = 0.0;
         std::vector<double> thermal_filament_currents;
 #if defined(COILGUN_CUDA_AVAILABLE)
         std::vector<DeviceStepStatus> compact_status;
@@ -1115,6 +1122,7 @@ private:
     std::vector<double> solution_;
     std::vector<double> current_derivatives_;
     std::vector<PipelineStage> pipeline_order_;
+    std::vector<std::size_t> pending_stage_completions_;
     StepWorkspace step_workspace_;
 #if defined(COILGUN_CUDA_AVAILABLE)
     std::unique_ptr<GpuExecutionContext> context_;

@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <ostream>
 #include <string>
 
@@ -57,6 +58,17 @@ inline const char* to_string(ThermalMode value) noexcept {
     return "unknown";
 }
 
+inline const char* to_string(BackendSelectionReason value) noexcept {
+    switch (value) {
+    case BackendSelectionReason::None:                  return "none";
+    case BackendSelectionReason::ExplicitRequest:       return "explicit-request";
+    case BackendSelectionReason::AutoDirectLowOverhead: return "auto-direct-low-overhead";
+    case BackendSelectionReason::AutoGraphReplay:        return "auto-graph-replay";
+    case BackendSelectionReason::CapabilityFallback:     return "capability-fallback";
+    }
+    return "unknown";
+}
+
 inline std::ostream& operator<<(std::ostream& stream, Backend value) {
     return stream << to_string(value);
 }
@@ -73,6 +85,10 @@ inline std::ostream& operator<<(std::ostream& stream, ThermalMode value) {
     return stream << to_string(value);
 }
 
+inline std::ostream& operator<<(std::ostream& stream, BackendSelectionReason value) {
+    return stream << to_string(value);
+}
+
 struct ExecutionReport {
     Backend requested_backend = Backend::Auto;
     Solver requested_solver = Solver::Auto;
@@ -82,6 +98,7 @@ struct ExecutionReport {
     Solver solver = Solver::Auto;
     PrecisionMode precision = PrecisionMode::Full;
     ThermalMode thermal = ThermalMode::Auto;
+    BackendSelectionReason backend_selection_reason = BackendSelectionReason::None;
 
     bool calibrated = false;
     bool precision_fallback = false;
@@ -96,6 +113,9 @@ struct ExecutionReport {
     // CPU or CUDA-backed path executed.
     double solver_time_ms = 0.0;
     double thermal_time_ms = 0.0;
+    // Number of physical pipeline steps that captured the pre-step current
+    // snapshot required by the GPU thermal kernel.
+    std::size_t gpu_thermal_snapshot_count = 0;
     // Cumulative host wall time spent in synchronous host/device copies.
     double transfer_time_ms = 0.0;
     double max_condition_estimate = 0.0;
@@ -125,6 +145,10 @@ struct ExecutionReport {
         if (precision != other.precision) metadata_conflict = true;
         if (thermal != ThermalMode::Auto && other.thermal != ThermalMode::Auto &&
             thermal != other.thermal) metadata_conflict = true;
+        if (backend_selection_reason != BackendSelectionReason::None &&
+            other.backend_selection_reason != BackendSelectionReason::None &&
+            backend_selection_reason != other.backend_selection_reason)
+            metadata_conflict = true;
         if (profiling_enabled != other.profiling_enabled) metadata_conflict = true;
         if (!fallback_reason.empty() && !other.fallback_reason.empty() && fallback_reason != other.fallback_reason) metadata_conflict = true;
         if (static_fallback_reason != FallbackReason::None &&
@@ -145,6 +169,7 @@ struct ExecutionReport {
         gpu_time_ms += other.gpu_time_ms;
         solver_time_ms += other.solver_time_ms;
         thermal_time_ms += other.thermal_time_ms;
+        gpu_thermal_snapshot_count += other.gpu_thermal_snapshot_count;
         transfer_time_ms += other.transfer_time_ms;
         max_condition_estimate = std::max(max_condition_estimate,
                                           other.max_condition_estimate);
@@ -153,6 +178,8 @@ struct ExecutionReport {
         }
         if (static_fallback_reason == FallbackReason::None) static_fallback_reason = other.static_fallback_reason;
         if (runtime_fallback_reason == FallbackReason::None) runtime_fallback_reason = other.runtime_fallback_reason;
+        if (backend_selection_reason == BackendSelectionReason::None)
+            backend_selection_reason = other.backend_selection_reason;
         metadata_conflict = metadata_conflict || other.metadata_conflict;
         profiling_enabled = profiling_enabled || other.profiling_enabled;
     }

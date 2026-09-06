@@ -31,3 +31,25 @@ TEST_CASE("resident engine reuses allocations across steps and reset") {
     CHECK(engine.device_buffer_addresses() == addresses);
     CHECK(engine.device_allocation_count() == allocations);
 }
+
+TEST_CASE("stage completions batch device updates until the next step") {
+    using namespace coilgun::simulation::cuda;
+    if (!cuda_device_available()) return;
+    auto geometry = gpu_test::geometry(2, 1, false);
+    auto state = gpu_test::state(1, 2, 1, false);
+    state.stage_voltages = {10.0, 10.0};
+    GpuExecutionConfig config;
+    config.backend = BackendMode::Direct;
+    config.solver = SolverMode::Batched;
+    GpuEngine engine(std::move(geometry), std::move(state), config);
+
+    engine.step();
+    engine.complete_stage(0, 0);
+    engine.complete_stage(0, 1);
+    CHECK(engine.pending_stage_completion_count() == 2);
+
+    engine.step();
+    CHECK(engine.pending_stage_completion_count() == 0);
+    CHECK(engine.state().currents[0] == doctest::Approx(0.0));
+    CHECK(engine.state().currents[1] == doctest::Approx(0.0));
+}

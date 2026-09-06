@@ -6,7 +6,6 @@
 #include "coilgun/simulation/cuda/gpu_single_stage_sim.hpp"
 
 #include "coilgun/physics/constants.hpp"
-#include "coilgun/physics/mutual_inductance.hpp"
 
 #include <cuda_runtime_api.h>
 #include <algorithm>
@@ -164,33 +163,6 @@ void GpuSingleStageSim<SP>::sync_state_from_engine() {
 }
 
 template<typename SP>
-double GpuSingleStageSim<SP>::compute_force() const {
-    return compute_force_at(state_.arm_position, state_.currents);
-}
-
-template<typename SP>
-double GpuSingleStageSim<SP>::compute_force_at(
-        double position, const Eigen::VectorXd& currents) const {
-    double force = 0.0;
-    const int radial_count = armature_.radial_filaments();
-    const double filament_length = armature_.length() / armature_.axial_filaments();
-    for (std::size_t k = 0; k < engine_->layout().F; ++k) {
-        const int radial = static_cast<int>(k % radial_count) + 1;
-        const int axial = static_cast<int>(k / radial_count) + 1;
-        const double relative = armature_.filament_axial_position(axial) - armature_.position();
-        const double separation = position + relative - coil_.position();
-        const double gradient = physics::mutual_inductance_gradient_coil(
-            coil_.inner_radius(), coil_.outer_radius(), coil_.length(), coil_.turns(),
-            armature_.filament_inner_radius(radial),
-            armature_.filament_outer_radius(radial), filament_length, 1,
-            separation, 9, false);
-        force += currents(0) * currents(static_cast<Eigen::Index>(k + 1)) *
-            gradient;
-    }
-    return force;
-}
-
-template<typename SP>
 double GpuSingleStageSim<SP>::compute_recorded_force() const {
     const auto& gradients = engine_->state().dm1;
     double force = 0.0;
@@ -223,6 +195,7 @@ bool GpuSingleStageSim<SP>::check_termination(const TerminationPolicy& policy) c
     if (policy.enable_bound_check && state_.arm_position >= policy.barrel_end_position) return true;
     if (step_count_ >= policy.max_steps) return true;
     if (!policy.enable_velocity_check || step_count_ < policy.velocity_decay_steps) return false;
+    if (result_.history.empty()) return false;
     const auto n = static_cast<int>(result_.history.size());
     bool decaying = true;
     for (int i = 0; i < policy.velocity_decay_steps; ++i) {
@@ -231,7 +204,8 @@ bool GpuSingleStageSim<SP>::check_termination(const TerminationPolicy& policy) c
             break;
         }
     }
-    return decaying && std::abs(compute_force() / armature_.mass()) < policy.accel_threshold;
+    return decaying &&
+        std::abs(result_.history.back().force / armature_.mass()) < policy.accel_threshold;
 }
 
 template<typename SP>

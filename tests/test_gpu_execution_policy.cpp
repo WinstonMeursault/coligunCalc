@@ -180,16 +180,28 @@ TEST_CASE("GPU execution planner resolves small and batched workloads") {
 
     const auto small = GpuExecutionPlanner::plan(1, 3, 1, false,
                                                  capability, config);
-    CHECK(small.backend == BackendMode::Fallback);
+    CHECK(small.backend == BackendMode::Direct);
+    CHECK(small.backend_selection_reason == BackendSelectionReason::AutoDirectLowOverhead);
     CHECK(small.solver == SolverMode::Eigen);
     CHECK(small.thermal == ThermalMode::Disabled);
 
     const auto large = GpuExecutionPlanner::plan(4, 128, 8, true,
                                                  capability, config);
-    CHECK(large.backend == BackendMode::Fallback);
-    CHECK(large.backend_fallback_reason == FallbackReason::MetadataConflict);
+    CHECK(large.backend == BackendMode::Graph);
+    CHECK(large.backend_selection_reason == BackendSelectionReason::AutoGraphReplay);
+    CHECK(large.backend_fallback_reason == FallbackReason::None);
     CHECK(large.solver == SolverMode::Batched);
     CHECK(large.thermal == ThermalMode::Gpu);
+}
+
+TEST_CASE("Auto planner uses Direct when Graph capability is unavailable") {
+    GpuCapability capability;
+    capability.supports_graph = false;
+    const auto policy = GpuExecutionPlanner::plan(4, 128, 8, false,
+                                                  capability, GpuExecutionConfig{});
+    CHECK(policy.backend == BackendMode::Direct);
+    CHECK(policy.backend_selection_reason == BackendSelectionReason::AutoGraphReplay);
+    CHECK(policy.backend_fallback_reason == FallbackReason::None);
 }
 
 TEST_CASE("GPU execution planner preserves standard precision and explicit choices") {
@@ -304,6 +316,21 @@ TEST_CASE("Graph request remains a static fallback until engine runtime selectio
     const auto policy = GpuExecutionPlanner::plan(8, 128, 8, false, {}, config);
     CHECK(policy.backend == BackendMode::Fallback);
     CHECK(policy.backend_fallback_reason == FallbackReason::MetadataConflict);
+}
+
+TEST_CASE("Persistent planner rejects batch sizes unsupported by its protocol") {
+    GpuExecutionConfig config;
+    config.backend = BackendMode::Persistent;
+    GpuCapability capability;
+    capability.supports_persistent = true;
+    capability.supports_persistent_control_stream = true;
+    capability.persistent_is_deterministic = true;
+
+    const auto policy = GpuExecutionPlanner::plan(1, 1, 2, false,
+                                                  capability, config);
+    CHECK(policy.backend == BackendMode::Fallback);
+    CHECK(policy.backend_selection_reason == BackendSelectionReason::CapabilityFallback);
+    CHECK(policy.backend_fallback_reason == FallbackReason::CapabilityUnavailable);
 }
 
 TEST_CASE("Report merge records metadata conflicts and fallback reasons") {

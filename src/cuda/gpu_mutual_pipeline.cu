@@ -1,4 +1,5 @@
 #include "coilgun/simulation/cuda/gpu_mutual_pipeline.hpp"
+#include "gpu_kernel_launch_detail.hpp"
 #include "coilgun/physics/mutual_inductance.cuh"
 #include "coilgun/physics/quadrature.hpp"
 #include <cuda_runtime.h>
@@ -24,13 +25,13 @@ __device__ inline std::size_t pipeline_index(int simulation, int stage,
            + filament;
 }
 
-template <bool Aggressive, bool UseCutoff>
+template <int Nodes, bool Aggressive, bool UseCutoff>
 __global__ void mutual_pipeline_kernel(
         const coilgun::simulation::cuda::CoilGeo* coils,
         const coilgun::simulation::cuda::FilGeo* filaments,
         const double* separations, const std::uint8_t* active_mask,
         double* mutual, double* gradient, int batch_size, int stage_count,
-        int filament_count, int n_nodes) {
+        int filament_count) {
     const int simulation = static_cast<int>(blockIdx.z);
     const int stage = static_cast<int>(blockIdx.y);
     const int filament = static_cast<int>(blockIdx.x);
@@ -70,7 +71,7 @@ __global__ void mutual_pipeline_kernel(
     const double la_half = 0.5 * coil.len;
     const double lb_half = 0.5 * fil.len;
     const double prefactor = coil.turns / 16.0;
-    const int n4 = n_nodes * n_nodes * n_nodes * n_nodes;
+    constexpr int n4 = Nodes * Nodes * Nodes * Nodes;
     const int tid = static_cast<int>(threadIdx.x);
     const int threads = static_cast<int>(blockDim.x);
     __shared__ double sum_m[512];
@@ -79,12 +80,12 @@ __global__ void mutual_pipeline_kernel(
     sum_gradient[tid] = 0.0;
 
     for (int point = tid; point < n4; point += threads) {
-        const int i1 = point / (n_nodes * n_nodes * n_nodes);
-        const int rem1 = point % (n_nodes * n_nodes * n_nodes);
-        const int j1 = rem1 / (n_nodes * n_nodes);
-        const int rem2 = rem1 % (n_nodes * n_nodes);
-        const int i2 = rem2 / n_nodes;
-        const int j2 = rem2 % n_nodes;
+        const int i1 = point / (Nodes * Nodes * Nodes);
+        const int rem1 = point % (Nodes * Nodes * Nodes);
+        const int j1 = rem1 / (Nodes * Nodes);
+        const int rem2 = rem1 % (Nodes * Nodes);
+        const int i2 = rem2 / Nodes;
+        const int j2 = rem2 % Nodes;
         const double weight = pipeline_gl_weights[i1] * pipeline_gl_weights[j1]
                             * pipeline_gl_weights[i2] * pipeline_gl_weights[j2];
         const double ra = ra_mid + ra_half * pipeline_gl_nodes[i1];
@@ -127,8 +128,7 @@ void launch(Kernel kernel, dim3 grid, int threads, cudaStream_t stream,
     kernel<<<grid, threads, 0, stream>>>(
         view.coils, view.filaments, view.separations, view.active_mask,
         view.mutual, view.gradient, static_cast<int>(view.batch_size),
-        static_cast<int>(view.stage_count), static_cast<int>(view.filament_count),
-        view.n_nodes);
+        static_cast<int>(view.stage_count), static_cast<int>(view.filament_count));
     const cudaError_t error = cudaGetLastError();
     if (error != cudaSuccess)
         throw std::runtime_error(cudaGetErrorString(error));
@@ -138,8 +138,9 @@ void launch(Kernel kernel, dim3 grid, int threads, cudaStream_t stream,
 
 namespace coilgun::simulation::cuda {
 
-void launch_mutual_pipeline(const MutualPipelineView& view, GpuOptLevel opt_level,
-                            int threads_per_block, cudaStream_t stream) {
+void launch_mutual_pipeline_impl(const MutualPipelineView& view, GpuOptLevel opt_level,
+                                 int threads_per_block, cudaStream_t stream,
+                                 bool validate_buffers) {
     if (!view.coils || !view.filaments || !view.separations || !view.active_mask
         || !view.mutual || !view.gradient)
         throw std::invalid_argument("mutual pipeline requires non-null buffers");
@@ -153,9 +154,10 @@ void launch_mutual_pipeline(const MutualPipelineView& view, GpuOptLevel opt_leve
         return status == cudaSuccess && attributes.memoryType == cudaMemoryTypeDevice;
 #endif
     };
-    if (!device_pointer(view.coils) || !device_pointer(view.filaments) ||
-        !device_pointer(view.separations) || !device_pointer(view.active_mask) ||
-        !device_pointer(view.mutual) || !device_pointer(view.gradient))
+    if (validate_buffers &&
+        (!device_pointer(view.coils) || !device_pointer(view.filaments) ||
+         !device_pointer(view.separations) || !device_pointer(view.active_mask) ||
+         !device_pointer(view.mutual) || !device_pointer(view.gradient)))
         throw std::invalid_argument("mutual pipeline buffers must be device-accessible");
     if (view.batch_size == 0 || view.stage_count == 0 || view.filament_count == 0
         || view.batch_size > 0x7fffffff || view.stage_count > 0x7fffffff
@@ -176,31 +178,38 @@ void launch_mutual_pipeline(const MutualPipelineView& view, GpuOptLevel opt_leve
         throw std::invalid_argument("mutual pipeline quadrature dimensions overflow");
     // Geometry buffers are device-resident. Validate their host-side source
     // data before upload; dereferencing them here would be an invalid host read.
-    int current_device = -1;
-    cudaDeviceProp properties{};
-    if (cudaGetDevice(&current_device) != cudaSuccess || current_device < 0 ||
-        cudaGetDeviceProperties(&properties, current_device) != cudaSuccess ||
-        view.filament_count > static_cast<std::size_t>(properties.maxGridSize[0]) ||
-        view.stage_count > static_cast<std::size_t>(properties.maxGridSize[1]) ||
-        view.batch_size > static_cast<std::size_t>(properties.maxGridSize[2]))
-        throw std::invalid_argument("mutual pipeline grid exceeds device limits");
+    if (validate_buffers) {
+        int current_device = -1;
+        cudaDeviceProp properties{};
+        if (cudaGetDevice(&current_device) != cudaSuccess || current_device < 0 ||
+            cudaGetDeviceProperties(&properties, current_device) != cudaSuccess ||
+            view.filament_count > static_cast<std::size_t>(properties.maxGridSize[0]) ||
+            view.stage_count > static_cast<std::size_t>(properties.maxGridSize[1]) ||
+            view.batch_size > static_cast<std::size_t>(properties.maxGridSize[2]))
+            throw std::invalid_argument("mutual pipeline grid exceeds device limits");
+    }
 
     const dim3 grid(static_cast<unsigned>(view.filament_count),
                     static_cast<unsigned>(view.stage_count),
                     static_cast<unsigned>(view.batch_size));
     switch (opt_level) {
     case GpuOptLevel::Standard:
-        launch(mutual_pipeline_kernel<false, false>, grid, threads_per_block, stream, view);
+        launch(mutual_pipeline_kernel<9, false, false>, grid, threads_per_block, stream, view);
         break;
     case GpuOptLevel::Full:
-        launch(mutual_pipeline_kernel<false, true>, grid, threads_per_block, stream, view);
+        launch(mutual_pipeline_kernel<9, false, true>, grid, threads_per_block, stream, view);
         break;
     case GpuOptLevel::Aggressive:
-        launch(mutual_pipeline_kernel<true, true>, grid, threads_per_block, stream, view);
+        launch(mutual_pipeline_kernel<9, true, true>, grid, threads_per_block, stream, view);
         break;
     default:
         throw std::invalid_argument("unknown GPU optimization level");
     }
+}
+
+void launch_mutual_pipeline(const MutualPipelineView& view, GpuOptLevel opt_level,
+                            int threads_per_block, cudaStream_t stream) {
+    launch_mutual_pipeline_impl(view, opt_level, threads_per_block, stream, true);
 }
 
 void initialize_mutual_pipeline_constants(cudaStream_t stream) {
@@ -226,5 +235,16 @@ std::size_t mutual_pipeline_index(std::size_t simulation, std::size_t stage,
                                   std::size_t filament_count) {
     return (simulation * stage_count + stage) * filament_count + filament;
 }
+
+namespace detail {
+
+void launch_mutual_pipeline_unchecked(const MutualPipelineView& view,
+                                      GpuOptLevel opt_level,
+                                      int threads_per_block,
+                                      cudaStream_t stream) {
+    launch_mutual_pipeline_impl(view, opt_level, threads_per_block, stream, false);
+}
+
+} // namespace detail
 
 } // namespace coilgun::simulation::cuda

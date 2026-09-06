@@ -148,6 +148,8 @@ Notes/
 .ckb/
 .depwire/
 .reflex/
+.superpowers/
+.worktrees/
 
 # C++ build artifacts
 *.o
