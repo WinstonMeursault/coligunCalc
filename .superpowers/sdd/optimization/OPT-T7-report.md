@@ -29,8 +29,10 @@ Implemented physics-independent NSGA-II ranking and selection in
 
 `./build/cpu-debug/tests/test_optimization_nsga2`
 
-Result: 6 test cases passed, 29 assertions passed.
+Initial result: 6 test cases passed, 29 assertions passed.
 
 `ctest --preset cpu-debug -R 'test_optimization_(nsga2|types|constraints|variables|operators|evaluator)' --output-on-failure`
 
-Result: 6/6 focused optimization tests passed.
+Follow-up fixes added equal-infeasible-violation tie handling and safe ranking
+for failed candidates with empty objective vectors. Final focused result: 8 test
+cases and 41 assertions passed; full CPU-debug CTest passed 28/28.

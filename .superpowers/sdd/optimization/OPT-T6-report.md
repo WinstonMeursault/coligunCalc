@@ -41,7 +41,7 @@ cmake --build --preset cpu-debug --target test_optimization_single -j2
 ./build/cpu-debug/tests/test_optimization_single
 ```
 
-Result: 4 test cases and 27 assertions passed.
+Initial result: 4 test cases and 27 assertions passed.
 
 ## Verification
 
@@ -53,7 +53,10 @@ ctest --preset cpu-debug -R 'test_optimization_(types|constraints|variables|oper
 Result: 6/6 focused optimization tests passed. The complete CPU-debug build also
 completed successfully.
 
+Follow-up fixes added tolerance-aware convergence and feasible-incumbent
+protection. A dedicated elite-propagation regression was added. Final focused
+result: 8 test cases and 42 assertions passed; full CPU-debug CTest passed 28/28.
 Coverage includes max/min direction, deterministic seed behavior, elite
-preservation, target/evaluation/no-improvement termination, exact-one-objective
+propagation, target/evaluation/no-improvement termination, exact-one-objective
 validation, fixed objective schema and direction, all-failed evaluation handling,
 and unified single-objective result fields.
