@@ -47,6 +47,14 @@ enum class FallbackReason : int {
     MetadataConflict = 4,
 };
 
+enum class BackendSelectionReason : int {
+    None = 0,
+    ExplicitRequest = 1,
+    AutoDirectLowOverhead = 2,
+    AutoGraphReplay = 3,
+    CapabilityFallback = 4,
+};
+
 struct GpuExecutionConfig {
     BackendMode backend = BackendMode::Auto;
     SolverMode solver = SolverMode::Auto;
@@ -93,6 +101,7 @@ struct GpuExecutionPolicy {
     SolverMode solver = SolverMode::Eigen;
     PrecisionMode precision = PrecisionMode::Full;
     ThermalMode thermal = ThermalMode::Disabled;
+    BackendSelectionReason backend_selection_reason = BackendSelectionReason::None;
     FallbackReason backend_fallback_reason = FallbackReason::None;
     FallbackReason solver_fallback_reason = FallbackReason::None;
     FallbackReason thermal_fallback_reason = FallbackReason::None;
@@ -126,20 +135,28 @@ public:
         result.requested_precision = config.precision;
         result.requested_thermal = config.thermal;
         result.precision = config.precision;
+        result.backend_selection_reason = config.backend == BackendMode::Auto
+            ? (large_workload ? BackendSelectionReason::AutoGraphReplay
+                              : BackendSelectionReason::AutoDirectLowOverhead)
+            : BackendSelectionReason::ExplicitRequest;
 
         if (config.backend == BackendMode::Persistent) {
-            if (!capability.supports_persistent ||
+            if (batch_size != 1 || !capability.supports_persistent ||
                 !capability.supports_persistent_control_stream) {
                 result.backend = BackendMode::Fallback;
+                result.backend_selection_reason = BackendSelectionReason::CapabilityFallback;
                 result.backend_fallback_reason = FallbackReason::CapabilityUnavailable;
             } else if (config.deterministic && !capability.persistent_is_deterministic) {
                 result.backend = BackendMode::Fallback;
+                result.backend_selection_reason = BackendSelectionReason::CapabilityFallback;
                 result.backend_fallback_reason = FallbackReason::DeterminismRequired;
             } else {
                 result.backend = BackendMode::Persistent;
             }
         } else if (config.backend == BackendMode::Graph) {
             result.backend = BackendMode::Fallback;
+            if (!capability.supports_graph)
+                result.backend_selection_reason = BackendSelectionReason::CapabilityFallback;
             result.backend_fallback_reason = capability.supports_graph
                 ? FallbackReason::MetadataConflict
                 : FallbackReason::CapabilityUnavailable;
@@ -148,11 +165,11 @@ public:
         } else if (config.backend == BackendMode::Direct) {
             result.backend = BackendMode::Direct;
         } else {
-            // Auto remains conservative at the host-only planning layer. The
-            // CUDA engine may upgrade an explicit Graph request after device
-            // capabilities are known.
-            result.backend = BackendMode::Fallback;
-            if (large_workload) result.backend_fallback_reason = FallbackReason::MetadataConflict;
+            // Graph is useful only when enough steady-state work can amortize
+            // capture/replay overhead. Direct remains the low-overhead CUDA
+            // path when Graph is unavailable.
+            result.backend = large_workload && capability.supports_graph
+                ? BackendMode::Graph : BackendMode::Direct;
         }
 
         if (config.solver == SolverMode::Batched) {

@@ -8,6 +8,7 @@
 #include "coilgun/simulation/cuda/gpu_execution_config.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace coilgun::simulation::cuda {
@@ -45,6 +46,10 @@ struct DeviceMatrixView {
     double* data = nullptr;
     std::size_t batch_size = 0;
     std::size_t dimension = 0;
+    // Optional device-resident row mask. When supplied, active_count is the
+    // host-authoritative number of rows with a non-zero mask.
+    const std::uint8_t* active_mask = nullptr;
+    std::size_t active_count = 0;
 };
 
 struct DeviceVectorView {
@@ -101,9 +106,11 @@ public:
     SolverStatus solve_batch(const double* matrices,
                              const double* rhs,
                              double* solutions);
-    // Preserves the input matrix/RHS views. Non-capture calls write the
-    // solution directly into the caller's output view; graph capture keeps a
-    // stable solver-owned RHS scratch path.
+    // Enqueues a device solve without host synchronization. Preserves the
+    // input matrix/RHS views; non-capture calls write the solution directly
+    // into the caller's output view, while graph capture keeps a stable
+    // solver-owned RHS scratch path. Call validate_device_result() at the
+    // required host validation boundary.
     SolverStatus solve_device(const DeviceMatrixView& matrix,
                               const DeviceVectorView& rhs,
                               DeviceVectorView solution,

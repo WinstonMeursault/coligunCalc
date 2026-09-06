@@ -51,7 +51,6 @@ struct DeviceStepStatus {
 struct DeviceControlView {
     std::size_t batch_size = 0;
     std::size_t stage_count = 0;
-    std::size_t filament_count = 0;
     std::size_t dimension = 0;
     double quiet_current = 1.0e-6;
     const double* current_time = nullptr;
@@ -66,7 +65,6 @@ struct DeviceControlView {
     unsigned char* stage_mask = nullptr;
     unsigned char* mutual_stage_mask = nullptr;
     unsigned char* stage_completed = nullptr;
-    unsigned char* pair_active = nullptr;
     double* trigger_times = nullptr;
     double* trigger_positions = nullptr;
 };
@@ -74,10 +72,13 @@ struct DeviceControlView {
 cudaError_t launch_device_assembly(const DeviceAssemblyView& view,
                                    cudaStream_t stream = nullptr) noexcept;
 
-cudaError_t launch_separation_update(
+cudaError_t launch_mutual_input_update(
     std::size_t batch_size, std::size_t stage_count, std::size_t filament_count,
     const double* stage_positions, const double* filament_positions,
-    const double* armature_positions, double* separations,
+    const double* armature_positions,
+    const unsigned char* active_mask, const unsigned char* trigger_mask,
+    const unsigned char* mutual_stage_mask, unsigned char* pair_active,
+    double* separations,
     cudaStream_t stream = nullptr) noexcept;
 
 cudaError_t launch_compact_status(

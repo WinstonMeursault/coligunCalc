@@ -319,7 +319,7 @@ Always uses the full Bessel/Struve kernel with composite GL16 integration. Equiv
 | Function | Behaviour | Speed | Use case |
 |----------|-----------|-------|----------|
 | `self_inductance` | Table when in range, exact fallback | ~μs or ~ms | **Default** — simulation, components |
-| `self_inductance_exact` | Always exact | ~ms | Verification, benchmark data |
+| `self_inductance_exact` | Always exact | ~ms | Verification and reference data |
 
 The `DrivingCoil` and `Armature` classes use `self_inductance` internally.
 
@@ -645,7 +645,7 @@ The `coilgun::simulation` namespace provides a turn-key single-stage coilgun sim
 | `CrowbarExcitation` | Capacitor discharge **with** crowbar diode | `(initial_voltage, capacitance)` |
 | `WaveformExcitation` | Arbitrary voltage source `V(t)` | `(V_of_t function)` |
 
-All excitations provide `voltage()`, `advance(dt, I_coil)`, `finished()`, and `reset()`. They also expose polymorphic `ExcitationSnapshot` operations: `snapshot()`, `restore()`, snapshot-based voltage evaluation, continuous derivatives, snapshot advancement, and discrete-event application. A snapshot owns every mutable runtime field of its concrete excitation, so CPU RK4 trial states never mutate the live source. `CapacitorExcitation` additionally exposes `capacitance()`, `capacitor_voltage()`, and `initial_voltage()`. `CrowbarExcitation` reports crowbar state via `diode_on()`. `WaveformExcitation` supports optional early termination via `set_end_time(t)`.
+All excitations provide `voltage()`, `advance(dt, I_coil)`, `finished()`, and `reset()`. They also expose polymorphic `ExcitationSnapshot` operations: `snapshot()`, `restore()`, snapshot-based voltage evaluation, `continuous_derivative()`, `advance_snapshot()`, `advance_snapshot_derivative()`, and `apply_event()`. A snapshot owns every mutable runtime field of its concrete excitation, so CPU RK4 trial states never mutate the live source. `CapacitorExcitation` additionally exposes `capacitance()`, `capacitor_voltage()`, and `initial_voltage()`. `CrowbarExcitation` reports crowbar state via `diode_on()`. `WaveformExcitation::set_end_time(t)` sets a non-negative completion boundary or positive infinity; NaN, negative values, and negative infinity throw `std::invalid_argument`. `time()` returns the current waveform clock and `end_time()` returns that configured boundary. `reset()` restores `time()` to zero without changing the configured end time.
 
 ```cpp
 auto cap  = std::make_unique<CapacitorExcitation>(450.0, 0.001);  // 450 V, 1000 μF
@@ -1213,6 +1213,13 @@ restore the previous collector. The orchestration total includes the measured
 phase scopes and additional derivative work, so phase totals are not expected
 to equal it exactly. The simulation instance itself remains single-threaded.
 
+`CpuPhaseTiming::reset()` clears the derivative count and all five phase totals;
+`nanoseconds(phase)` and `milliseconds(phase)` return the selected cumulative
+total. `CpuPhaseTimingScope(phase)` is the public RAII primitive used by library
+code to add elapsed time to the active thread-local collector. Both collector
+and scope are non-copyable. When timing is disabled, their constructors and
+destructors are constexpr no-ops and `CpuPhaseTiming` remains queryable.
+
 ### CMake Integration
 
 ```cmake
@@ -1274,7 +1281,7 @@ struct GpuBackend {
     int     threads_per_block = 512;   ///< Threads per block for the 4D integration kernel.
     size_t  max_batch_sims    = 256;   ///< Pre-allocation cap for batch simulation buffers.
     bool    enable_profiling  = false; ///< Retain profiling-request metadata; host-wall timing fields are always collected. No NVTX guarantee.
-    bool    use_persistent    = true;  ///< Legacy persistent request for multi-stage and batch wrappers.
+    bool    use_persistent    = true;  ///< Compatibility request for multi-stage and batch wrappers.
     BackendMode backend        = BackendMode::Graph; ///< Backend when persistence is not requested.
 };
 
@@ -1287,12 +1294,12 @@ struct GpuBackend {
 | `threads_per_block` | Requested number of threads per block for the 4D GL integration kernel. Must be a positive power of two no greater than 512; 1, 128, 256 and 512 are valid. | `512` |
 | `max_batch_sims` | Maximum number of simulations in a `SimBatch`. `SimBatch` rejects a larger `num_sims` with `std::invalid_argument`; the field itself does not allocate buffers. | `256` |
 | `enable_profiling` | When true, retains the request in `ExecutionReport::profiling_enabled`. Host-wall timing categories are collected independently of this flag. This build does not promise NVTX annotations or require an NVTX dependency. | `false` |
-| `use_persistent` | Legacy compatibility request. It is consulted only when `backend == Auto`; then `true` maps to `Persistent` and `false` maps to `Direct`. An explicit `backend` value takes precedence. The omitted `GpuMultiStageSim` argument uses a separate default of `Direct`. | `true` |
+| `use_persistent` | Compatibility request. It is consulted only when `backend == Auto`; then `true` maps to `Persistent` and `false` maps to `Direct`. An explicit `backend` value takes precedence. The omitted `GpuMultiStageSim` argument uses a separate default of `Direct`. | `true` |
 | `backend` | Backend request. It takes precedence over `use_persistent` whenever it is not `Auto`. `GpuBackend{}` therefore requests `Graph`; `GpuSingleStageSim` defaults to `Graph`, while `GpuMultiStageSim` supplies `multi_stage_default_backend()` and defaults to `Direct`. | `Graph` |
 
 Fault-injection controls are not part of `GpuExecutionConfig`. Focused tests use the separate internal `detail::GpuEngineFaultInjection` constructor seam; ordinary execution configuration contains only runtime policy and validated launch settings.
 
-**Migration status**: `GpuEngine` is the current execution core. `GpuSingleStageSim`, `GpuMultiStageSim`, and `SimBatch` use the engine contract for backend selection, rollback, reporting, resident device buffers, and complete fixed-shape Graph capture. The physical captured body includes the pre-step current snapshot, separation/mutual evaluation, matrix/RHS assembly, batched device solve, current/motion update, optional GPU thermal update, and compact status reduction. Only `SimBatch` currently supplies the optional device trigger/lifecycle control buffers; the single- and multi-stage wrappers own their lifecycle decisions on the host. Polymorphic excitation objects still advance at the synchronous wrapper boundary.
+**Current execution architecture**: `GpuEngine` is the execution core. `GpuSingleStageSim`, `GpuMultiStageSim`, and `SimBatch` use the engine contract for backend selection, rollback, reporting, resident device buffers, and complete fixed-shape Graph capture. The physical captured body includes the pre-step current snapshot, separation/mutual evaluation, matrix/RHS assembly, batched device solve, current/motion update, optional GPU thermal update, and compact status reduction. Only `SimBatch` supplies the optional device trigger/lifecycle control buffers; the single- and multi-stage wrappers own their lifecycle decisions on the host. Polymorphic excitation objects advance at the synchronous wrapper boundary.
 
 **Example**:
 
@@ -1379,6 +1386,7 @@ struct GpuExecutionPolicy {
     SolverMode solver = SolverMode::Eigen;
     PrecisionMode precision = PrecisionMode::Full;
     ThermalMode thermal = ThermalMode::Disabled;
+    BackendSelectionReason backend_selection_reason = BackendSelectionReason::None;
     FallbackReason backend_fallback_reason = FallbackReason::None;
     FallbackReason solver_fallback_reason = FallbackReason::None;
     FallbackReason thermal_fallback_reason = FallbackReason::None;
@@ -1399,9 +1407,9 @@ Constraints and static rules:
 
 - `GpuExecutionPlanner::plan` is pure host code. It uses dimensions, explicit requests, deterministic mode, and the supplied capability snapshot; it does not inspect CUDA or timings.
 - An explicit `Fallback` is CPU-only and must not create a CUDA context. The host planner preserves an independently requested solver/thermal choice for policy inspection, while `GpuEngine` normalizes the runtime selection to `Fallback + Eigen` and CPU thermal as needed.
-- An explicit `Graph` with `supports_graph == false` resolves to `Fallback` with `CapabilityUnavailable`; the runtime then follows the resolved backend and does not create a context. With graph capability, the current engine captures/replays the complete supported fixed-shape resident device step. A topology/policy change selects a new variant; voltage-only changes reuse the existing topology variant.
+- An explicit `Graph` with `supports_graph == false` resolves to `Fallback` with `CapabilityUnavailable`; the runtime then follows the resolved backend and does not create a context. With graph capability, the current engine captures/replays the complete supported fixed-shape resident device step. A topology/policy change selects a new variant; runtime mask or voltage changes reuse the existing topology variant.
 - An explicit `Persistent` resolves to `CapabilityUnavailable` unless both persistent execution and its dedicated control stream are supported. The current synchronous engine defaults the control-stream capability to false. After those capability checks, a deterministic request rejects a capability marked nondeterministic with `DeterminismRequired`.
-- `Direct` is the direct CUDA mutual pipeline when CUDA is compiled, the selected device is usable, and initialization succeeds. The host-only planner leaves `Auto` conservative at `Fallback`; `GpuEngine` may upgrade `Auto` to `Direct` after runtime device detection. Callers requiring a particular CUDA backend should request `Direct` or `Graph` explicitly.
+- `Auto` selects low-overhead `Direct` for small workloads, `Graph` for large replay-worthy workloads when Graph capability is available, and `Direct` for large workloads when Graph capability is unavailable. `BackendSelectionReason` records this policy choice. Runtime device/context failures can still resolve any CUDA choice to an honest CPU fallback. Callers requiring a particular CUDA backend should request `Direct` or `Graph` explicitly.
 - `SolverMode::Batched` requires `supports_batched_solver`; otherwise the solver resolves to Eigen with `CapabilityUnavailable`. `SolverMode::Auto` selects Batched only for the planner's large-workload rule, otherwise Eigen.
 - `ThermalMode::Gpu` requires `supports_gpu_thermal`; otherwise it resolves to CPU thermal with `CapabilityUnavailable`. `Auto` selects GPU thermal only for a large workload with capability support.
 - The current large-workload rule is `batch_size >= 8 || n_stages + n_filaments >= 128`. It is a static rule, not a performance guarantee.
@@ -1424,6 +1432,7 @@ Enum semantics:
 | `PrecisionMode` | `Standard` is FP64 without the distance cutoff, `Full` is FP64 with the production cutoff, and `Aggressive` uses an FP32 integrand with FP64 reduction. |
 | `ThermalMode` | `Auto` applies the workload/capability rule; `Disabled` omits thermal updates; `Cpu` and `Gpu` select the corresponding thermal path when supported. |
 | `FallbackReason` | `None` means no fallback; `CapabilityUnavailable` is an unsupported static/runtime capability; `DeterminismRequired` denotes a rejected nondeterministic choice; `RuntimeFailure` is context/allocation/capture/step failure; `MetadataConflict` records a conservative or currently unimplemented request resolution. |
+| `BackendSelectionReason` | `None` is unavailable metadata; `ExplicitRequest` is a non-Auto request; `AutoDirectLowOverhead` and `AutoGraphReplay` describe Auto choices; `CapabilityFallback` describes a requested mode rejected by capability or determinism policy. |
 
 Configuration and policy fields:
 
@@ -1438,6 +1447,7 @@ Configuration and policy fields:
 | `GpuCapability` | `persistent_is_deterministic` | Whether Persistent can satisfy `deterministic=true`; otherwise planning reports `DeterminismRequired` after capability checks. |
 | `GpuExecutionPolicy` | `requested_*` | Original requested modes retained for audit. |
 | `GpuExecutionPolicy` | `backend`, `solver`, `precision`, `thermal` | Resolved modes that drive resource creation and execution. |
+| `GpuExecutionPolicy` | `backend_selection_reason` | Reason for the resolved backend selection; this is policy metadata and does not prove CUDA execution. |
 | `GpuExecutionPolicy` | `*_fallback_reason` | Per-dimension static resolution reasons. |
 
 ### Low-Level GPU Engine and Layout
@@ -1455,16 +1465,24 @@ temperatures, masks, RHS, and system matrices. Out-of-range indices throw
 `std::invalid_argument` or `std::overflow_error`.
 
 Its public size/accessor set is `batch_size()`, `stage_count()`,
-`filament_count()`, `current_dimension()`, `currents[_offset]()`,
-`m1[_offset]()`, `dm1[_offset]()`, `temperatures[_offset]()`,
-`system_matrix()`, `rhs()`, `active_mask[_offset]()`, `trigger_mask[_offset]()`,
-and the corresponding `*_size()` methods. The physical index formulas are
+`filament_count()`, `current_dimension()`, `currents()`, `currents_offset()`,
+`m1()`, `m1_offset()`, `dm1()`, `dm1_offset()`, `temperatures()`,
+`temperatures_offset()`, `system_matrix()`, `rhs()`, `active_mask()`,
+`active_mask_offset()`, `trigger_mask()`, `trigger_mask_offset()`,
+`currents_size()`, `state_size()`, `temperatures_size()`, `active_mask_size()`,
+`trigger_mask_size()`, `system_matrix_size()`, and `rhs_size()`. The physical index formulas are
 `[B][D]`, `[B][S][F]`, `[B][F]`, `[B][D][D]`, and `[B][S]`; masks never compact
 these rows.
 
 `GpuEngine` accepts `GpuGeometryInput`, `GpuEngineState`, `GpuExecutionConfig`,
 an optional `GpuCapability`, and an optional test-only
 `detail::GpuEngineFaultInjection`. Its public boundary is:
+
+`PipelineStage` enumerates the committed pipeline order as `Mutual`, `Matrix`,
+`Solver`, `Force`, `Thermal`, and `State`. In CUDA builds,
+`cuda_device_available()` performs a non-throwing availability probe, while
+`make_gpu_execution_context()` constructs the default RAII context and may
+surface CUDA initialization failure through an exception.
 
 | API | Contract |
 |---|---|
@@ -1476,17 +1494,282 @@ an optional `GpuCapability`, and an optional test-only
 | `set_control_boundary_state()` | Supply optional device trigger/lifecycle buffers. This is used by `SimBatch`; the single- and multi-stage wrappers keep lifecycle decisions on the host. |
 | `set_stage_voltage()` | Set one voltage for a single-batch engine; invalid stage, non-finite voltage, or batch size other than one throws `std::invalid_argument`. |
 | `complete_stage()` | Commit a stage completion at a selected batch/stage boundary. |
+| `pending_stage_completion_count()` | Return the number of device-side stage-current clears queued for the next step. |
 | `layout()` / `state()` / `result()` / `report()` / `policy()` | Return read-only views of layout, physical buffers, run result, execution diagnostics, and resolved policy. |
 | `pipeline_order()` / `graph_variant()` | Return the selected physical pipeline stages and current fixed-shape variant. |
 | `shutdown()` / `is_shutdown()` | Release/inspect owned resources; shutdown is idempotent and later work throws `std::logic_error`. |
 | `calibration_count()` | Return the number of construction-time solver calibrations performed; `reset()` does not increment it. |
 | `assemble_reference_for_test()` / `assemble_device_for_test()` | Return host/device assembly snapshots for focused contract tests; the device form exists only in CUDA builds. |
 | `context_available()` / `solver_workspace_initialized()` | Report runtime resource availability. They do not prove that a subsequent step will succeed. |
+| `device_buffer_addresses()` / `device_allocation_count()` | CUDA-build diagnostics returning owned allocation addresses and the cumulative allocation count; addresses are borrowed and become invalid on shutdown. |
 
-`ExecutionReport` also provides `to_string()` overloads for backend, solver,
-precision, and thermal enums, stream insertion operators, and `merge()` for
-combining cumulative diagnostics. `gpu_executed` is cumulative and retained
-across `reset()`.
+`ExecutionReport` also provides `to_string()` overloads and stream insertion
+operators for backend, solver, precision, thermal, and
+`BackendSelectionReason`, plus `merge()` for cumulative diagnostics. Its
+`backend_selection_reason` mirrors the resolved planner policy and does not
+prove CUDA execution; `gpu_executed` is cumulative and retained across
+`reset()`.
+
+#### Engine value types and complete boundary
+
+```cpp
+struct GpuGeometryInput {
+    std::size_t n_stages, n_filaments;
+    std::vector<double> stage_geometry, filament_geometry;
+    bool thermal_enabled = false;
+    // Required geometry arrays:
+    std::vector<double> stage_inner_radii, stage_outer_radii, stage_lengths,
+                        stage_positions;
+    std::vector<int> stage_turns;
+    std::vector<double> filament_inner_radii, filament_outer_radii,
+                        filament_lengths, filament_positions;
+    // Optional precomputed electrical/mutual arrays:
+    std::vector<double> stage_resistances, stage_inductances,
+                        filament_resistances, filament_inductances,
+                        stage_mutual_inductances, filament_mutual_inductances;
+    void validate() const;
+};
+
+struct GpuEngineState {
+    std::vector<double> currents, m1, dm1, temperatures, velocity, position;
+    std::vector<std::uint8_t> active_mask, trigger_mask, stage_mask,
+                              mutual_stage_mask;
+    std::vector<double> filament_masses, reference_resistances,
+                        resistivities, resistances, joule_energy,
+                        current_derivatives, stage_voltages,
+                        trigger_values, trigger_times, trigger_positions,
+                        position_offsets;
+    std::vector<int> filament_materials;
+    std::vector<std::uint8_t> trigger_modes, excitation_finished,
+                              stage_completed;
+    double dt = 0.0, mass = 0.0, reference_temperature = 293.0,
+           material_density = 0.0;
+};
+
+struct GpuEngineResult {
+    std::size_t completed_steps = 0;
+    bool finished = false;
+};
+struct GpuAssemblySnapshot {
+    std::vector<double> matrix, rhs;
+};
+struct GpuRunBoundary {
+    std::size_t max_steps = std::numeric_limits<std::size_t>::max();
+    bool stop_when_inactive = true;
+};
+struct GpuGraphVariant {
+    std::vector<std::uint8_t> stage_mask, mutual_stage_mask;
+    std::size_t batch_size = 0, batch_capacity = 0, layout_dimension = 0;
+    PrecisionMode precision = PrecisionMode::Full;
+    ThermalMode thermal = ThermalMode::Disabled;
+    SolverMode solver = SolverMode::Eigen;
+};
+```
+
+`GpuGeometryInput::validate()` requires positive stage/filament dimensions,
+finite geometry, `outer > inner`, at least two stage turns, and exact lengths
+for required arrays. Optional precomputed arrays must have their documented
+stage, filament, or square-matrix sizes. The engine constructor also requires
+positive finite `dt` and total mass; thermal mode additionally requires
+per-batch filament mass, reference resistance, and material arrays.
+
+`GpuEngineState` uses batch-major row-major storage: currents are `[B][S+F]`,
+`m1`/`dm1` are `[B][S][F]`, and thermal arrays are `[B][F]`. Masks select work
+but never compact rows. Empty stage/mutual masks are normalized to all ones;
+empty voltage and optional thermal arrays are allowed only where the engine
+contract permits them. `GpuEngineResult` counts committed steps. The matrix
+and RHS returned by `assemble_reference_for_test()` are snapshots and do not
+borrow engine storage.
+`GpuGraphVariant` is a value snapshot of the selected masks, batch shape,
+layout dimension, precision, thermal mode, and solver; equality compares all
+of those fields.
+
+The constructor moves geometry and initial state into the engine. `step()`
+commits exactly one physical step; `run(std::size_t)` and
+`run(const GpuRunBoundary&)` commit until the limit or until all active rows
+are inactive. `run(const GpuRunBoundary&)` with the default unbounded boundary
+is rejected by the non-CUDA/stub implementation while active rows remain.
+`shutdown()` is
+idempotent and `is_shutdown()` reports whether further operations are allowed;
+calling an operation after shutdown throws `std::logic_error`.
+
+`set_step_boundary_state()` replaces active/trigger/stage/mutual masks and
+stage voltages atomically. `set_control_boundary_state()` replaces optional
+device-side trigger lifecycle arrays and is intended for `SimBatch`.
+`set_stage_mask()`, `set_mutual_stage_mask()`, and
+`select_graph_variant_at_boundary()` must be called between steps. `complete_stage()`
+validates the batch/stage pair and commits the stage lifecycle transition.
+`pipeline_order()` and `graph_variant()` are read-only execution diagnostics.
+
+#### Advanced CUDA support interfaces
+
+The following interfaces are public headers for engine integration and tests,
+but are CUDA-only, require the caller to respect device-pointer lifetimes, and
+are not the recommended application API. They are documented here so the
+public header surface is explicit.
+
+Public declarations covered by this subsection are:
+
+```cpp
+// gpu_execution_context.hpp
+GpuExecutionContextConfig; GpuExecutionContext;
+// gpu_graph.hpp
+GpuGraphTopologyKey; GpuGraphVariantKey; GpuGraphTopologyKeyHash;
+GpuGraphVariantKeyHash; GpuGraphRuntimeMasks; GpuGraphBoundaryState;
+GraphCapturePhase; GraphCaptureFailure; GraphWorkspace; GraphCaptureStatus;
+GpuGraphCache;
+// gpu_solver.hpp
+SolverBatchLayout; SolverFailure; SolverWorkspace; DeviceMatrixView;
+DeviceVectorView; DeviceResidualView; SolverStatus; GpuSolver;
+// gpu_thermal.hpp
+ThermalPrecision; ThermalMaterial; MaterialTables; ThermalWorkspaceKey;
+ThermalWorkspace; generate_material_tables(); interpolate_material_cp();
+interpolate_material_resistivity(); update_thermal_batch();
+update_thermal_batch_cpu();
+// gpu_mutual_pipeline.hpp / gpu_state_kernels.hpp
+MutualPipelineView; launch_mutual_pipeline(); initialize_mutual_pipeline_constants();
+mutual_pipeline_index(); StateKernelConfig; DeviceAssemblyView; DeviceStepStatus;
+DeviceControlView; launch_device_assembly(); launch_mutual_input_update();
+launch_compact_status(); launch_device_control(); launch_force_reduction();
+launch_acceleration(); launch_state_update(); launch_state_update_masked();
+// gpu_state_layout.hpp
+GpuStateLayout;
+// gpu_adaptor.hpp / persistent_kernel.cuh
+CoilGeo; FilGeo; GpuAdaptor; PersistentStatus; PersistentBuffers;
+init_persistent_buffers(); free_persistent_buffers(); launch_persistent_kernel();
+```
+
+The names above are the complete public declaration inventory for the
+advanced headers; private implementation helpers and `detail` internals are
+excluded unless explicitly marked test-only elsewhere in this reference.
+
+**CUDA execution context.** `GpuExecutionContextConfig` contains `device_id`,
+non-blocking `stream_flags`, optional `workspace_bytes`, and profiling request
+metadata. `GpuExecutionContext` is move-only RAII ownership of one CUDA stream,
+start/stop events, cuBLAS/cuSOLVER handles, and workspace. Handle and pointer
+accessors return borrowed resources. `reserve_workspace()` may replace the
+workspace; `synchronize()`, event recording, and quadrature initialization
+surface CUDA failures through their normal exceptions. `valid()` is false after
+a moved-from context. The borrowed-handle accessors are `device_id()`,
+`stream()`, `start_event()`, `stop_event()`, `cublas()`, and `cusolver()`;
+workspace accessors are `workspace()` and `workspace_bytes()`.
+`record_start()` and `record_stop()` enqueue the owned timing events;
+`synchronize()` waits for the owned stream. `ensure_quadrature9_loaded()`
+uploads the fixed rule once per context, and `quadrature9_loaded()` reports
+that state.
+
+**Graph cache.** `GpuGraphTopologyKey` identifies immutable stage signature,
+batch capacity, layout dimension, precision, thermal mode, and solver mode.
+Runtime masks in `GpuGraphRuntimeMasks` do not select a variant, so
+`GpuGraphBoundaryState::requires_rebuild_from()` is true only for topology
+changes. `GraphCaptureStatus` reports success or a
+`GraphCaptureFailure` (phase, CUDA error, message, key, and fallback lock) plus
+an optional `GraphWorkspace`. `GraphCaptureStatus::success(pointer, bytes)`
+creates a successful status with workspace metadata, while
+`GraphCaptureStatus::failed(phase, cuda_error, message)` records a failed
+capture. `current_workspace()` returns the current workspace, or an empty value
+when no variant is selected.
+
+`GpuGraphCache` is non-copyable and non-movable. `select_or_capture()` selects
+an existing variant or invokes a capture callback; `replay()` invokes the
+current replay callback. CUDA builds additionally provide stream-based
+`capture_and_select()` and `replay(cudaStream_t)`. Capture/replay failure locks
+the cache to fallback. `current_key()` is valid only when `has_current()` is
+true. `has_current()`, `fallback_locked()`, `variant_count()`, `capture_count()`,
+and `replay_count()` are read-only diagnostics; all three counts are cumulative.
+
+`GpuGraphTopologyKeyHash` and `GpuGraphVariantKeyHash` are the corresponding
+unordered-container hash functors. `GpuGraphVariantKey` is an alias of
+`GpuGraphTopologyKey`; these are value/lookup types rather than ownership APIs.
+
+`GraphCapturePhase` identifies `None`, begin/body/end capture, instantiation,
+or replay. `GraphCaptureFailure` carries that phase, CUDA error, message,
+variant key, and fallback-lock flag. `GraphWorkspace` is non-owning pointer/size
+metadata. `GraphCaptureStatus::ok` selects success versus `failure`; its
+equality operator compares success and workspace identity, not error text.
+
+**Batched solver.** `SolverBatchLayout` describes row-major batched dense
+systems. `GpuSolver` is move-only and owns its workspace; it supports host
+`solve()`/`solve_batch()`/`check_residual()` and CUDA
+`solve_device()`/`validate_device_result()`.
+`requested_mode()`, `resolved_mode()`, `layout()`, and `workspace()` return
+read-only solver configuration/state. `initialize_workspace()` allocates or
+reuses capacity for the configured or supplied layout and reports failure in
+`SolverStatus` rather than throwing for solver/backend failures.
+`DeviceMatrixView`, `DeviceVectorView`, and `DeviceResidualView` are borrowed
+device views. `DeviceMatrixView::active_mask` is an optional device-resident
+row mask; when present, `active_count` is the host-authoritative count of
+non-zero rows. Non-Graph batched solves compact those rows and scatter results
+back to the original batch IDs, while Graph capture intentionally retains a
+fixed-shape full-batch solve. Inactive rows are excluded from residual
+calculation and validation. Inputs must match the configured layout and
+be produced on the solver context's execution stream, or be externally
+synchronized before `solve_device()` is called; the borrowed views do not
+create inter-stream dependencies. `solve_device()` only enqueues work, so
+input and output storage must remain valid until `validate_device_result()` or
+an explicit synchronization on the context stream completes.
+`SolverStatus::success(residual)` and `SolverStatus::failure_status(failure,
+message)` are the value-type factories used to build solver results.
+
+`SolverFailure` distinguishes uninitialized state, layout mismatch, invalid or
+non-finite input/output, factorization failure, excessive residual, and an
+unsupported mode. `SolverWorkspace` exposes initialization, allocation count,
+and capacity. `SolverStatus` returns `ok`, the failure category/message,
+maximum residual, failed batch index, and backend status code.
+
+**Thermal tables.** `generate_material_tables()` creates sampled aluminum and
+copper heat-capacity/resistivity tables. `interpolate_material_cp()` and
+`interpolate_material_resistivity()` evaluate a selected `ThermalPrecision`.
+`ThermalWorkspace` is non-copyable and non-movable RAII state keyed by table
+and value count;
+`initialize()`, `update()`, `initialize_device_state()`, `launch_device()`, and
+`download_device_state()` operate on caller-owned buffers. `device_resistances()`
+returns a borrowed device pointer. `allocation_count()` reports successful
+workspace allocations, `key()` returns the active workspace identity, and
+`device_addresses()` returns borrowed allocation addresses for diagnostics.
+`update_thermal_batch()` is the CUDA convenience wrapper and
+`update_thermal_batch_cpu()` is the CPU reference path. Both batch helpers
+require non-null buffers, positive dimensions and `dt`, valid material IDs,
+and finite state; invalid arguments throw `std::invalid_argument`.
+`ThermalPrecision` selects `Standard`, `Full`, or `Aggressive` evaluation and
+`ThermalMaterial` selects aluminum or copper. `MaterialTables` owns its sampled
+temperature, heat-capacity, and resistivity vectors plus range/version
+metadata. `ThermalWorkspaceKey` is the value identity for device, table range
+and version, table length, and value count.
+
+**Mutual and state kernels.** `MutualPipelineView` describes row-major
+`[batch][stage][filament]` geometry, separations, masks, mutual output, and
+gradient output. `launch_mutual_pipeline()`,
+`initialize_mutual_pipeline_constants()`, and `mutual_pipeline_index()` provide
+the pipeline contract. `StateKernelConfig` controls deterministic reduction
+and block width. `DeviceAssemblyView` and `DeviceControlView` are borrowed
+views for assembly, control, force, acceleration, separation, compact-status,
+and explicit Euler update kernels. `launch_device_assembly()`,
+`launch_mutual_input_update()`, `launch_compact_status()`,
+`launch_device_control()`, `launch_force_reduction()`,
+`launch_acceleration()`, `launch_state_update()`, and
+`launch_state_update_masked()` return `cudaError_t` and never take pointer
+ownership. `launch_state_update()` uses old velocity for position and current
+acceleration for velocity; the masked variant preserves inactive rows.
+`launch_mutual_pipeline()` validates non-null device-accessible buffers,
+positive bounded dimensions, `n_nodes == 9`, launch width, and the active
+device grid, then enqueues work on the supplied stream; invalid input throws
+`std::invalid_argument`. `initialize_mutual_pipeline_constants()` must run
+outside Graph capture and throws on capture-query or upload failure.
+`mutual_pipeline_index()` returns the unchecked row-major index
+`(simulation * stage_count + stage) * filament_count + filament`.
+`DeviceStepStatus` contains the compact active/finite/solver-ok flags produced
+per batch row. All view structs borrow their pointers for the duration of the
+enqueued work; callers must keep storage alive and establish any cross-stream
+ordering.
+
+`GpuAdaptor`, `CoilGeo`, and `FilGeo` are move-only compatibility
+interfaces. Their device pointers are valid only after the matching setup call
+and until destruction or reconfiguration. `PersistentBuffers`,
+`PersistentStatus`, `init_persistent_buffers()`, and
+`launch_persistent_kernel()` are internal persistent-protocol interfaces;
+`free_persistent_buffers()` requests shutdown and synchronizes before freeing
+mapped host memory. Applications should use `GpuEngine` instead.
 
 #### Engine value types and complete boundary
 
@@ -1730,11 +2013,13 @@ The constructor throws `std::invalid_argument` for a null excitation, non-finite
 |---|---|
 | `requested_backend`, `requested_solver`, `requested_precision`, `requested_thermal` | Original requests retained for audit. |
 | `backend`, `solver`, `precision`, `thermal` | Current resolved execution modes. |
+| `backend_selection_reason` | Machine-readable explanation for the resolved backend choice. It is copied from `GpuExecutionPolicy`, is retained on runtime fallback, and does not imply `gpu_executed=yes`. |
 | `gpu_executed` | Cumulative proof that at least one complete CUDA-backed physical step committed successfully; not a capability/request flag. |
 | `calibrated`, `precision_fallback`, `metadata_conflict` | One-time calibration completion and accumulated policy/report diagnostics. |
 | `graph_rebuild_count`, `fallback_count` | `graph_rebuild_count` counts only successful captures of a new CUDA Graph variant; host variant selection, Direct/Fallback construction, cache hits, and failed captures do not increment it. `fallback_count` counts fallback events. |
 | `gpu_time_ms` | Cumulative host wall time for successful CUDA-backed physical pipelines, including transfers, synchronization, and host orchestration; never device-only kernel time. |
 | `solver_time_ms`, `thermal_time_ms` | Cumulative host wall time for those sections on whichever CPU or CUDA-backed path ran. |
+| `gpu_thermal_snapshot_count` | Number of physical pipeline steps that captured the pre-step current buffer required by GPU thermal; thermal off and CPU thermal paths do not increment it. |
 | `transfer_time_ms` | Cumulative host wall time spent in synchronous host/device copies. |
 | `max_condition_estimate` | Maximum recorded solver condition estimate/calibration diagnostic. |
 | `fallback_reason` | Human-readable latest retained fallback message. |
@@ -1748,73 +2033,11 @@ different non-`None` reason enums.
 
 **Ownership and fallback**: The wrapper owns a `GpuEngine` through RAII. The `Excitation` remains the moved-in `std::unique_ptr`; the wrapper owns no raw device pointers. `GpuEngine` owns CUDA context, solver, graph, thermal, and device-buffer lifetimes and frees partially allocated resources during initialization failure. If CUDA runtime enumeration or device selection fails, CUDA is unavailable, context creation/allocation fails, or a runtime pipeline failure occurs, the engine restores the complete pre-step state when needed, initializes an Eigen solver, runs the whole step on CPU, and locks subsequent steps to CPU fallback. Enumeration/selection/context/allocation/pipeline errors retain a nonempty reason and `runtime_fallback_reason=RuntimeFailure`; no-device/insufficient-driver availability uses `CapabilityUnavailable`. A successful CUDA step and its CPU fallback are intended to preserve the same Euler physical pipeline; small CPU/GPU floating-point differences remain possible in mutual-inductance results and can affect long runs.
 
-**Integration contract**: `GpuSingleStageSim<EulerStepper>` is supported. `GpuSingleStageSim<RK4Stepper>` is intentionally unsupported in this migration: `step()` throws `std::logic_error` rather than silently executing Euler. True four-stage RK4 parity is deferred and is not claimed by this API.
+**Integration contract**: `GpuSingleStageSim<EulerStepper>` is supported.
+`GpuSingleStageSim<RK4Stepper>` can be constructed for source compatibility,
+but `step()` throws `std::logic_error` and never substitutes Euler.
 
 **Reset and diagnostics**: `reset()` clears simulation state, excitation state, completed-step count, and result history, then reselects the graph variant at the step boundary. `ExecutionReport` is an execution audit: fallback count, timings, graph rebuild count, calibration status, maximum condition estimate, fallback reasons, and `gpu_executed` are cumulative and are retained across reset. If calibration is enabled, construction performs one identity-batch solver calibration after workspace initialization; it does not advance physical state and is not repeated by `reset()`.
-
-**Migration from HEAD**:
-
-Old declaration and defaults at HEAD:
-
-```cpp
-struct GpuBackend {
-    int device_id = 0;
-    int threads_per_block = 512;
-    size_t max_batch_sims = 256;
-    bool enable_profiling = false; // NVTX range annotation claim
-    bool use_persistent = true;
-};
-```
-
-Current declaration and defaults:
-
-```cpp
-struct GpuBackend {
-    int device_id = 0;
-    int threads_per_block = 512;
-    size_t max_batch_sims = 256;
-    bool enable_profiling = false; // metadata and host timings; no NVTX promise
-    bool use_persistent = true;
-    BackendMode backend = BackendMode::Graph;
-};
-```
-
-| Contract | HEAD | Current E2 contract |
-|---|---|---|
-| `GpuBackend` declaration/defaults | `device_id=0`, `threads_per_block=512`, `max_batch_sims=256`, `enable_profiling=false`, `use_persistent=true`; no `backend` field | Shared `GpuBackend` preserves `use_persistent=true` and adds `backend=BackendMode::Graph`. The backend field is authoritative unless set to `Auto`; only then does `use_persistent` select Direct or Persistent. The omitted `GpuMultiStageSim` backend separately uses `multi_stage_default_backend()` and requests Direct. An explicit constructor mode overrides that mapping. |
-| Profiling/timing | `enable_profiling` claimed NVTX range annotations and `gpu_time_ms` was easy to read as device timing | `profiling_enabled` records metadata only. `gpu_time_ms` is host wall time for a successful CUDA-backed physical pipeline, including transfers and host orchestration; it is not device-only time. |
-| RK4 | The wrapper executed the selected `StepperPolicy`, including the legacy RK4 template instantiation | `GpuSingleStageSim<RK4Stepper>` remains constructible, but `step()` throws `std::logic_error`; it never silently executes Euler. |
-| Report access | No unified wrapper report accessor | `execution_report()` returns the cumulative `ExecutionReport` with requested/resolved modes, fallback reasons, timings, calibration metadata, and `gpu_executed`. |
-| Thermal resistance access | No wrapper accessor for updated filament resistance | `filament_resistances()` returns a value copy of the physical resistance vector, initialized/reset to armature references and updated after Joule heating; it exposes no raw device pointer. |
-| Validation | Legacy construction could defer or omit several boundary checks | Invalid public configuration, null excitation, invalid dimensions/geometry/state, non-finite voltage, invalid launch settings, and negative/out-of-range configured device IDs throw `std::invalid_argument`. Genuine CUDA enumeration/device-selection failures, no-device/insufficient-driver detection, and context/allocation/pipeline failures instead use an honest locked CPU fallback; runtime failures set `runtime_fallback_reason=RuntimeFailure`, while unavailable runtime capability uses `CapabilityUnavailable`. |
-| Ownership | Legacy wrapper owned adaptor/persistent resources directly | The wrapper owns `GpuEngine` by `std::unique_ptr`; `Excitation` remains moved-in; no raw device pointers cross the public wrapper. Engine resources use RAII, including partial allocation cleanup. |
-| Fallback | Persistent and device failures could be inferred from the request or legacy path | Inspect resolved `backend`, `solver`, `gpu_executed`, `static_fallback_reason`, `runtime_fallback_reason`, and `fallback_reason`. Explicit Fallback and unsupported Graph are CPU-only and do not create a CUDA context. Runtime availability can still force fallback after a capability snapshot; an invalid configured device is rejected before allocation. |
-| CPU/GPU parity | Legacy GPU behavior did not expose the migrated engine contract | The successful resident GPU path and CPU fallback share the Euler physical contract and are compared by focused tests, but CUDA/CPU floating-point differences can remain. Graph captures the complete supported fixed-shape device step. Tests require `gpu_executed` and the expected resolved backend whenever CUDA is available; fallback is tested separately. |
-
-Migration examples:
-
-```cpp
-// HEAD: persistent was the implicit default.
-GpuBackend old_style{};
-
-// E1: Graph is the explicit default; inspect the report after construction/step.
-GpuBackend graph;
-graph.backend = BackendMode::Graph;
-graph.use_persistent = false;
-GpuSingleStageSim<EulerStepper> sim(coil, arm, std::move(excitation), 1e-6,
-                                   false, GpuOptLevel::Full, graph);
-sim.step();
-const auto& report = sim.execution_report();
-if (report.gpu_executed) {
-    // report.gpu_time_ms is host wall time for the committed CUDA pipeline.
-}
-
-// Explicit CPU-only migration.
-GpuBackend cpu;
-cpu.backend = BackendMode::Fallback;
-GpuSingleStageSim<EulerStepper> cpu_sim(coil, arm, std::move(cpu_excitation), 1e-6,
-                                        false, GpuOptLevel::Full, cpu);
-```
 
 **Complete example**:
 
@@ -1932,45 +2155,6 @@ public:
 
 **Internals**: `GpuEngine` keeps fixed geometry, current/state buffers, matrix/RHS, solver workspace, optional thermal state, and physical masks resident. `SimBatch` may additionally provide device trigger/lifecycle buffers; `GpuSingleStageSim` and `GpuMultiStageSim` keep those decisions in their host wrapper state. Graph capture covers the supported fixed-shape device sequence through compact status. Wrapper-owned polymorphic excitations advance at the synchronous observation boundary and upload the next voltage/completion boundary state when the wrapper uses device control. The ODE dimension is `n_stages + N_filaments`; inactive stages use mask/identity semantics. `execution_report().backend` and `gpu_executed` must be inspected to distinguish real CUDA execution from CPU fallback.
 
-**E2 migration contract**:
-
-| Concern | Legacy/current behavior | E2 behavior |
-|---|---|---|
-| `use_persistent` | `GpuBackend` default remains `true` for source compatibility; older multi-stage callers used `false` for the per-pair direct/fallback path. | The flag is consulted only when `backend=Auto`: false requests Direct and true requests Persistent. An explicit backend field or `explicit_backend` value wins. The omitted `GpuMultiStageSim` argument uses `multi_stage_default_backend()` and requests Direct. |
-| Graph | A Graph request could previously mean mutual-only capture. | Graph now captures the complete supported fixed-shape resident physical step. `graph_assisted()` and `execution_report()` identify actual successful replay. A resolved `Fallback` with `gpu_executed=false` is not GPU execution. |
-| RK4 | CPU `MultiStageSim<RK4Stepper>` performs true four-stage RK4. | `GpuMultiStageSim<RK4Stepper>` remains constructible for source compatibility, but `step()` throws `std::logic_error`. No pseudo-RK4 or silent Euler substitution is performed. Migrate RK4 callers to CPU `MultiStageSim<RK4Stepper>` until a staged engine API exists. |
-| Lifetime | Legacy adaptor/persistent resources were wrapper-specific. | `GpuEngine` owns CUDA context, graph/cache, solver, thermal buffers, and state via RAII. `execution_report()` remains a wrapper-owned reference; `filament_resistances()` returns an independent value copy. Reset preserves cumulative report diagnostics while restoring simulation state. |
-| Exceptions | Some invalid inputs were deferred to lower layers. | Constructor throws `std::invalid_argument` for inconsistent stage/excitation/trigger counts, empty or oversized stage sets, non-positive/non-finite `dt`, null/non-finite excitations, invalid backend mode or launch settings, and invalid geometry/state dimensions. Runtime CUDA unavailability/failure is reported as locked CPU fallback rather than confused with validation. |
-| Parity | GPU-vs-CPU tests could pass while both paths were CPU fallback. | On a CUDA-capable runtime, the primary non-degenerate comparison requires `gpu_executed=true` and the expected resolved backend, and compares currents, positions, velocities, force, stage outputs, and thermal/resistance state. A separate explicit fallback test asserts CPU-only execution. |
-
-**E2 migration example**:
-
-```cpp
-// Legacy multi-stage meaning: false selected the direct/per-pair path.
-GpuBackend legacy_direct;
-legacy_direct.use_persistent = false;
-GpuMultiStageSim<EulerStepper> direct(
-    coils, armature, std::move(excitations), triggers, 1e-6,
-    false, GpuOptLevel::Standard, legacy_direct); // requested Direct
-
-// Intentional Graph request: explicit mode is required to distinguish it
-// from the legacy false flag.
-GpuBackend graph_backend;
-graph_backend.use_persistent = false;
-GpuMultiStageSim<EulerStepper> graph(
-    coils, armature, std::move(graph_excitations), triggers, 1e-6,
-    false, GpuOptLevel::Standard, graph_backend, BackendMode::Graph);
-graph.step();
-const auto& report = graph.execution_report();
-if (report.gpu_executed && graph.graph_assisted()) {
-    // The complete supported fixed-shape resident device step was replayed.
-}
-
-// RK4 migration remains on the CPU.
-MultiStageSim<RK4Stepper> cpu_rk4(
-    coils, armature, std::move(rk4_excitations), triggers, 1e-6);
-```
-
 **Complete example**:
 
 ```cpp
@@ -2074,7 +2258,7 @@ public:
 
 `SimBatch` is a container for **parameter sweeps** — running multiple simulations that share identical coil and armature geometry but differ in excitation parameters (voltage, capacitance) and/or trigger positions.
 
-**Execution contract**: `SimBatch` is a `GpuEngine`-backed wrapper. One engine is constructed with `B = num_sims`; every physical buffer uses a fixed row-major layout, including `[B][S][F]` mutual and gradient arrays and `[B][S+F]` current rows. A stable host-side active index limits boundary traversal, pre-step snapshots, state synchronization, and history recording to rows that can advance. The physical device rows remain fixed and are frozen by active masks; they are never compacted or reindexed, so `result(sim_id)` remains stable. `active_row_count()` reports the active stable-row count at the last boundary. Device-side active-row compaction is deferred to the later engine integration task.
+**Execution contract**: `SimBatch` is a `GpuEngine`-backed wrapper. One engine is constructed with `B = num_sims`; every physical buffer uses a fixed row-major layout, including `[B][S][F]` mutual and gradient arrays and `[B][S+F]` current rows. A stable host-side active index limits boundary traversal, pre-step snapshots, state synchronization, and history recording to rows that can advance. The physical device rows remain fixed and are frozen by active masks; they are never compacted or reindexed, so `result(sim_id)` remains stable. `active_row_count()` reports the active stable-row count at the last boundary.
 
 All simulations share **exactly** the same coil geometry and filament discretisation (`m × n`). Per-simulation excitation sources, trigger configurations, and stage voltages are supplied through `set_excitations()`. Circuit masks select stage participation; mutual masks additionally select stage-armature mutual inductance and force. Distant active stages use the canonical cutoff `abs(armature_position - coil.position()) <= 10 * coil.length()` in every resolved backend, including `Fallback`; outside that range their mutual and recorded force terms are zero.
 
@@ -2088,7 +2272,7 @@ All simulations share **exactly** the same coil geometry and filament discretisa
 | `armature` | Shared armature geometry and filament discretisation (copied). |
 | `num_sims` | Number of simulations. Must be positive and ≤ `max_batch_sims` in `GpuBackend`. |
 | `dt` | Fixed time step (s), shared across all simulations. |
- | `backend` | GPU backend configuration. An explicit constructor `explicit_backend` value is authoritative first; otherwise an explicit `backend.backend` value is authoritative for `Graph`, `Direct`, `Fallback`, and `Persistent`; the legacy flag is consulted only when both are `Auto`. The resolved mode and fallback reason are available from `execution_report()`. |
+ | `backend` | GPU backend configuration. An explicit constructor `explicit_backend` value is authoritative first; otherwise an explicit `backend.backend` value is authoritative for `Graph`, `Direct`, `Fallback`, and `Persistent`; the compatibility flag is consulted only when both are `Auto`. The resolved mode and fallback reason are available from `execution_report()`. |
  | `explicit_backend` | Optional constructor-level backend override. `Auto` preserves the `GpuBackend` resolution; another value overrides both `backend.backend` and `use_persistent`. |
 
 **Methods**:
@@ -2105,7 +2289,7 @@ All simulations share **exactly** the same coil geometry and filament discretisa
 
 **Solver and fallback**: The wrapper requests `SolverMode::Auto`, allowing `GpuExecutionPlanner` to select `Batched` for a large batch or dimension. If the CUDA context or batched capability is unavailable, the engine reports `Eigen` and executes the CPU fallback. `SimBatch` does not claim cuSOLVER completion merely because `Batched` was requested; inspect `execution_report().solver`, `backend`, `gpu_executed`, and fallback fields.
 
-**Step and history semantics**: Before each engine step, `SimBatch` checks heterogeneous triggers, updates circuit/mutual masks, and captures pre-step currents and the mutual-gradient cache at the pre-position boundary only for active stable rows. The engine uses those values for the physical Euler update. After the step, each excitation advances, finished stages are masked, and recorded per-stage forces are recomputed from post-step currents with that pre-position gradient cache. This matches `GpuMultiStageSim` history semantics. The history stores a row for every executed step; physical device-row compaction is deferred, while stable IDs remain fixed.
+**Step and history semantics**: Before each engine step, `SimBatch` checks heterogeneous triggers, updates circuit/mutual masks, and captures pre-step currents and the mutual-gradient cache at the pre-position boundary only for active stable rows. The engine uses those values for the physical Euler update. After the step, each excitation advances, finished stages are masked, and recorded per-stage forces are recomputed from post-step currents with that pre-position gradient cache. This matches `GpuMultiStageSim` history semantics. The history stores a row for every executed step, while physical device rows and stable IDs remain fixed.
 
 **Backend model**: `Direct` launches the resident device stages directly when CUDA is available. `Graph` captures/replays the complete supported fixed-shape physical device step, including batched solve, state update, optional GPU thermal, and compact status. In `SimBatch`, enabled device control also handles trigger/completion masks. Completed batch rows remain in their original physical slots and are frozen by masks; no row compaction or reindexing occurs. `Persistent` is a request that may resolve to `Fallback` when the synchronous engine cannot provide the required resident control stream. Explicit `Fallback` is CPU-only and does not create a CUDA context.
 
@@ -2164,7 +2348,7 @@ int main() {
 
 ---
 
-### GpuAdaptor (Legacy/Internal Compatibility)
+### GpuAdaptor (Compatibility Interface)
 
 ```cpp
 #include <coilgun/simulation/cuda/gpu_adaptor.hpp>
@@ -2204,18 +2388,25 @@ public:
 
     int n_stages() const; int n_fil() const; int n_nodes() const; int batch_size() const;
     bool configured() const noexcept;
+    int device_id() const noexcept;
+    std::size_t single_pair_capacity() const noexcept;
+    std::size_t batch_pair_capacity() const noexcept;
 };
 
 }
 ```
 
-`GpuAdaptor` is a legacy, move-only device-memory helper retained for internal compatibility. The current `GpuSingleStageSim`, `GpuMultiStageSim`, and `SimBatch` execute through `GpuEngine`; only the engine's private legacy persistent-backend internals still use `GpuAdaptor`. Most users must not interact with it directly.
-
-The `setup()`/upload contract below documents the historical adaptor architecture only. It is not the current `GpuEngine` contract, and it does not promise that the current single-stage engine uploads invariant data once or exposes these device buffers.
+`GpuAdaptor` is a move-only device-memory helper retained as a public
+compatibility interface. `GpuSingleStageSim`, `GpuMultiStageSim`, and `SimBatch`
+execute through `GpuEngine`; most applications should not use the adaptor
+directly.
 
 **`CoilGeo` / `FilGeo`** are packed POD structs for device transfer. They mirror the geometry fields of `DrivingCoil` and `Armature` respectively, flattened for GPU kernel parameter space.
 
-**Legacy `setup()`** allocates and uploads invariant geometry (coils, filaments, GL nodes/weights) to device memory. In the historical adaptor architecture it was called once before per-step operations; this is not a current `GpuEngine` guarantee.
+**`setup()`** selects the active device, allocates buffers for one simulation,
+and uploads invariant geometry plus GL nodes/weights. Reconfiguration releases
+the previous allocations. `configured()` becomes true after successful setup;
+the dimension/device/capacity accessors describe the active allocation.
 
 **`setup_batch()`** extends `setup()` with per-simulation batch buffers for `SimBatch`. Allocates `num_sims`-wide separation and result arrays.
 
@@ -2225,7 +2416,7 @@ The `setup()`/upload contract below documents the historical adaptor architectur
 
 The device pointer accessors (`d_*()`) return pointers to allocated device memory — used by CUDA kernels directly. Note that `d_batch_*()` pointers are only valid after `setup_batch()` has been called.
 
-**Note**: `GpuAdaptor` is move-only (deleted copy). The destructor frees all device allocations via `cudaFree()`. This section is retained for legacy/internal compatibility and is not the authoritative single-stage API.
+**Note**: `GpuAdaptor` is move-only (deleted copy). The destructor frees all device allocations via `cudaFree()`. This compatibility interface is not the authoritative single-stage API.
 
 ---
 
@@ -2240,63 +2431,23 @@ The `.cuh` headers define `__host__ __device__` functions used by GPU kernels. T
 
 These are only compilable with `nvcc` (`#ifdef __CUDACC__` guarded). They provide GPU-compatible inline implementations of the elliptic integral and filament mutual inductance functions. The `coilgun_cuda.hpp` umbrella header does **not** include these — they are for internal use only.
 
+`elliptic.cuh` exposes the device-compatible FP64 overloads `elliptic_k()`,
+`elliptic_e()`, and `elliptic_modulus()`, plus the FP32 AGM functions
+`elliptic_k_f32()` and `elliptic_e_f32()`. The FP64 functions use the same
+parameter convention as the host API; the FP32 functions accept modulus `k`.
+
+`mutual_inductance.cuh` exposes `kMU0_device`, `kMU0_f32`,
+`FilamentMutualResult<T>`, `mutual_inductance_filament_pair_device()`,
+`mutual_inductance_filament_device()`,
+`mutual_inductance_gradient_filament_device()`,
+`mutual_inductance_filament_pair_f32()`, `mutual_inductance_filament_f32()`,
+and `mutual_inductance_gradient_filament_f32()`. Pair functions return M and
+dM/dz together; scalar functions return one component. Gradients are odd in
+separation and return zero when its magnitude is below the implementation
+threshold. All functions are inline, borrow no storage, and clamp the elliptic
+modulus away from its singular endpoints.
+
 ---
-
-### Legacy Architecture Reference
-
-The following diagram and transfer tables describe historical `GpuAdaptor`-based paths. They are retained for compatibility documentation only and are not the current `GpuEngine` execution flow. The authoritative current flow is documented above: resident `Direct` launches the device stages directly, `Graph` captures/replays the complete supported fixed-shape device step, and `Fallback` executes the complete physical step on CPU/Eigen.
-
-**Compute flow per time step**:
-
-```
-┌─────────────────────────────────────────────┐
-│ Host (CPU)                                   │
-│   check_triggers() → extinguish_quiet()       │
-│   fill mapped separations / doorbells         │
-│   wait for persistent kernel (or launch pairs)│
-│   read mapped results (or cudaMemcpy D→H)     │
-│   build_system_matrix [L - M_I]              │
-│   Eigen LDLT solve → new currents            │
-│   compute_force(F = Σ I_d × I_f × dM)        │
-│   update velocity / position                 │
-│   update capacitor voltage / temperature     │
-├─────────────────────────────────────────────┤
-│ Device (GPU)                                  │
-│   persistent_batch_kernel or                 │
-│   mutual_inductance_coil_pair_kernel          │
-│     per block: 512 threads × ~13 loops        │
-│     each loop: 1 elliptic integral pair       │
-│     shared memory tree reduction              │
-│     → 1 double M, 1 double dM per pair       │
-└─────────────────────────────────────────────┘
-```
-
-**Historical data uploaded once at construction** (via legacy `GpuAdaptor`):
-
-| Buffer | Size | Content |
-|--------|------|---------|
-| `d_coils_` | `n_stages × sizeof(CoilGeo)` | ri, re, length, position, turns per stage |
-| `d_fils_` | `N_fil × sizeof(FilGeo)` | ri, re, length per filament ring |
-| `d_nodes_` | `9 × sizeof(double)` | Gauss-Legendre quadrature nodes |
-| `d_weights_` | `9 × sizeof(double)` | GL quadrature weights |
-
-**Historical data transferred per step**:
-
-| Direction | Size | Content |
-|-----------|------|---------|
-| H→D | `n_active × N_fil × sizeof(double)` | Armature position → separation values |
-| D→H | `n_stages × N_fil × 2 × sizeof(double)` | M1 and dM1 matrices |
-
-### Performance Characteristics
-
-| Scale (S×F) | CPU (16-core) | GPU (RTX 5080) | GPU advantage |
-|---|---|---|---|
-| 1×10 | 19 s | 16 s | 1.2× |
-| 2×10 | 58 s | 52 s | 1.1× |
-| 25×45 (typical) | ~5 min | ~2 min (est.) | ~2.5× |
-| 50×200 (high-res) | ~2 h | ~15 min (est.) | ~8× |
-
-GPU advantage increases with problem scale because the 4D integration kernel (6561 elliptic integral evaluations per pair) exposes massive parallelism. At small scales, kernel launch overhead and PCIe transfers dominate. At large scales, GPU compute throughput saturates.
 
 ### Thread Safety
 
@@ -2311,15 +2462,11 @@ required.
 
 | Limitation | Detail |
 |---|---|
-| Adaptive GL order (n_nodes=4/9) | Removed. Using 4 GL nodes on the GPU causes non-deterministic floating-point drift (B1). |
+| GL order | The GPU path uses 9 GL nodes; a 4-node GPU mode is not exposed because it does not satisfy the numerical reproducibility contract. |
 | Thermal mode | `ThermalMode::Cpu` uses the CPU material-table update; `ThermalMode::Gpu` uses the GPU thermal workspace when supported. The resolved mode and `thermal_time_ms` are reported by `ExecutionReport`. |
 | Persistent kernel | The protocol and kernel exist for dedicated tests, but the synchronous `GpuEngine` does not enable them. Persistent requests resolve to an explicit safe fallback until dedicated control-stream ownership, shutdown, and recovery are independently verified. |
 | CUDA Graphs | Implemented for the complete supported fixed-shape resident device step. Topology/policy changes select a new variant; voltage-only changes reuse the topology. Capture/replay failure restores pre-step state and locks CPU fallback. |
 | GPU RK4 | Unsupported. GPU single-stage, multi-stage, and batch wrappers reject RK4 explicitly and never substitute Euler. |
-
-The measurement target `bench_gpu_engine` includes CPU Reference baselines and
-records machine-specific wall, solver, thermal, transfer, and Graph capture
-observations. See `docs/benchmarks/2026-07-19-unified-gpu-engine.md`.
 
 ---
 

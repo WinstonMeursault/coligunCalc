@@ -131,11 +131,10 @@ public:
     int     num_stages()  const { return n_stages_; }
      /// @brief Resolved backend and execution diagnostics.
      ///
-    /// For Graph, the report describes graph-assisted execution of the
-    /// mutual-inductance segment only. Matrix assembly, solve, force/state
-    /// orchestration, and thermal updates remain outside the captured graph.
+     /// For Graph, the report describes graph-assisted execution of the
+     /// complete supported fixed-shape resident physical step.
     const ExecutionReport& execution_report() const { return engine_->report(); }
-    /// @brief True only after a complete CUDA-backed step used the partial Graph path.
+    /// @brief True only after a complete CUDA-backed step used the resident Graph path.
     bool graph_assisted() const {
         const auto& report = execution_report();
         return report.backend == BackendMode::Graph && report.gpu_executed;

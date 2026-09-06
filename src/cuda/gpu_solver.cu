@@ -42,10 +42,15 @@ struct DeviceGuard {
 };
 
 __global__ void residual_kernel(const double* matrices, const double* rhs,
-                                const double* solutions, double* residuals,
+                                const double* solutions, const std::uint8_t* active_mask,
+                                double* residuals,
                                 std::size_t batch_size, std::size_t dimension) {
     const std::size_t batch = blockIdx.x * blockDim.x + threadIdx.x;
     if (batch >= batch_size) return;
+    if (active_mask != nullptr && active_mask[batch] == 0) {
+        residuals[batch] = 0.0;
+        return;
+    }
 
     const double* matrix = matrices + batch * dimension * dimension;
     const double* vector = rhs + batch * dimension;
@@ -60,6 +65,37 @@ __global__ void residual_kernel(const double* matrices, const double* rhs,
         scale = fmax(scale, fabs(vector[row]));
     }
     residuals[batch] = maximum / scale;
+}
+
+__global__ void compact_active_rows_kernel(
+    const double* matrices, const double* rhs, const std::uint8_t* active_mask,
+    double* compact_matrices, double* compact_rhs, unsigned int* active_indices,
+    unsigned int* active_count, std::size_t batch_size, std::size_t dimension) {
+    const std::size_t batch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (batch >= batch_size || active_mask[batch] == 0) return;
+
+    const unsigned int compact = atomicAdd(active_count, 1u);
+    if (compact >= batch_size) return;
+    active_indices[compact] = static_cast<unsigned int>(batch);
+    const std::size_t matrix_size = dimension * dimension;
+    for (std::size_t element = 0; element < matrix_size; ++element)
+        compact_matrices[static_cast<std::size_t>(compact) * matrix_size + element] =
+            matrices[batch * matrix_size + element];
+    for (std::size_t element = 0; element < dimension; ++element)
+        compact_rhs[static_cast<std::size_t>(compact) * dimension + element] =
+            rhs[batch * dimension + element];
+}
+
+__global__ void scatter_compact_solution_kernel(
+    const unsigned int* active_indices, const double* compact_solution,
+    double* solution, unsigned int active_count, std::size_t dimension) {
+    const unsigned int compact = blockIdx.x * blockDim.x + threadIdx.x;
+    if (compact >= active_count) return;
+    const std::size_t source = static_cast<std::size_t>(compact) * dimension;
+    const std::size_t destination =
+        static_cast<std::size_t>(active_indices[compact]) * dimension;
+    for (std::size_t element = 0; element < dimension; ++element)
+        solution[destination + element] = compact_solution[source + element];
 }
 }
 
@@ -78,6 +114,8 @@ struct GpuSolver::Impl {
     double** d_matrix_ptrs = nullptr;
     double** d_rhs_ptrs = nullptr;
     double** d_device_rhs_ptrs = nullptr;
+    unsigned int* d_active_indices = nullptr;
+    unsigned int* d_active_count = nullptr;
     int* d_pivots = nullptr;
     int* d_info = nullptr;
     std::vector<double> column_major;
@@ -88,15 +126,20 @@ struct GpuSolver::Impl {
     std::vector<int> info;
     std::vector<int> solve_info;
     std::vector<double> residuals;
+    std::vector<unsigned int> active_indices;
+    bool last_compacted = false;
+    std::size_t last_active_count = 0;
 
     ~Impl() { release(); }
     void release() noexcept {
         if (context) {
             try { context->synchronize(); } catch (...) { }
         }
-        if (context) { try { DeviceGuard guard(context->device_id()); (void)cudaFree(d_matrix); (void)cudaFree(d_rhs); (void)cudaFree(d_matrix_ptrs); (void)cudaFree(d_rhs_ptrs); (void)cudaFree(d_device_rhs_ptrs); (void)cudaFree(d_pivots); (void)cudaFree(d_info); } catch (...) {} }
+        if (context) { try { DeviceGuard guard(context->device_id()); (void)cudaFree(d_matrix); (void)cudaFree(d_rhs); (void)cudaFree(d_matrix_ptrs); (void)cudaFree(d_rhs_ptrs); (void)cudaFree(d_device_rhs_ptrs); (void)cudaFree(d_active_indices); (void)cudaFree(d_active_count); (void)cudaFree(d_pivots); (void)cudaFree(d_info); } catch (...) {} }
         d_matrix = d_rhs = nullptr;
-        d_matrix_ptrs = d_rhs_ptrs = d_device_rhs_ptrs = nullptr; d_pivots = d_info = nullptr;
+        d_matrix_ptrs = d_rhs_ptrs = d_device_rhs_ptrs = nullptr;
+        d_active_indices = d_active_count = nullptr;
+        d_pivots = d_info = nullptr;
         device_rhs_base = nullptr;
     }
 };
@@ -153,16 +196,21 @@ SolverStatus GpuSolver::initialize_workspace(const SolverBatchLayout& requested_
             alloc(reinterpret_cast<void**>(&impl_->d_matrix_ptrs), B * sizeof(double*)) != cudaSuccess ||
             alloc(reinterpret_cast<void**>(&impl_->d_rhs_ptrs), B * sizeof(double*)) != cudaSuccess ||
             alloc(reinterpret_cast<void**>(&impl_->d_device_rhs_ptrs), B * sizeof(double*)) != cudaSuccess ||
+            alloc(reinterpret_cast<void**>(&impl_->d_active_indices), B * sizeof(unsigned int)) != cudaSuccess ||
+            alloc(reinterpret_cast<void**>(&impl_->d_active_count), sizeof(unsigned int)) != cudaSuccess ||
             alloc(reinterpret_cast<void**>(&impl_->d_pivots), B * D * sizeof(int)) != cudaSuccess ||
             alloc(reinterpret_cast<void**>(&impl_->d_info), B * sizeof(int)) != cudaSuccess) {
             impl_->release(); return SolverStatus::failure_status(SolverFailure::InvalidArgument, "CUDA workspace allocation failed");
         }
         impl_->matrices.resize(B); impl_->rhs_ptrs.resize(B); impl_->device_rhs_ptrs.resize(B);
         impl_->info.resize(B); impl_->solve_info.resize(B); impl_->residuals.resize(B);
+        impl_->active_indices.resize(B);
         impl_->column_major.resize(matrix_count);
         for (std::size_t b = 0; b < B; ++b) { impl_->matrices[b] = impl_->d_matrix + b * D * D; impl_->rhs_ptrs[b] = impl_->d_rhs + b * D; }
-        if (cudaMemcpy(impl_->d_matrix_ptrs, impl_->matrices.data(), B * sizeof(double*), cudaMemcpyHostToDevice) != cudaSuccess ||
-            cudaMemcpy(impl_->d_rhs_ptrs, impl_->rhs_ptrs.data(), B * sizeof(double*), cudaMemcpyHostToDevice) != cudaSuccess) {
+        if (cudaMemcpyAsync(impl_->d_matrix_ptrs, impl_->matrices.data(), B * sizeof(double*),
+                            cudaMemcpyHostToDevice, impl_->context->stream()) != cudaSuccess ||
+            cudaMemcpyAsync(impl_->d_rhs_ptrs, impl_->rhs_ptrs.data(), B * sizeof(double*),
+                            cudaMemcpyHostToDevice, impl_->context->stream()) != cudaSuccess) {
             impl_->release(); return SolverStatus::failure_status(SolverFailure::InvalidArgument, "CUDA pointer table copy failed");
         }
     }
@@ -248,6 +296,7 @@ SolverStatus GpuSolver::solve_device(const DeviceMatrixView& matrix,
     if (!matrix.data || !rhs.data || !solution.data || matrix.batch_size != B ||
         rhs.batch_size != B || solution.batch_size != B || matrix.dimension != D ||
         rhs.dimension != D || solution.dimension != D ||
+        (matrix.active_mask != nullptr && matrix.active_count > B) ||
         (residual.values != nullptr && residual.count != B))
         return SolverStatus::failure_status(SolverFailure::LayoutMismatch,
                                             "device solver views do not match configured layout");
@@ -258,9 +307,17 @@ SolverStatus GpuSolver::solve_device(const DeviceMatrixView& matrix,
             return SolverStatus::failure_status(SolverFailure::InvalidArgument,
                                                 "unable to query solver stream capture status");
         const bool capturing = capture_status != cudaStreamCaptureStatusNone;
+        const bool has_active_mask = matrix.active_mask != nullptr;
+        const bool compacting = has_active_mask && !capturing && matrix.active_count < B;
+        const auto solve_batch_count = compacting ? matrix.active_count : B;
+        impl_->last_compacted = compacting;
+        impl_->last_active_count = solve_batch_count;
         double** rhs_ptrs = impl_->d_rhs_ptrs;
         double* rhs_workspace = impl_->d_rhs;
-        if (!capturing) {
+        std::fill(impl_->info.begin(), impl_->info.end(), 0);
+        std::fill(impl_->solve_info.begin(), impl_->solve_info.end(), 0);
+
+        if (!capturing && !compacting) {
             // The caller's solution buffer is also the cuBLAS RHS output. This
             // removes the old workspace-RHS-to-solution copy while retaining
             // the input RHS and matrix contracts.
@@ -279,26 +336,69 @@ SolverStatus GpuSolver::solve_device(const DeviceMatrixView& matrix,
             rhs_ptrs = impl_->d_device_rhs_ptrs;
             rhs_workspace = solution.data;
         }
-        if (cudaMemcpyAsync(impl_->d_matrix, matrix.data, B * D * D * sizeof(double),
-                            cudaMemcpyDeviceToDevice, impl_->context->stream()) != cudaSuccess ||
-            cudaMemcpyAsync(rhs_workspace, rhs.data, B * D * sizeof(double),
-                            cudaMemcpyDeviceToDevice, impl_->context->stream()) != cudaSuccess)
+
+        if (compacting) {
+            if (solve_batch_count == 0) {
+                if (cudaMemsetAsync(solution.data, 0, B * D * sizeof(double),
+                                    impl_->context->stream()) != cudaSuccess ||
+                    cudaMemsetAsync(impl_->d_info, 0, B * sizeof(int),
+                                    impl_->context->stream()) != cudaSuccess)
+                    return SolverStatus::failure_status(
+                        SolverFailure::InvalidArgument, "inactive solution initialization failed");
+            } else {
+                if (cudaMemsetAsync(impl_->d_active_count, 0, sizeof(unsigned int),
+                                    impl_->context->stream()) != cudaSuccess)
+                    return SolverStatus::failure_status(
+                        SolverFailure::InvalidArgument, "active row counter initialization failed");
+                compact_active_rows_kernel<<<static_cast<unsigned int>((B + 127) / 128), 128, 0,
+                                             impl_->context->stream()>>>(
+                    matrix.data, rhs.data, matrix.active_mask, impl_->d_matrix, impl_->d_rhs,
+                    impl_->d_active_indices, impl_->d_active_count, B, D);
+                if (cudaGetLastError() != cudaSuccess)
+                    return SolverStatus::failure_status(
+                        SolverFailure::InvalidArgument, "active row compaction failed");
+                rhs_ptrs = impl_->d_rhs_ptrs;
+                rhs_workspace = impl_->d_rhs;
+            }
+        } else if (cudaMemcpyAsync(impl_->d_matrix, matrix.data, B * D * D * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, impl_->context->stream()) != cudaSuccess ||
+                   cudaMemcpyAsync(rhs_workspace, rhs.data, B * D * sizeof(double),
+                                   cudaMemcpyDeviceToDevice, impl_->context->stream()) != cudaSuccess) {
             return SolverStatus::failure_status(SolverFailure::InvalidArgument,
                                                 "device solver pointer setup failed");
-        const auto factor = cublasDgetrfBatched(
-            impl_->context->cublas(), static_cast<int>(D), impl_->d_matrix_ptrs,
-            static_cast<int>(D), impl_->d_pivots, impl_->d_info, static_cast<int>(B));
-        if (factor != CUBLAS_STATUS_SUCCESS)
-            return SolverStatus::failure_status(SolverFailure::FactorizationFailed,
-                                                "cublasDgetrfBatched failed for device views");
-        const auto solve = cublasDgetrsBatched(
-            impl_->context->cublas(), CUBLAS_OP_N, static_cast<int>(D), 1,
-            const_cast<const double* const*>(impl_->d_matrix_ptrs), static_cast<int>(D),
-            impl_->d_pivots, rhs_ptrs, static_cast<int>(D),
-            impl_->solve_info.data(), static_cast<int>(B));
-        if (solve != CUBLAS_STATUS_SUCCESS)
-            return SolverStatus::failure_status(SolverFailure::FactorizationFailed,
-                                                "cublasDgetrsBatched failed for device views");
+        }
+
+        if (solve_batch_count != 0) {
+            const auto factor = cublasDgetrfBatched(
+                impl_->context->cublas(), static_cast<int>(D), impl_->d_matrix_ptrs,
+                static_cast<int>(D), impl_->d_pivots, impl_->d_info,
+                static_cast<int>(solve_batch_count));
+            if (factor != CUBLAS_STATUS_SUCCESS)
+                return SolverStatus::failure_status(SolverFailure::FactorizationFailed,
+                                                    "cublasDgetrfBatched failed for device views");
+            const auto solve = cublasDgetrsBatched(
+                impl_->context->cublas(), CUBLAS_OP_N, static_cast<int>(D), 1,
+                const_cast<const double* const*>(impl_->d_matrix_ptrs), static_cast<int>(D),
+                impl_->d_pivots, rhs_ptrs, static_cast<int>(D),
+                impl_->solve_info.data(), static_cast<int>(solve_batch_count));
+            if (solve != CUBLAS_STATUS_SUCCESS)
+                return SolverStatus::failure_status(SolverFailure::FactorizationFailed,
+                                                    "cublasDgetrsBatched failed for device views");
+        }
+
+        if (compacting && solve_batch_count != 0) {
+            if (cudaMemsetAsync(solution.data, 0, B * D * sizeof(double),
+                                impl_->context->stream()) != cudaSuccess)
+                return SolverStatus::failure_status(
+                    SolverFailure::InvalidArgument, "inactive solution clearing failed");
+            scatter_compact_solution_kernel<<<static_cast<unsigned int>((solve_batch_count + 127) / 128),
+                                               128, 0, impl_->context->stream()>>>(
+                impl_->d_active_indices, impl_->d_rhs, solution.data,
+                static_cast<unsigned int>(solve_batch_count), D);
+            if (cudaGetLastError() != cudaSuccess)
+                return SolverStatus::failure_status(
+                    SolverFailure::InvalidArgument, "active solution scatter failed");
+        }
 
         if (capturing &&
             cudaMemcpyAsync(solution.data, impl_->d_rhs, B * D * sizeof(double),
@@ -309,46 +409,14 @@ SolverStatus GpuSolver::solve_device(const DeviceMatrixView& matrix,
         if (residual.values != nullptr) {
             residual_kernel<<<static_cast<unsigned int>((B + 127) / 128), 128, 0,
                               impl_->context->stream()>>>(
-                matrix.data, rhs.data, solution.data, residual.values, B, D);
+                matrix.data, rhs.data, solution.data, matrix.active_mask,
+                residual.values, B, D);
             if (cudaGetLastError() != cudaSuccess)
                 return SolverStatus::failure_status(SolverFailure::InvalidArgument,
                                                     "device residual kernel launch failed");
         }
 
-        if (capture_status != cudaStreamCaptureStatusNone) return SolverStatus::success();
-        if (cudaMemcpyAsync(impl_->info.data(), impl_->d_info, B * sizeof(int),
-                            cudaMemcpyDeviceToHost, impl_->context->stream()) != cudaSuccess ||
-            (residual.values != nullptr &&
-             cudaMemcpyAsync(impl_->residuals.data(), residual.values, B * sizeof(double),
-                             cudaMemcpyDeviceToHost, impl_->context->stream()) != cudaSuccess) ||
-            cudaStreamSynchronize(impl_->context->stream()) != cudaSuccess)
-            return SolverStatus::failure_status(SolverFailure::InvalidArgument,
-                                                "device solver status synchronization failed");
-        double maximum_residual = 0.0;
-        for (std::size_t batch = 0; batch < B; ++batch) {
-            if (impl_->info[batch] != 0 || impl_->solve_info[batch] != 0) {
-                auto status = SolverStatus::failure_status(
-                    SolverFailure::FactorizationFailed,
-                    "device solver factorization failed at batch " + std::to_string(batch));
-                status.failed_batch = static_cast<int>(batch);
-                status.backend_info = impl_->info[batch] != 0
-                    ? impl_->info[batch] : impl_->solve_info[batch];
-                return status;
-            }
-            if (residual.values != nullptr &&
-                (!std::isfinite(impl_->residuals[batch]) || impl_->residuals[batch] > 1.0e-10)) {
-                auto status = SolverStatus::failure_status(
-                    std::isfinite(impl_->residuals[batch])
-                        ? SolverFailure::ResidualTooLarge : SolverFailure::NonFiniteOutput,
-                    "device solver residual check failed at batch " + std::to_string(batch));
-                status.failed_batch = static_cast<int>(batch);
-                status.max_residual = impl_->residuals[batch];
-                return status;
-            }
-            if (residual.values != nullptr)
-                maximum_residual = std::max(maximum_residual, impl_->residuals[batch]);
-        }
-        return SolverStatus::success(maximum_residual);
+        return SolverStatus::success();
     } catch (const std::exception& error) {
         return SolverStatus::failure_status(SolverFailure::InvalidArgument, error.what());
     }
@@ -372,17 +440,31 @@ SolverStatus GpuSolver::validate_device_result(DeviceResidualView residual) {
             cudaStreamSynchronize(impl_->context->stream()) != cudaSuccess)
             return SolverStatus::failure_status(SolverFailure::InvalidArgument,
                                                 "device solver status synchronization failed");
+        const auto status_count = impl_->last_compacted ? impl_->last_active_count : B;
         double maximum_residual = 0.0;
-        for (std::size_t batch = 0; batch < B; ++batch) {
+        for (std::size_t batch = 0; batch < status_count; ++batch) {
             if (impl_->info[batch] != 0 || impl_->solve_info[batch] != 0) {
+                std::size_t failed_batch = batch;
+                if (impl_->last_compacted) {
+                    if (cudaMemcpy(impl_->active_indices.data(), impl_->d_active_indices,
+                                   impl_->last_active_count * sizeof(unsigned int),
+                                   cudaMemcpyDeviceToHost) != cudaSuccess)
+                        return SolverStatus::failure_status(
+                            SolverFailure::InvalidArgument,
+                            "active row mapping download failed");
+                    failed_batch = impl_->active_indices[batch];
+                }
                 auto status = SolverStatus::failure_status(
                     SolverFailure::FactorizationFailed,
-                    "device solver factorization failed at batch " + std::to_string(batch));
-                status.failed_batch = static_cast<int>(batch);
+                    "device solver factorization failed at batch " +
+                        std::to_string(failed_batch));
+                status.failed_batch = static_cast<int>(failed_batch);
                 status.backend_info = impl_->info[batch] != 0
                     ? impl_->info[batch] : impl_->solve_info[batch];
                 return status;
             }
+        }
+        for (std::size_t batch = 0; batch < B; ++batch) {
             if (!std::isfinite(impl_->residuals[batch]) || impl_->residuals[batch] > 1.0e-10) {
                 auto status = SolverStatus::failure_status(
                     std::isfinite(impl_->residuals[batch])

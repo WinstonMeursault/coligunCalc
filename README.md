@@ -42,7 +42,7 @@ include/coilgun/   — Public headers (core types, physics, components, simulati
 src/               — Library implementation (static library libcoilgun.a)
 tests/             — Unit and integration tests (doctest/CTest)
 tools/             — T(q,p) lookup table generator
-docs/              — Documentation (API reference EN/CN, numerical model, review/performance reports, benchmarks)
+docs/              — Documentation (API reference EN/CN, numerical model, and build/test references)
 .references/       — Reference papers in PDF (gitignored, local-only)
 ```
 
@@ -68,19 +68,6 @@ cmake --build --preset cuda-debug
 ctest --preset cuda-debug
 ctest --preset cuda-debug -L gpu
 ```
-
-The measurement-only CUDA benchmark includes CPU Reference rows and records
-Direct, Graph, Persistent-request, Fallback, batch-size, solver, and thermal
-timings. It is excluded from the default build because results are
-machine-dependent:
-
-```sh
-cmake --build --preset cuda-debug --target bench_gpu_engine
-./build/cuda-debug/src/cuda/bench_gpu_engine
-```
-
-See [the benchmark record](docs/benchmarks/2026-07-19-unified-gpu-engine.md)
-for the RTX 5080 Laptop measurement and the honest Persistent fallback status.
 
 The synchronous GPU method surface aligns with the CPU API for Euler. Stepping GPU single-/multi-stage RK4 instantiations currently throws `std::logic_error`; use the CPU implementation for RK4.
 
@@ -186,7 +173,7 @@ ctest --preset cpu-debug -L validation
 ctest --preset cuda-debug -L gpu
 ```
 
-GPU tests use a shared resource lock. Tests that require a physical CUDA device skip when no device is available; actual GPU CI must also assert the execution-report conditions above. The benchmark executable `bench_gpu_engine` is not a CTest target and must be run explicitly.
+GPU tests use a shared resource lock. Tests that require a physical CUDA device skip when no device is available; actual GPU CI must also assert the execution-report conditions above.
 
 ---
 
@@ -195,9 +182,6 @@ GPU tests use a shared resource lock. Tests that require a physical CUDA device 
 - [API Reference (EN)](docs/API.md) — Complete C++ function and class API
 - [API 参考 (中文)](docs/API_cn.md) — Chinese translation
 - [Numerical Model](docs/NumericalModel.md) — Detailed physics derivation and algorithm
-- [GPU Benchmark Record](docs/benchmarks/2026-07-19-unified-gpu-engine.md) — Machine-specific execution measurements and fallback status
-- [Performance Review](docs/PerformanceReview.md) — Whole-project performance findings and review closure
-- [Optimization Effectiveness](docs/benchmarks/2026-07-24-PerformanceOptimizationEffectiveness.md) — Before/after benchmark comparison for the optimization round
 
 ---
 

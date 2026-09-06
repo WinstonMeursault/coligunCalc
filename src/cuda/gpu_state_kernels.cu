@@ -1,4 +1,5 @@
 #include "coilgun/simulation/cuda/gpu_state_kernels.hpp"
+#include "gpu_kernel_launch_detail.hpp"
 
 #include <cuda_runtime.h>
 
@@ -10,6 +11,7 @@ namespace {
 
 constexpr std::size_t kParallelStateDimension = 32;
 
+template <bool SingleStage>
 __global__ void force_reduction_kernel(
     std::size_t S, std::size_t F, const double* currents, const double* dm1,
     const unsigned char* trigger, double* force) {
@@ -17,14 +19,15 @@ __global__ void force_reduction_kernel(
     const std::size_t batch = blockIdx.x;
     const unsigned int thread = threadIdx.x;
     const std::size_t terms = S * F;
-    const double* batch_currents = currents + batch * (S + F);
+    const double* batch_currents = currents + batch * (SingleStage ? 1 + F : S + F);
     const double* batch_dm1 = dm1 + batch * terms;
 
     double sum = 0.0;
     for (std::size_t term = thread; term < terms; term += blockDim.x) {
-        const std::size_t stage = term / F;
+        const std::size_t stage = SingleStage ? 0 : term / F;
+        const std::size_t filament = SingleStage ? term : term % F;
         if (trigger == nullptr || trigger[batch * S + stage] != 0) {
-            sum += batch_currents[stage] * batch_currents[S + term % F] * batch_dm1[term];
+            sum += batch_currents[stage] * batch_currents[S + filament] * batch_dm1[term];
         }
     }
     partial[thread] = sum;
@@ -198,13 +201,18 @@ __global__ void assembly_kernel(DeviceAssemblyView view) {
 __global__ void separation_kernel(
     std::size_t B, std::size_t S, std::size_t F,
     const double* stage_positions, const double* filament_positions,
-    const double* armature_positions, double* separations) {
+    const double* armature_positions, const unsigned char* active_mask,
+    const unsigned char* trigger_mask, const unsigned char* mutual_stage_mask,
+    unsigned char* pair_active, double* separations) {
     const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     const std::size_t count = B * S * F;
     if (index >= count) return;
     const std::size_t filament = index % F;
     const std::size_t stage = (index / F) % S;
     const std::size_t batch = index / (S * F);
+    const std::size_t stage_index = batch * S + stage;
+    pair_active[index] = active_mask[batch] != 0 &&
+        trigger_mask[stage_index] != 0 && mutual_stage_mask[stage_index] != 0;
     separations[index] = stage_positions[stage] -
         (filament_positions[filament] - armature_positions[batch]);
 }
@@ -268,18 +276,11 @@ __global__ void device_control_kernel(DeviceControlView view) {
         }
     }
     if (!any_remaining) view.active_mask[batch] = 0;
-    for (std::size_t stage = 0; stage < S; ++stage) {
-        for (std::size_t filament = 0; filament < view.filament_count; ++filament) {
-            view.pair_active[(batch * S + stage) * view.filament_count + filament] =
-                view.active_mask[batch] != 0 &&
-                view.trigger_mask[batch * S + stage] != 0 &&
-                view.mutual_stage_mask[batch * S + stage] != 0;
-        }
-    }
 }
 
 bool valid_threads(unsigned int threads) {
-    return threads != 0 && threads <= 1024 && (threads & (threads - 1)) == 0;
+    // force_reduction_kernel owns fixed 512-element shared reduction buffers.
+    return threads != 0 && threads <= 512 && (threads & (threads - 1)) == 0;
 }
 
 bool checked_product(std::size_t a, std::size_t b, std::size_t& result) {
@@ -288,7 +289,10 @@ bool checked_product(std::size_t a, std::size_t b, std::size_t& result) {
     return true;
 }
 
-bool valid_grid(std::size_t blocks) {
+enum class LaunchValidation { Checked, Trusted };
+
+bool valid_grid(std::size_t blocks, LaunchValidation validation) {
+    if (validation == LaunchValidation::Trusted) return true;
     int device = 0;
     cudaDeviceProp properties{};
     return cudaGetDevice(&device) == cudaSuccess &&
@@ -296,8 +300,9 @@ bool valid_grid(std::size_t blocks) {
            blocks <= static_cast<std::size_t>(properties.maxGridSize[0]);
 }
 
-bool device_pointer(const void* pointer) {
+bool device_pointer(const void* pointer, LaunchValidation validation) {
     if (!pointer) return false;
+    if (validation == LaunchValidation::Trusted) return true;
     cudaPointerAttributes attributes{};
     const auto status = cudaPointerGetAttributes(&attributes, pointer);
 #if CUDART_VERSION >= 10000
@@ -310,36 +315,61 @@ bool device_pointer(const void* pointer) {
 
 } // namespace
 
+cudaError_t launch_force_reduction_impl(
+    std::size_t B, std::size_t S, std::size_t F, const double* currents,
+    const double* dm1, const unsigned char* trigger, double* force,
+    StateKernelConfig config, cudaStream_t stream,
+    LaunchValidation validation) noexcept {
+    std::size_t terms = 0, state_size = 0;
+    if (B == 0 || S == 0 || F == 0 || !device_pointer(currents, validation) ||
+        !device_pointer(dm1, validation) ||
+        (trigger != nullptr && !device_pointer(trigger, validation)) ||
+        !device_pointer(force, validation) ||
+        !valid_threads(config.threads_per_block) || B > std::numeric_limits<unsigned int>::max() ||
+        !checked_product(S, F, terms) || !checked_product(B, terms, state_size) ||
+        !valid_grid(B, validation)) {
+        return cudaErrorInvalidValue;
+    }
+    const auto launch = [&](auto kernel) {
+        kernel<<<static_cast<unsigned int>(B), config.threads_per_block,
+                 config.threads_per_block * sizeof(double), stream>>>(
+            S, F, currents, dm1, trigger, force);
+        return cudaGetLastError();
+    };
+    if (S == 1) return launch(force_reduction_kernel<true>);
+    return launch(force_reduction_kernel<false>);
+}
+
 cudaError_t launch_force_reduction(
     std::size_t B, std::size_t S, std::size_t F, const double* currents,
     const double* dm1, const unsigned char* trigger, double* force,
     StateKernelConfig config, cudaStream_t stream) noexcept {
-    std::size_t terms = 0, state_size = 0;
-    if (B == 0 || S == 0 || F == 0 || !device_pointer(currents) || !device_pointer(dm1) ||
-        (trigger != nullptr && !device_pointer(trigger)) || !device_pointer(force) ||
-        !valid_threads(config.threads_per_block) || B > std::numeric_limits<unsigned int>::max() ||
-        !checked_product(S, F, terms) || !checked_product(B, terms, state_size) || !valid_grid(B)) {
-        return cudaErrorInvalidValue;
-    }
-    force_reduction_kernel<<<static_cast<unsigned int>(B), config.threads_per_block,
-                             config.threads_per_block * sizeof(double), stream>>>(
-        S, F, currents, dm1, trigger, force);
-    return cudaGetLastError();
+    return launch_force_reduction_impl(B, S, F, currents, dm1, trigger, force,
+                                       config, stream, LaunchValidation::Checked);
 }
 
-cudaError_t launch_device_assembly(const DeviceAssemblyView& view,
-                                   cudaStream_t stream) noexcept {
+cudaError_t launch_device_assembly_impl(const DeviceAssemblyView& view,
+                                        cudaStream_t stream,
+                                        LaunchValidation validation) noexcept {
     if (view.batch_size == 0 || view.stage_count == 0 || view.filament_count == 0 ||
-        !device_pointer(view.stage_inductances) || !device_pointer(view.stage_resistances) ||
-        !device_pointer(view.stage_mutual) || !device_pointer(view.filament_inductances) ||
-        !device_pointer(view.filament_reference_resistances) ||
-        !device_pointer(view.filament_mutual) || !device_pointer(view.mutual) ||
-        !device_pointer(view.mutual_gradient) || !device_pointer(view.currents) ||
-        !device_pointer(view.velocity) || !device_pointer(view.stage_voltages) ||
-        !device_pointer(view.active_mask) || !device_pointer(view.trigger_mask) ||
-        !device_pointer(view.stage_mask) || !device_pointer(view.mutual_stage_mask) ||
-        !device_pointer(view.matrices) || !device_pointer(view.rhs) ||
-        (view.dynamic_resistances != nullptr && !device_pointer(view.dynamic_resistances)))
+        !device_pointer(view.stage_inductances, validation) ||
+        !device_pointer(view.stage_resistances, validation) ||
+        !device_pointer(view.stage_mutual, validation) ||
+        !device_pointer(view.filament_inductances, validation) ||
+        !device_pointer(view.filament_reference_resistances, validation) ||
+        !device_pointer(view.filament_mutual, validation) ||
+        !device_pointer(view.mutual, validation) ||
+        !device_pointer(view.mutual_gradient, validation) ||
+        !device_pointer(view.currents, validation) ||
+        !device_pointer(view.velocity, validation) ||
+        !device_pointer(view.stage_voltages, validation) ||
+        !device_pointer(view.active_mask, validation) ||
+        !device_pointer(view.trigger_mask, validation) ||
+        !device_pointer(view.stage_mask, validation) ||
+        !device_pointer(view.mutual_stage_mask, validation) ||
+        !device_pointer(view.matrices, validation) || !device_pointer(view.rhs, validation) ||
+        (view.dynamic_resistances != nullptr &&
+         !device_pointer(view.dynamic_resistances, validation)))
         return cudaErrorInvalidValue;
     const std::size_t dimension = view.stage_count + view.filament_count;
     if (dimension > std::numeric_limits<unsigned int>::max() ||
@@ -353,21 +383,65 @@ cudaError_t launch_device_assembly(const DeviceAssemblyView& view,
     return cudaGetLastError();
 }
 
-cudaError_t launch_separation_update(
+cudaError_t launch_device_assembly(const DeviceAssemblyView& view,
+                                   cudaStream_t stream) noexcept {
+    return launch_device_assembly_impl(view, stream, LaunchValidation::Checked);
+}
+
+cudaError_t launch_mutual_input_update_impl(
     std::size_t B, std::size_t S, std::size_t F,
     const double* stage_positions, const double* filament_positions,
-    const double* armature_positions, double* separations,
-    cudaStream_t stream) noexcept {
+    const double* armature_positions, const unsigned char* active_mask,
+    const unsigned char* trigger_mask, const unsigned char* mutual_stage_mask,
+    unsigned char* pair_active, double* separations,
+    cudaStream_t stream, LaunchValidation validation) noexcept {
     std::size_t count = 0;
     if (B == 0 || S == 0 || F == 0 || !checked_product(B, S, count) ||
         !checked_product(count, F, count) ||
-        !device_pointer(stage_positions) || !device_pointer(filament_positions) ||
-        !device_pointer(armature_positions) || !device_pointer(separations) ||
+        !device_pointer(stage_positions, validation) ||
+        !device_pointer(filament_positions, validation) ||
+        !device_pointer(armature_positions, validation) ||
+        !device_pointer(active_mask, validation) ||
+        !device_pointer(trigger_mask, validation) ||
+        !device_pointer(mutual_stage_mask, validation) ||
+        !device_pointer(pair_active, validation) ||
+        !device_pointer(separations, validation) ||
         count > std::numeric_limits<std::size_t>::max() - 255 ||
-        !valid_grid((count + 255) / 256))
+        !valid_grid((count + 255) / 256, validation))
         return cudaErrorInvalidValue;
     separation_kernel<<<static_cast<unsigned int>((count + 255) / 256), 256, 0, stream>>>(
-        B, S, F, stage_positions, filament_positions, armature_positions, separations);
+        B, S, F, stage_positions, filament_positions, armature_positions,
+        active_mask, trigger_mask, mutual_stage_mask, pair_active, separations);
+    return cudaGetLastError();
+}
+
+cudaError_t launch_mutual_input_update(
+    std::size_t B, std::size_t S, std::size_t F,
+    const double* stage_positions, const double* filament_positions,
+    const double* armature_positions, const unsigned char* active_mask,
+    const unsigned char* trigger_mask, const unsigned char* mutual_stage_mask,
+    unsigned char* pair_active, double* separations,
+    cudaStream_t stream) noexcept {
+    return launch_mutual_input_update_impl(
+        B, S, F, stage_positions, filament_positions, armature_positions,
+        active_mask, trigger_mask, mutual_stage_mask, pair_active, separations,
+        stream, LaunchValidation::Checked);
+}
+
+cudaError_t launch_compact_status_impl(
+    std::size_t B, std::size_t D, const double* currents,
+    const double* velocity, const double* position, const double* residuals,
+    const unsigned char* active_mask, DeviceStepStatus* status,
+    cudaStream_t stream, LaunchValidation validation) noexcept {
+    if (B == 0 || D == 0 || !device_pointer(currents, validation) ||
+        !device_pointer(velocity, validation) || !device_pointer(position, validation) ||
+        !device_pointer(active_mask, validation) || !device_pointer(status, validation) ||
+        (residuals != nullptr && !device_pointer(residuals, validation)) ||
+        B > std::numeric_limits<std::size_t>::max() - 127 ||
+        !valid_grid((B + 127) / 128, validation))
+        return cudaErrorInvalidValue;
+    compact_status_kernel<<<static_cast<unsigned int>((B + 127) / 128), 128, 0, stream>>>(
+        B, D, currents, velocity, position, residuals, active_mask, status);
     return cudaGetLastError();
 }
 
@@ -376,53 +450,63 @@ cudaError_t launch_compact_status(
     const double* velocity, const double* position, const double* residuals,
     const unsigned char* active_mask, DeviceStepStatus* status,
     cudaStream_t stream) noexcept {
-    if (B == 0 || D == 0 || !device_pointer(currents) ||
-        !device_pointer(velocity) || !device_pointer(position) ||
-        !device_pointer(active_mask) || !device_pointer(status) ||
-        (residuals != nullptr && !device_pointer(residuals)) ||
-        B > std::numeric_limits<std::size_t>::max() - 127 ||
-        !valid_grid((B + 127) / 128))
-        return cudaErrorInvalidValue;
-    compact_status_kernel<<<static_cast<unsigned int>((B + 127) / 128), 128, 0, stream>>>(
-        B, D, currents, velocity, position, residuals, active_mask, status);
-    return cudaGetLastError();
+    return launch_compact_status_impl(B, D, currents, velocity, position, residuals,
+                                      active_mask, status, stream,
+                                      LaunchValidation::Checked);
 }
 
-cudaError_t launch_device_control(const DeviceControlView& view,
-                                  cudaStream_t stream) noexcept {
-    if (view.batch_size == 0 || view.stage_count == 0 || view.filament_count == 0 ||
-        view.dimension < view.stage_count || !device_pointer(view.current_time) ||
+cudaError_t launch_device_control_impl(const DeviceControlView& view,
+                                       cudaStream_t stream,
+                                       LaunchValidation validation) noexcept {
+    if (view.batch_size == 0 || view.stage_count == 0 ||
+        view.dimension < view.stage_count || !device_pointer(view.current_time, validation) ||
         !std::isfinite(view.quiet_current) || view.quiet_current < 0.0 ||
-        !device_pointer(view.currents) || !device_pointer(view.position) ||
-        !device_pointer(view.position_offsets) || !device_pointer(view.trigger_modes) ||
-        !device_pointer(view.trigger_values) ||
-        !device_pointer(view.excitation_finished) ||
-        !device_pointer(view.active_mask) || !device_pointer(view.trigger_mask) ||
-        !device_pointer(view.stage_mask) ||
-        !device_pointer(view.mutual_stage_mask) ||
-        !device_pointer(view.stage_completed) ||
-        !device_pointer(view.pair_active) ||
-        !device_pointer(view.trigger_times) ||
-        !device_pointer(view.trigger_positions) ||
+        !device_pointer(view.currents, validation) ||
+        !device_pointer(view.position, validation) ||
+        !device_pointer(view.position_offsets, validation) ||
+        !device_pointer(view.trigger_modes, validation) ||
+        !device_pointer(view.trigger_values, validation) ||
+        !device_pointer(view.excitation_finished, validation) ||
+        !device_pointer(view.active_mask, validation) ||
+        !device_pointer(view.trigger_mask, validation) ||
+        !device_pointer(view.stage_mask, validation) ||
+        !device_pointer(view.mutual_stage_mask, validation) ||
+        !device_pointer(view.stage_completed, validation) ||
+        !device_pointer(view.trigger_times, validation) ||
+        !device_pointer(view.trigger_positions, validation) ||
         view.batch_size > std::numeric_limits<std::size_t>::max() - 127 ||
-        !valid_grid((view.batch_size + 127) / 128))
+        !valid_grid((view.batch_size + 127) / 128, validation))
         return cudaErrorInvalidValue;
     device_control_kernel<<<static_cast<unsigned int>((view.batch_size + 127) / 128),
                             128, 0, stream>>>(view);
     return cudaGetLastError();
 }
 
-cudaError_t launch_acceleration(
+cudaError_t launch_device_control(const DeviceControlView& view,
+                                  cudaStream_t stream) noexcept {
+    return launch_device_control_impl(view, stream, LaunchValidation::Checked);
+}
+
+cudaError_t launch_acceleration_impl(
     std::size_t B, const double* force, double mass, double* acceleration,
-    cudaStream_t stream) noexcept {
-    if (B == 0 || B > std::numeric_limits<unsigned int>::max() || !device_pointer(force) ||
-        !device_pointer(acceleration) || !std::isfinite(mass) || mass <= 0.0 ||
-        B > std::numeric_limits<std::size_t>::max() - 255 || !valid_grid((B + 255) / 256)) {
+    cudaStream_t stream, LaunchValidation validation) noexcept {
+    if (B == 0 || B > std::numeric_limits<unsigned int>::max() ||
+        !device_pointer(force, validation) || !device_pointer(acceleration, validation) ||
+        !std::isfinite(mass) || mass <= 0.0 ||
+        B > std::numeric_limits<std::size_t>::max() - 255 ||
+        !valid_grid((B + 255) / 256, validation)) {
         return cudaErrorInvalidValue;
     }
     acceleration_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
         B, force, 1.0 / mass, acceleration);
     return cudaGetLastError();
+}
+
+cudaError_t launch_acceleration(
+    std::size_t B, const double* force, double mass, double* acceleration,
+    cudaStream_t stream) noexcept {
+    return launch_acceleration_impl(B, force, mass, acceleration, stream,
+                                    LaunchValidation::Checked);
 }
 
 cudaError_t launch_state_update(
@@ -431,9 +515,14 @@ cudaError_t launch_state_update(
     double mass, double dt, double* acceleration, double* velocity, double* position,
     double* force, StateKernelConfig config, cudaStream_t stream) noexcept {
     std::size_t dimension = 0, state_count = 0;
-    if (B == 0 || S == 0 || F == 0 || !device_pointer(currents) || !device_pointer(dm1) ||
-        (trigger != nullptr && !device_pointer(trigger)) ||
-        !device_pointer(acceleration) || !device_pointer(velocity) || !device_pointer(position) || !device_pointer(force) ||
+    if (B == 0 || S == 0 || F == 0 ||
+        !device_pointer(currents, LaunchValidation::Checked) ||
+        !device_pointer(dm1, LaunchValidation::Checked) ||
+        (trigger != nullptr && !device_pointer(trigger, LaunchValidation::Checked)) ||
+        !device_pointer(acceleration, LaunchValidation::Checked) ||
+        !device_pointer(velocity, LaunchValidation::Checked) ||
+        !device_pointer(position, LaunchValidation::Checked) ||
+        !device_pointer(force, LaunchValidation::Checked) ||
         !std::isfinite(dt) || dt <= 0.0 || !std::isfinite(mass) || mass <= 0.0 ||
         B > std::numeric_limits<unsigned int>::max() || S > std::numeric_limits<std::size_t>::max() - F) {
         return cudaErrorInvalidValue;
@@ -445,17 +534,55 @@ cudaError_t launch_state_update(
     if (status != cudaSuccess) return status;
     if (dimension <= kParallelStateDimension) {
         if (B > std::numeric_limits<std::size_t>::max() - 255 ||
-            !valid_grid((B + 255) / 256))
+            !valid_grid((B + 255) / 256, LaunchValidation::Checked))
             return cudaErrorInvalidValue;
         state_update_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
             B, dimension, current_derivative, dt, acceleration, currents, velocity, position);
     } else {
         if (!checked_product(B, dimension, state_count) ||
             state_count > std::numeric_limits<std::size_t>::max() - 255 ||
-            !valid_grid((state_count + 255) / 256))
+            !valid_grid((state_count + 255) / 256, LaunchValidation::Checked))
             return cudaErrorInvalidValue;
         parallel_state_update_kernel<<<static_cast<unsigned int>((state_count + 255) / 256), 256, 0, stream>>>(
             B, dimension, current_derivative, dt, acceleration, currents, velocity, position);
+    }
+    return cudaGetLastError();
+}
+
+cudaError_t launch_state_update_masked_impl(
+    std::size_t B, std::size_t S, std::size_t F, double* currents,
+    const double* current_derivative, const double* dm1, const unsigned char* trigger,
+    const unsigned char* active, double mass, double dt, double* acceleration,
+    double* velocity, double* position, double* force, StateKernelConfig config,
+    cudaStream_t stream, LaunchValidation validation) noexcept {
+    std::size_t terms = 0, dimension = 0, state_count = 0;
+    if (!device_pointer(active, validation) || B == 0 || S == 0 || F == 0 ||
+        !device_pointer(currents, validation) || !device_pointer(dm1, validation) ||
+        (trigger != nullptr && !device_pointer(trigger, validation)) ||
+        !device_pointer(acceleration, validation) ||
+        !device_pointer(velocity, validation) || !device_pointer(position, validation) ||
+        !device_pointer(force, validation) ||
+        !std::isfinite(dt) || dt <= 0.0 || !std::isfinite(mass) || mass <= 0.0 ||
+        B > std::numeric_limits<unsigned int>::max() || S > std::numeric_limits<std::size_t>::max() - F ||
+        !checked_product(S, F, terms) || !checked_product(B, terms, terms) ||
+        !valid_grid((B + 255) / 256, validation))
+        return cudaErrorInvalidValue;
+    dimension = S + F;
+    auto status = launch_force_reduction_impl(B, S, F, currents, dm1, trigger, force,
+                                              config, stream, validation);
+    if (status != cudaSuccess) return status;
+    status = launch_acceleration_impl(B, force, mass, acceleration, stream, validation);
+    if (status != cudaSuccess) return status;
+    if (dimension <= kParallelStateDimension) {
+        masked_state_update_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
+            B, dimension, current_derivative, dt, acceleration, active, currents, velocity, position);
+    } else {
+        if (!checked_product(B, dimension, state_count) ||
+            state_count > std::numeric_limits<std::size_t>::max() - 255 ||
+            !valid_grid((state_count + 255) / 256, validation))
+            return cudaErrorInvalidValue;
+        parallel_masked_state_update_kernel<<<static_cast<unsigned int>((state_count + 255) / 256), 256, 0, stream>>>(
+            B, dimension, current_derivative, dt, acceleration, active, currents, velocity, position);
     }
     return cudaGetLastError();
 }
@@ -466,32 +593,59 @@ cudaError_t launch_state_update_masked(
     const unsigned char* active, double mass, double dt, double* acceleration,
     double* velocity, double* position, double* force, StateKernelConfig config,
     cudaStream_t stream) noexcept {
-    std::size_t terms = 0, dimension = 0, state_count = 0;
-    if (!device_pointer(active) || B == 0 || S == 0 || F == 0 || !device_pointer(currents) || !device_pointer(dm1) ||
-        (trigger != nullptr && !device_pointer(trigger)) ||
-        !device_pointer(acceleration) || !device_pointer(velocity) || !device_pointer(position) || !device_pointer(force) ||
-        !std::isfinite(dt) || dt <= 0.0 || !std::isfinite(mass) || mass <= 0.0 ||
-        B > std::numeric_limits<unsigned int>::max() || S > std::numeric_limits<std::size_t>::max() - F ||
-        !checked_product(S, F, terms) || !checked_product(B, terms, terms) ||
-        !valid_grid((B + 255) / 256))
-        return cudaErrorInvalidValue;
-    dimension = S + F;
-    auto status = launch_force_reduction(B, S, F, currents, dm1, trigger, force, config, stream);
-    if (status != cudaSuccess) return status;
-    status = launch_acceleration(B, force, mass, acceleration, stream);
-    if (status != cudaSuccess) return status;
-    if (dimension <= kParallelStateDimension) {
-        masked_state_update_kernel<<<static_cast<unsigned int>((B + 255) / 256), 256, 0, stream>>>(
-            B, dimension, current_derivative, dt, acceleration, active, currents, velocity, position);
-    } else {
-        if (!checked_product(B, dimension, state_count) ||
-            state_count > std::numeric_limits<std::size_t>::max() - 255 ||
-            !valid_grid((state_count + 255) / 256))
-            return cudaErrorInvalidValue;
-        parallel_masked_state_update_kernel<<<static_cast<unsigned int>((state_count + 255) / 256), 256, 0, stream>>>(
-            B, dimension, current_derivative, dt, acceleration, active, currents, velocity, position);
-    }
-    return cudaGetLastError();
+    return launch_state_update_masked_impl(
+        B, S, F, currents, current_derivative, dm1, trigger, active, mass, dt,
+        acceleration, velocity, position, force, config, stream,
+        LaunchValidation::Checked);
 }
+
+namespace detail {
+
+cudaError_t launch_device_assembly_unchecked(const DeviceAssemblyView& view,
+                                             cudaStream_t stream) noexcept {
+    return launch_device_assembly_impl(view, stream, LaunchValidation::Trusted);
+}
+
+cudaError_t launch_mutual_input_update_unchecked(
+    std::size_t B, std::size_t S, std::size_t F,
+    const double* stage_positions, const double* filament_positions,
+    const double* armature_positions, const unsigned char* active_mask,
+    const unsigned char* trigger_mask, const unsigned char* mutual_stage_mask,
+    unsigned char* pair_active, double* separations,
+    cudaStream_t stream) noexcept {
+    return launch_mutual_input_update_impl(
+        B, S, F, stage_positions, filament_positions, armature_positions,
+        active_mask, trigger_mask, mutual_stage_mask, pair_active, separations,
+        stream, LaunchValidation::Trusted);
+}
+
+cudaError_t launch_compact_status_unchecked(
+    std::size_t B, std::size_t D, const double* currents,
+    const double* velocity, const double* position, const double* residuals,
+    const unsigned char* active_mask, DeviceStepStatus* status,
+    cudaStream_t stream) noexcept {
+    return launch_compact_status_impl(B, D, currents, velocity, position, residuals,
+                                      active_mask, status, stream,
+                                      LaunchValidation::Trusted);
+}
+
+cudaError_t launch_device_control_unchecked(const DeviceControlView& view,
+                                            cudaStream_t stream) noexcept {
+    return launch_device_control_impl(view, stream, LaunchValidation::Trusted);
+}
+
+cudaError_t launch_state_update_masked_unchecked(
+    std::size_t B, std::size_t S, std::size_t F, double* currents,
+    const double* current_derivative, const double* dm1,
+    const unsigned char* trigger, const unsigned char* active, double mass,
+    double dt, double* acceleration, double* velocity, double* position,
+    double* force, StateKernelConfig config, cudaStream_t stream) noexcept {
+    return launch_state_update_masked_impl(
+        B, S, F, currents, current_derivative, dm1, trigger, active, mass, dt,
+        acceleration, velocity, position, force, config, stream,
+        LaunchValidation::Trusted);
+}
+
+} // namespace detail
 
 } // namespace coilgun::simulation::cuda

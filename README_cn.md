@@ -42,7 +42,7 @@ include/coilgun/   — 公开头文件（核心类型、物理层、组件层、
 src/               — 库实现（静态库 libcoilgun.a）
 tests/             — 单元测试与集成测试（doctest/CTest）
 tools/             — T(q,p) 查表生成工具
-docs/              — 文档（API 参考中/英文、数值模型、review/性能报告、benchmark 记录）
+docs/              — 文档（API 参考中/英文、数值模型、构建与测试参考）
 .references/       — 参考论文 PDF（gitignored，仅本地）
 ```
 
@@ -68,18 +68,6 @@ cmake --build --preset cuda-debug
 ctest --preset cuda-debug
 ctest --preset cuda-debug -L gpu
 ```
-
-仅用于测量的 CUDA benchmark 同时包含 CPU Reference 行，并记录 Direct、
-Graph、Persistent 请求、Fallback、批量大小、求解器和热路径计时。由于结果
-依赖机器，它不加入默认构建：
-
-```sh
-cmake --build --preset cuda-debug --target bench_gpu_engine
-./build/cuda-debug/src/cuda/bench_gpu_engine
-```
-
-RTX 5080 Laptop 的测量结果以及 Persistent 诚实回退状态见
-[benchmark 记录](docs/benchmarks/2026-07-19-unified-gpu-engine.md)。
 
 同步 GPU 方法接口在 Euler 下与 CPU API 对齐。GPU 单级/多级 RK4 实例当前在步进时会抛出 `std::logic_error`；RK4 请使用 CPU 实现。
 
@@ -178,7 +166,7 @@ ctest --preset cpu-debug -L validation
 ctest --preset cuda-debug -L gpu
 ```
 
-GPU 测试使用共享资源锁。需要物理 CUDA 设备的测试在无设备时 skip；真实 GPU CI 还必须检查上面的执行报告条件。`bench_gpu_engine` 不是 CTest 目标，必须显式运行。
+GPU 测试使用共享资源锁。需要物理 CUDA 设备的测试在无设备时 skip；真实 GPU CI 还必须检查上面的执行报告条件。
 
 ---
 
@@ -187,9 +175,6 @@ GPU 测试使用共享资源锁。需要物理 CUDA 设备的测试在无设备�
 - [API 参考（英文）](docs/API.md) — 完整 C++ 函数与类 API
 - [API 参考（中文）](docs/API_cn.md) — 中文版
 - [数值模型](docs/NumericalModel.md) — 物理推导与算法详解
-- [GPU benchmark 记录](docs/benchmarks/2026-07-19-unified-gpu-engine.md) — 机器相关的执行测量和回退状态
-- [性能 Review](docs/PerformanceReview.md) — 全项目性能发现与 review 收束记录
-- [优化成效](docs/benchmarks/2026-07-24-PerformanceOptimizationEffectiveness.md) — 本轮优化前后 benchmark 对比
 
 ---
 

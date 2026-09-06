@@ -11,6 +11,7 @@
 #include "gpu_engine_fixture.hpp"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -283,6 +284,87 @@ TEST_CASE("CUDA device solver preserves assembly input and reports residual") {
     CHECK(residual < 1.0e-12);
 }
 
+TEST_CASE("CUDA device residual preserves large-dimension validation") {
+    if (!gpu_available()) {
+        MESSAGE("CUDA device unavailable; skipping large-dimension residual test");
+        return;
+    }
+
+    constexpr std::size_t batch_size = 2;
+    constexpr std::size_t dimension = 129;
+    GpuExecutionContext context;
+    GpuSolver solver(context, SolverMode::Batched,
+                     SolverBatchLayout{batch_size, dimension});
+    REQUIRE(solver.initialize_workspace().ok);
+
+    std::vector<double> matrices(batch_size * dimension * dimension, 0.0);
+    std::vector<double> rhs(batch_size * dimension, 2.0);
+    for (std::size_t batch = 0; batch < batch_size; ++batch)
+        for (std::size_t diagonal = 0; diagonal < dimension; ++diagonal)
+            matrices[batch * dimension * dimension + diagonal * dimension + diagonal] = 2.0;
+
+    DeviceAllocation<double> device_matrices(matrices.size());
+    DeviceAllocation<double> device_rhs(rhs.size());
+    DeviceAllocation<double> device_solution(rhs.size());
+    DeviceAllocation<double> device_residual(batch_size);
+    REQUIRE(cudaMemcpyAsync(device_matrices.get(), matrices.data(),
+                            matrices.size() * sizeof(double), cudaMemcpyHostToDevice,
+                            context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(device_rhs.get(), rhs.data(),
+                            rhs.size() * sizeof(double), cudaMemcpyHostToDevice,
+                            context.stream()) == cudaSuccess);
+
+    REQUIRE(solver.solve_device(
+        DeviceMatrixView{device_matrices.get(), batch_size, dimension},
+        DeviceVectorView{device_rhs.get(), batch_size, dimension},
+        DeviceVectorView{device_solution.get(), batch_size, dimension},
+        DeviceResidualView{device_residual.get(), batch_size}).ok);
+    REQUIRE(solver.validate_device_result(
+                DeviceResidualView{device_residual.get(), batch_size}).ok);
+
+    std::vector<double> residual(batch_size, -1.0);
+    REQUIRE(cudaMemcpy(residual.data(), device_residual.get(),
+                       residual.size() * sizeof(double), cudaMemcpyDeviceToHost) == cudaSuccess);
+    for (const double value : residual) CHECK(value < 1.0e-12);
+}
+
+TEST_CASE("CUDA device solver defers singular-system failure to validation") {
+    if (!gpu_available()) {
+        MESSAGE("CUDA device unavailable; skipping deferred device status test");
+        return;
+    }
+
+    GpuExecutionContext context;
+    GpuSolver solver(context, SolverMode::Batched, SolverBatchLayout{2, 2});
+    REQUIRE(solver.initialize_workspace().ok);
+    const std::array<double, 8> matrices{
+        2.0, 0.0, 0.0, 2.0,
+        0.0, 0.0, 0.0, 0.0};
+    const std::array<double, 4> rhs{2.0, 4.0, 1.0, 1.0};
+    DeviceAllocation<double> device_matrices(matrices.size());
+    DeviceAllocation<double> device_rhs(rhs.size());
+    DeviceAllocation<double> device_solution(rhs.size());
+    DeviceAllocation<double> device_residual(2);
+    REQUIRE(cudaMemcpy(device_matrices.get(), matrices.data(), sizeof(matrices),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+    REQUIRE(cudaMemcpy(device_rhs.get(), rhs.data(), sizeof(rhs),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+
+    const SolverStatus enqueue_status = solver.solve_device(
+        DeviceMatrixView{device_matrices.get(), 2, 2},
+        DeviceVectorView{device_rhs.get(), 2, 2},
+        DeviceVectorView{device_solution.get(), 2, 2},
+        DeviceResidualView{device_residual.get(), 2});
+
+    REQUIRE(enqueue_status.ok);
+    const SolverStatus validation_status = solver.validate_device_result(
+        DeviceResidualView{device_residual.get(), 2});
+    CHECK_FALSE(validation_status.ok);
+    CHECK(validation_status.failure == SolverFailure::FactorizationFailed);
+    CHECK(validation_status.failed_batch == 1);
+    CHECK(validation_status.backend_info != 0);
+}
+
 TEST_CASE("CUDA device solver reuses a stable output view across repeated solves") {
     if (!gpu_available()) {
         MESSAGE("CUDA device unavailable; skipping repeated device solver test");
@@ -373,6 +455,181 @@ TEST_CASE("CUDA batched solver reuses host staging after initialization") {
     REQUIRE(solver.solve_batch(matrices.data(), rhs.data(), solutions.data()).ok);
     REQUIRE(solver.solve_batch(matrices.data(), rhs.data(), solutions.data()).ok);
     CHECK(solver.workspace().allocation_count == allocations);
+}
+
+TEST_CASE("CUDA device solver skips inactive identity rows") {
+    if (!gpu_available()) {
+        MESSAGE("CUDA device unavailable; skipping inactive-row solver test");
+        return;
+    }
+
+    constexpr std::size_t batch_size = 128;
+    constexpr std::size_t dimension = 32;
+    constexpr int warmup = 3;
+    constexpr int samples = 8;
+    GpuExecutionContext context;
+    GpuSolver solver(context, SolverMode::Batched,
+                     SolverBatchLayout{batch_size, dimension});
+    REQUIRE(solver.initialize_workspace().ok);
+
+    std::vector<double> active_matrix(batch_size * dimension * dimension, 0.0);
+    std::vector<double> inactive_matrix(batch_size * dimension * dimension, 0.0);
+    std::vector<double> rhs(batch_size * dimension, 0.0);
+    std::vector<std::uint8_t> all_active(batch_size, 1);
+    std::vector<std::uint8_t> all_inactive(batch_size, 0);
+    for (std::size_t batch = 0; batch < batch_size; ++batch) {
+        for (std::size_t diagonal = 0; diagonal < dimension; ++diagonal) {
+            active_matrix[batch * dimension * dimension + diagonal * dimension + diagonal] = 2.0;
+            inactive_matrix[batch * dimension * dimension + diagonal * dimension + diagonal] = 1.0;
+        }
+    }
+    DeviceAllocation<double> d_active(active_matrix.size());
+    DeviceAllocation<double> d_inactive(inactive_matrix.size());
+    DeviceAllocation<double> d_rhs(rhs.size());
+    DeviceAllocation<double> d_solution(rhs.size());
+    DeviceAllocation<double> d_residual(batch_size);
+    DeviceAllocation<std::uint8_t> d_all_active(batch_size);
+    DeviceAllocation<std::uint8_t> d_all_inactive(batch_size);
+    REQUIRE(cudaMemcpyAsync(d_active.get(), active_matrix.data(), sizeof(double) * active_matrix.size(),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(d_inactive.get(), inactive_matrix.data(), sizeof(double) * inactive_matrix.size(),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(d_rhs.get(), rhs.data(), sizeof(double) * rhs.size(),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(d_all_active.get(), all_active.data(), all_active.size(),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(d_all_inactive.get(), all_inactive.data(), all_inactive.size(),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+
+    const auto elapsed = [&](double* matrix, const std::uint8_t* active_mask,
+                             std::size_t active_count) {
+        for (int repeat = 0; repeat < warmup; ++repeat) {
+            REQUIRE(solver.solve_device(
+                DeviceMatrixView{matrix, batch_size, dimension, active_mask, active_count},
+                DeviceVectorView{d_rhs.get(), batch_size, dimension},
+                DeviceVectorView{d_solution.get(), batch_size, dimension},
+                DeviceResidualView{d_residual.get(), batch_size}).ok);
+            REQUIRE(solver.validate_device_result(
+                DeviceResidualView{d_residual.get(), batch_size}).ok);
+        }
+        const auto start = std::chrono::steady_clock::now();
+        for (int repeat = 0; repeat < samples; ++repeat) {
+            REQUIRE(solver.solve_device(
+                DeviceMatrixView{matrix, batch_size, dimension, active_mask, active_count},
+                DeviceVectorView{d_rhs.get(), batch_size, dimension},
+                DeviceVectorView{d_solution.get(), batch_size, dimension},
+                DeviceResidualView{d_residual.get(), batch_size}).ok);
+            REQUIRE(solver.validate_device_result(
+                DeviceResidualView{d_residual.get(), batch_size}).ok);
+        }
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+
+    const double active_ms = elapsed(d_active.get(), d_all_active.get(), batch_size);
+    const double inactive_ms = elapsed(d_inactive.get(), d_all_inactive.get(), 0);
+    CHECK(inactive_ms < active_ms * 0.80);
+
+    std::vector<std::uint8_t> mixed_mask(batch_size, 0);
+    std::vector<double> mixed_rhs(rhs.size(), 0.0);
+    for (std::size_t batch = 0; batch < batch_size; batch += 2) {
+        mixed_mask[batch] = 1;
+        for (std::size_t row = 0; row < dimension; ++row)
+            mixed_rhs[batch * dimension + row] = 2.0;
+    }
+    DeviceAllocation<std::uint8_t> d_mixed_mask(batch_size);
+    DeviceAllocation<double> d_mixed_rhs(mixed_rhs.size());
+    REQUIRE(cudaMemcpyAsync(d_mixed_mask.get(), mixed_mask.data(), mixed_mask.size(),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(d_mixed_rhs.get(), mixed_rhs.data(),
+                            sizeof(double) * mixed_rhs.size(), cudaMemcpyHostToDevice,
+                            context.stream()) == cudaSuccess);
+    REQUIRE(solver.solve_device(
+        DeviceMatrixView{d_active.get(), batch_size, dimension, d_mixed_mask.get(), batch_size / 2},
+        DeviceVectorView{d_mixed_rhs.get(), batch_size, dimension},
+        DeviceVectorView{d_solution.get(), batch_size, dimension},
+        DeviceResidualView{d_residual.get(), batch_size}).ok);
+    REQUIRE(solver.validate_device_result(
+        DeviceResidualView{d_residual.get(), batch_size}).ok);
+    std::vector<double> mixed_solution(mixed_rhs.size(), -1.0);
+    REQUIRE(cudaMemcpy(mixed_solution.data(), d_solution.get(),
+                       sizeof(double) * mixed_solution.size(), cudaMemcpyDeviceToHost) == cudaSuccess);
+    for (std::size_t batch = 0; batch < batch_size; ++batch) {
+        for (std::size_t row = 0; row < dimension; ++row) {
+            const double expected = mixed_mask[batch] != 0 ? 1.0 : 0.0;
+            CHECK(mixed_solution[batch * dimension + row] == doctest::Approx(expected));
+        }
+    }
+
+    for (const std::size_t ratio_active_count :
+         {std::size_t{0}, batch_size / 4, batch_size / 2,
+          (batch_size * 3) / 4, batch_size}) {
+        std::fill(mixed_mask.begin(), mixed_mask.end(), 0);
+        std::fill(mixed_rhs.begin(), mixed_rhs.end(), 0.0);
+        for (std::size_t batch = 0; batch < ratio_active_count; ++batch) {
+            mixed_mask[batch] = 1;
+            for (std::size_t row = 0; row < dimension; ++row)
+                mixed_rhs[batch * dimension + row] = 2.0;
+        }
+        REQUIRE(cudaMemcpyAsync(d_mixed_mask.get(), mixed_mask.data(), mixed_mask.size(),
+                                cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+        REQUIRE(cudaMemcpyAsync(d_mixed_rhs.get(), mixed_rhs.data(),
+                                sizeof(double) * mixed_rhs.size(), cudaMemcpyHostToDevice,
+                                context.stream()) == cudaSuccess);
+        REQUIRE(solver.solve_device(
+            DeviceMatrixView{d_active.get(), batch_size, dimension, d_mixed_mask.get(),
+                             ratio_active_count},
+            DeviceVectorView{d_mixed_rhs.get(), batch_size, dimension},
+            DeviceVectorView{d_solution.get(), batch_size, dimension},
+            DeviceResidualView{d_residual.get(), batch_size}).ok);
+        REQUIRE(solver.validate_device_result(
+            DeviceResidualView{d_residual.get(), batch_size}).ok);
+        REQUIRE(cudaMemcpy(mixed_solution.data(), d_solution.get(),
+                           sizeof(double) * mixed_solution.size(), cudaMemcpyDeviceToHost) == cudaSuccess);
+        for (std::size_t batch = 0; batch < batch_size; ++batch) {
+            const double expected = batch < ratio_active_count ? 1.0 : 0.0;
+            for (std::size_t row = 0; row < dimension; ++row)
+                CHECK(mixed_solution[batch * dimension + row] == doctest::Approx(expected));
+        }
+    }
+}
+
+TEST_CASE("CUDA device solver ignores residuals for inactive rows") {
+    if (!gpu_available()) {
+        MESSAGE("CUDA device unavailable; skipping inactive residual test");
+        return;
+    }
+
+    constexpr std::size_t batch_size = 2;
+    constexpr std::size_t dimension = 2;
+    GpuExecutionContext context;
+    GpuSolver solver(context, SolverMode::Batched,
+                     SolverBatchLayout{batch_size, dimension});
+    REQUIRE(solver.initialize_workspace().ok);
+
+    const std::array<double, 8> matrices{1.0, 0.0, 0.0, 1.0,
+                                         1.0, 0.0, 0.0, 1.0};
+    const std::array<double, 4> rhs{2.0, 3.0, 11.0, 13.0};
+    const std::array<std::uint8_t, 2> active{1, 0};
+    DeviceAllocation<double> d_matrix(matrices.size());
+    DeviceAllocation<double> d_rhs(rhs.size());
+    DeviceAllocation<double> d_solution(rhs.size());
+    DeviceAllocation<double> d_residual(batch_size);
+    DeviceAllocation<std::uint8_t> d_active(active.size());
+    REQUIRE(cudaMemcpyAsync(d_matrix.get(), matrices.data(), sizeof(matrices),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(d_rhs.get(), rhs.data(), sizeof(rhs),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(d_active.get(), active.data(), active.size(),
+                            cudaMemcpyHostToDevice, context.stream()) == cudaSuccess);
+
+    REQUIRE(solver.solve_device(
+        DeviceMatrixView{d_matrix.get(), batch_size, dimension, d_active.get(), 1},
+        DeviceVectorView{d_rhs.get(), batch_size, dimension},
+        DeviceVectorView{d_solution.get(), batch_size, dimension},
+        DeviceResidualView{d_residual.get(), batch_size}).ok);
+    CHECK(solver.validate_device_result(
+        DeviceResidualView{d_residual.get(), batch_size}).ok);
 }
 
 TEST_CASE("Engine exposes one resolved policy and one calibration report") {

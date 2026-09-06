@@ -1,15 +1,40 @@
 #include <doctest/doctest.h>
 
 #include "coilgun/simulation/cuda/gpu_graph.hpp"
+#include "coilgun/simulation/cuda/gpu_execution_report.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #if defined(COILGUN_CUDA_AVAILABLE)
 #include <cuda_runtime_api.h>
 #endif
 
 using namespace coilgun::simulation::cuda;
+
+TEST_CASE("backend selection reasons have stable report vocabulary") {
+    CHECK(to_string(BackendSelectionReason::None) == std::string("none"));
+    CHECK(to_string(BackendSelectionReason::AutoGraphReplay) ==
+          std::string("auto-graph-replay"));
+    CHECK(to_string(BackendSelectionReason::CapabilityFallback) ==
+          std::string("capability-fallback"));
+}
+
+TEST_CASE("report merge preserves selection reason and detects conflicts") {
+    ExecutionReport total;
+    total.backend_selection_reason = BackendSelectionReason::AutoGraphReplay;
+    ExecutionReport matching;
+    matching.backend_selection_reason = BackendSelectionReason::AutoGraphReplay;
+    total.merge(matching);
+    CHECK_FALSE(total.metadata_conflict);
+
+    ExecutionReport conflicting;
+    conflicting.backend_selection_reason = BackendSelectionReason::ExplicitRequest;
+    total.merge(conflicting);
+    CHECK(total.metadata_conflict);
+    CHECK(total.backend_selection_reason == BackendSelectionReason::AutoGraphReplay);
+}
 
 TEST_CASE("graph variant key includes stage signature and execution modes") {
     GpuGraphVariantKey first;
@@ -200,6 +225,42 @@ TEST_CASE("CUDA graph capture instantiates once and replays repeatedly") {
     CHECK(cache.replay_count() == 2);
 
     cudaFree(device_value);
+    cudaStreamDestroy(stream);
+}
+
+TEST_CASE("CUDA graph capture body failure leaves the stream usable") {
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+        MESSAGE("CUDA device unavailable; skipping graph capture failure test");
+        return;
+    }
+
+    cudaStream_t stream = nullptr;
+    REQUIRE(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) == cudaSuccess);
+    GpuGraphCache cache;
+    GpuGraphVariantKey key;
+    bool threw = false;
+    GraphCaptureStatus result;
+    try {
+        result = cache.capture_and_select(
+            key, stream, [](cudaStream_t) -> GraphCaptureStatus {
+                throw std::runtime_error("capture body failed");
+            });
+    } catch (...) {
+        threw = true;
+    }
+
+    CHECK_FALSE(threw);
+    CHECK_FALSE(result.ok);
+    CHECK(result.failure.phase == GraphCapturePhase::CaptureBody);
+    CHECK(result.failure.message == "capture body failed");
+    CHECK(result.failure.fallback_locked);
+    CHECK(cache.fallback_locked());
+
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    REQUIRE(cudaStreamIsCapturing(stream, &capture_status) == cudaSuccess);
+    CHECK(capture_status == cudaStreamCaptureStatusNone);
+    REQUIRE(cudaStreamSynchronize(stream) == cudaSuccess);
     cudaStreamDestroy(stream);
 }
 #endif

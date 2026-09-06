@@ -65,6 +65,45 @@ TEST_CASE("disabled thermal mode is absent from the engine pipeline") {
                     PipelineStage::Thermal) == engine.pipeline_order().end());
 }
 
+TEST_CASE("GPU thermal snapshot is skipped outside the GPU thermal path") {
+    if (!require_cuda()) return;
+
+    auto disabled_geometry = gpu_test::geometry(1, 1, true);
+    auto disabled_state = gpu_test::state(1, 1, 1, true);
+    GpuExecutionConfig disabled_config;
+    disabled_config.backend = BackendMode::Direct;
+    disabled_config.solver = SolverMode::Batched;
+    disabled_config.thermal = ThermalMode::Disabled;
+    GpuEngine disabled(std::move(disabled_geometry), std::move(disabled_state), disabled_config);
+    disabled.step();
+    CHECK(disabled.report().gpu_thermal_snapshot_count == 0);
+
+    auto cpu_geometry = gpu_test::geometry(1, 1, true);
+    auto cpu_state = gpu_test::state(1, 1, 1, true);
+    GpuExecutionConfig cpu_config;
+    cpu_config.backend = BackendMode::Direct;
+    cpu_config.solver = SolverMode::Batched;
+    cpu_config.thermal = ThermalMode::Cpu;
+    GpuEngine cpu(std::move(cpu_geometry), std::move(cpu_state), cpu_config);
+    cpu.step();
+    CHECK(cpu.report().gpu_thermal_snapshot_count == 0);
+
+    auto thermal_geometry = gpu_test::geometry(1, 1, true);
+    auto thermal_state = gpu_test::state(1, 1, 1, true);
+    GpuExecutionConfig thermal_config;
+    thermal_config.backend = BackendMode::Direct;
+    thermal_config.solver = SolverMode::Batched;
+    thermal_config.thermal = ThermalMode::Gpu;
+    GpuEngine thermal(std::move(thermal_geometry), std::move(thermal_state), thermal_config);
+    const auto thermal_allocations = thermal.device_allocation_count();
+    thermal.step();
+    CHECK(thermal.report().gpu_thermal_snapshot_count == 1);
+    thermal.reset();
+    CHECK(thermal.device_allocation_count() == thermal_allocations);
+    thermal.step();
+    CHECK(thermal.report().gpu_thermal_snapshot_count == 2);
+}
+
 TEST_CASE("engine reuses persistent CUDA pipeline allocations across steps") {
     if (!require_cuda()) return;
     auto geometry = gpu_test::geometry(2, 2, true);
@@ -130,6 +169,38 @@ TEST_CASE("state kernels preserve CPU Euler ordering for B=1") {
     CHECK(currents[1] == doctest::Approx(3.0 - 2.0 * dt));
     CHECK(currents[2] == doctest::Approx(-1.0 + 3.0 * dt));
     CHECK(currents[3] == doctest::Approx(0.5 + 4.0 * dt));
+}
+
+TEST_CASE("state kernels reject reduction blocks larger than shared storage") {
+    if (!require_cuda()) return;
+
+    constexpr std::size_t B = 1;
+    constexpr std::size_t S = 1;
+    constexpr std::size_t F = 1;
+    const std::array<double, B * (S + F)> currents{1.0, 2.0};
+    const std::array<double, B * S * F> dm1{1.0};
+    const std::array<double, B * (S + F)> derivative{0.0, 0.0};
+    const std::array<double, B> zeros{0.0};
+    double* d_currents = device_copy(currents.data(), currents.size());
+    double* d_dm1 = device_copy(dm1.data(), dm1.size());
+    double* d_derivative = device_copy(derivative.data(), derivative.size());
+    double* d_acceleration = device_copy(zeros.data(), B);
+    double* d_velocity = device_copy(zeros.data(), B);
+    double* d_position = device_copy(zeros.data(), B);
+    double* d_force = device_copy(zeros.data(), B);
+
+    CHECK(launch_state_update(
+              B, S, F, d_currents, d_derivative, d_dm1, nullptr,
+              1.0, 1.0, d_acceleration, d_velocity, d_position, d_force,
+              StateKernelConfig{true, 1024}) == cudaErrorInvalidValue);
+
+    cudaFree(d_currents);
+    cudaFree(d_dm1);
+    cudaFree(d_derivative);
+    cudaFree(d_acceleration);
+    cudaFree(d_velocity);
+    cudaFree(d_position);
+    cudaFree(d_force);
 }
 
 TEST_CASE("state kernels reduce independent batch members deterministically") {

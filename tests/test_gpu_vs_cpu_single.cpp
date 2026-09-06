@@ -5,6 +5,7 @@
 #include "coilgun/components/armature.hpp"
 #include "coilgun/simulation/excitation.hpp"
 #include "coilgun/physics/constants.hpp"
+#include "coilgun/physics/mutual_inductance.hpp"
 #include "gpu_engine_fixture.hpp"
 #include <algorithm>
 #include <memory>
@@ -112,6 +113,8 @@ TEST_CASE("GPU single-stage exposes the unified engine execution report") {
           coilgun::simulation::cuda::PrecisionMode::Standard);
     CHECK(sim.execution_report().requested_backend ==
           coilgun::simulation::cuda::BackendMode::Direct);
+    CHECK(sim.execution_report().requested_solver == SolverMode::Auto);
+    CHECK(sim.execution_report().solver == SolverMode::Eigen);
     const bool direct_or_fallback =
         sim.execution_report().backend == coilgun::simulation::cuda::BackendMode::Direct ||
         sim.execution_report().backend == coilgun::simulation::cuda::BackendMode::Fallback;
@@ -713,6 +716,79 @@ TEST_CASE("GPU single-stage honors a short termination policy") {
     CHECK(sim.step_count() == 3);
 }
 
+TEST_CASE("GPU single-stage velocity termination uses the committed engine force") {
+    constexpr double dt = 1e-6;
+    DrivingCoil coil(0.01, 0.03, 0.01, 150, COPPER.resistivity_ref, 1e-6, 0.7);
+    Armature arm(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 2'000.0, 1e-4, 5, 2, -0.05);
+    auto excitation = std::make_unique<CrowbarExcitation>(450.0, 0.001);
+    GpuBackend backend;
+    backend.backend = BackendMode::Fallback;
+    backend.use_persistent = false;
+    GpuSingleStageSim<EulerStepper> sim(
+        coil, arm, std::move(excitation), dt, false, GpuOptLevel::Full, backend);
+
+    sim.step();
+    sim.step();
+    REQUIRE(sim.result().history.size() == 2);
+    REQUIRE(sim.result().history.back().arm_velocity <
+            sim.result().history.front().arm_velocity);
+
+    const double committed_acceleration =
+        std::abs(sim.result().history.back().force / arm.mass());
+    double recomputed_force = 0.0;
+    const double filament_length = arm.length() / arm.axial_filaments();
+    for (int k = 0; k < arm.total_filaments(); ++k) {
+        const int radial = k % arm.radial_filaments() + 1;
+        const int axial = k / arm.radial_filaments() + 1;
+        const double relative = arm.filament_axial_position(axial) - arm.position();
+        const double separation = sim.state().arm_position + relative - coil.position();
+        const double gradient = coilgun::physics::mutual_inductance_gradient_coil(
+            coil.inner_radius(), coil.outer_radius(), coil.length(), coil.turns(),
+            arm.filament_inner_radius(radial), arm.filament_outer_radius(radial),
+            filament_length, 1, separation, 9, false);
+        recomputed_force += sim.state().currents(0) * sim.state().currents(k + 1) *
+                            gradient;
+    }
+    const double recomputed_acceleration = std::abs(recomputed_force / arm.mass());
+    REQUIRE(recomputed_acceleration > committed_acceleration);
+
+    coilgun::simulation::TerminationPolicy policy;
+    policy.max_steps = 3;
+    policy.enable_bound_check = false;
+    policy.enable_velocity_check = true;
+    policy.velocity_decay_steps = 1;
+    policy.accel_threshold =
+        0.5 * (committed_acceleration + recomputed_acceleration);
+    sim.run(policy);
+
+    CHECK(sim.step_count() == 2);
+    CHECK(sim.result().history.size() == 2);
+}
+
+TEST_CASE("GPU single-stage velocity termination waits for a committed engine force") {
+    DrivingCoil coil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7);
+    Armature arm(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref, ALUMINUM.density,
+                 0.0, 0.120, 5, 2, 0.05);
+    auto excitation = std::make_unique<CrowbarExcitation>(450.0, 0.001);
+    GpuBackend backend;
+    backend.backend = BackendMode::Fallback;
+    backend.use_persistent = false;
+    GpuSingleStageSim<EulerStepper> sim(
+        coil, arm, std::move(excitation), 1e-6, false, GpuOptLevel::Full, backend);
+
+    coilgun::simulation::TerminationPolicy policy;
+    policy.max_steps = 1;
+    policy.enable_bound_check = false;
+    policy.enable_velocity_check = true;
+    policy.velocity_decay_steps = 0;
+    policy.accel_threshold = 1.0;
+    sim.run(policy);
+
+    CHECK(sim.step_count() == 1);
+    CHECK(sim.result().history.size() == 1);
+}
+
 TEST_CASE("GPU single-stage summary max_force matches CPU peak absolute force") {
     DrivingCoil cpu_coil(0.01, 0.03, 0.05, 150, COPPER.resistivity_ref, 1e-6, 0.7);
     Armature cpu_arm(0.005, 0.025, 0.08, ALUMINUM.resistivity_ref, ALUMINUM.density,
@@ -772,6 +848,8 @@ TEST_CASE("GPU single-stage thermal state and reset remain wrapper-compatible") 
     CHECK(sim.execution_report().thermal != coilgun::simulation::cuda::ThermalMode::Disabled);
     const auto fallback_count = sim.execution_report().fallback_count;
     const auto graph_rebuild_count = sim.execution_report().graph_rebuild_count;
+    const auto requested_solver = sim.execution_report().requested_solver;
+    const auto resolved_solver = sim.execution_report().solver;
     sim.reset();
     CHECK(sim.step_count() == 0);
     CHECK(sim.result().history.empty());
@@ -783,6 +861,8 @@ TEST_CASE("GPU single-stage thermal state and reset remain wrapper-compatible") 
         CHECK(sim.filament_resistances()[i] == doctest::Approx(arm.resistances()[i]));
     CHECK(sim.execution_report().fallback_count == fallback_count);
     CHECK(sim.execution_report().graph_rebuild_count == graph_rebuild_count);
+    CHECK(sim.execution_report().requested_solver == requested_solver);
+    CHECK(sim.execution_report().solver == resolved_solver);
 }
 
 TEST_CASE("GPU single-stage reset reruns the same first state, history, thermal, and diagnostics") {
