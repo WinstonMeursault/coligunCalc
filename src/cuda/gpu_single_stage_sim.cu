@@ -173,16 +173,6 @@ double GpuSingleStageSim<SP>::compute_recorded_force() const {
 }
 
 template<typename SP>
-double GpuSingleStageSim<SP>::compute_recorded_force() const {
-    const auto& gradients = engine_->state().dm1;
-    double force = 0.0;
-    for (std::size_t k = 0; k < engine_->layout().F; ++k)
-        force -= state_.currents(0) * state_.currents(static_cast<Eigen::Index>(k + 1)) *
-            gradients[k];
-    return force;
-}
-
-template<typename SP>
 void GpuSingleStageSim<SP>::record_step(double force) {
     SimStep entry;
     entry.time = step_count_ * dt_;

@@ -68,6 +68,8 @@ TEST_CASE("GPU backend defaults to graph and validates launch settings") {
     CHECK_THROWS_AS(backend.validate(), std::invalid_argument);
     backend.threads_per_block = 512;
     backend.device_id = -1;
+    CHECK_NOTHROW(backend.validate());   // -1: automatic first-discrete GPU
+    backend.device_id = -2;
     CHECK_THROWS_AS(backend.validate(), std::invalid_argument);
     backend.device_id = 0;
     backend.max_batch_sims = 0;

@@ -1,4 +1,5 @@
 #include "coilgun/simulation/cuda/gpu_thermal.hpp"
+#include "coilgun/simulation/cuda/device_queries.hpp"
 
 #include <cuda_runtime.h>
 
@@ -180,10 +181,9 @@ void ThermalWorkspace::update(const MaterialTables& tables, ThermalPrecision pre
     const auto count = batch_count * filament_count;
     if (count > std::numeric_limits<std::size_t>::max() - 255)
         throw std::invalid_argument("thermal launch size overflow");
-    cudaDeviceProp properties{};
-    int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess || cudaGetDeviceProperties(&properties, device) != cudaSuccess ||
-        (count + 255) / 256 > static_cast<std::size_t>(properties.maxGridSize[0]))
+    std::size_t grid_limits[3] = {};
+    if (!coilgun::simulation::cuda::detail::device_max_grid(grid_limits) ||
+        (count + 255) / 256 > grid_limits[0])
         throw std::invalid_argument("thermal launch exceeds device grid limits");
     for (std::size_t i = 0; i < count; ++i) {
         if (materials[i] != 0 && materials[i] != 1 ||

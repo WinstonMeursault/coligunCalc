@@ -1,10 +1,12 @@
 #include <cmath>
+#include <initializer_list>
 #include <doctest/doctest.h>
 
 #include "coilgun/physics/elliptic.hpp"
 
 using coilgun::physics::elliptic_e;
 using coilgun::physics::elliptic_k;
+using coilgun::physics::elliptic_ke;
 using coilgun::physics::elliptic_modulus;
 
 namespace {
@@ -22,6 +24,20 @@ TEST_CASE("elliptic_k") {
 TEST_CASE("elliptic_e") {
     CHECK(elliptic_e(0.0) == doctest::Approx(PI_OVER_2).epsilon(1e-12));
     CHECK(elliptic_e(0.5) == doctest::Approx(1.3506438810476755).epsilon(1e-12));
+}
+
+TEST_CASE("elliptic_ke matches the individual complete integrals") {
+    for (const double m : {0.0, 0.5}) {
+        const auto combined = elliptic_ke(m);
+        CHECK(combined.k == doctest::Approx(elliptic_k(m)).epsilon(1e-12));
+        CHECK(combined.e == doctest::Approx(elliptic_e(m)).epsilon(1e-12));
+    }
+
+    // Boost's ellint_1 loses several digits at this extreme modulus; use
+    // high-precision reference values for the AGM boundary case instead.
+    const auto near_singular = elliptic_ke(1.0 - 1.0e-12);
+    CHECK(near_singular.k == doctest::Approx(15.201815980070119).epsilon(1e-12));
+    CHECK(near_singular.e == doctest::Approx(1.0000000000073519).epsilon(1e-12));
 }
 
 TEST_CASE("elliptic_modulus") {

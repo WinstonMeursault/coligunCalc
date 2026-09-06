@@ -16,15 +16,6 @@ using namespace coilgun::simulation::cuda;
 
 namespace {
 
-bool require_cuda() {
-    int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
-        MESSAGE("CUDA device unavailable; skipping state-kernel test");
-        return false;
-    }
-    return true;
-}
-
 template <typename T>
 T* device_copy(const T* host, std::size_t count) {
     T* device = nullptr;
@@ -66,7 +57,7 @@ TEST_CASE("disabled thermal mode is absent from the engine pipeline") {
 }
 
 TEST_CASE("GPU thermal snapshot is skipped outside the GPU thermal path") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
 
     auto disabled_geometry = gpu_test::geometry(1, 1, true);
     auto disabled_state = gpu_test::state(1, 1, 1, true);
@@ -105,7 +96,7 @@ TEST_CASE("GPU thermal snapshot is skipped outside the GPU thermal path") {
 }
 
 TEST_CASE("engine reuses persistent CUDA pipeline allocations across steps") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
     auto geometry = gpu_test::geometry(2, 2, true);
     auto state = gpu_test::state(1, 2, 2, true);
     GpuExecutionConfig config;
@@ -128,7 +119,7 @@ TEST_CASE("engine reuses persistent CUDA pipeline allocations across steps") {
 }
 
 TEST_CASE("state kernels preserve CPU Euler ordering for B=1") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
 
     constexpr std::size_t B = 1;
     constexpr std::size_t S = 1;
@@ -172,7 +163,7 @@ TEST_CASE("state kernels preserve CPU Euler ordering for B=1") {
 }
 
 TEST_CASE("state kernels reject reduction blocks larger than shared storage") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
 
     constexpr std::size_t B = 1;
     constexpr std::size_t S = 1;
@@ -204,7 +195,7 @@ TEST_CASE("state kernels reject reduction blocks larger than shared storage") {
 }
 
 TEST_CASE("state kernels reduce independent batch members deterministically") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
 
     constexpr std::size_t B = 2;
     constexpr std::size_t S = 2;
@@ -253,7 +244,7 @@ TEST_CASE("state kernels reduce independent batch members deterministically") {
 }
 
 TEST_CASE("state kernels parallelize high-dimensional masked current updates") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
 
     constexpr std::size_t B = 2;
     constexpr std::size_t S = 1;
@@ -322,7 +313,7 @@ TEST_CASE("persistent buffers expose generation protocol and are safely reusable
 }
 
 TEST_CASE("requested graph backend is reported honestly and remains selected across steps") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
 
     auto geometry = gpu_test::geometry();
     auto state = gpu_test::state(1, 1, 1);
@@ -355,7 +346,7 @@ TEST_CASE("unavailable graph backend locks the engine to reported fallback") {
 }
 
 TEST_CASE("requested persistent backend reports runtime protocol failure") {
-    if (!require_cuda()) return;
+    if (!cuda_device_available()) return;
 
     auto geometry = gpu_test::geometry(1, 2);
     auto state = gpu_test::state(1, 1, 2);

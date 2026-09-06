@@ -71,6 +71,7 @@ SingleStageSim<SP>::SingleStageSim(
 
     build_filament_M_matrix();
     workspace_.resize(1, static_cast<std::size_t>(N_fil_));
+    initialize_constant_matrix_block();
 
     auto& physical = integration_state_.physical;
     physical.currents = Eigen::VectorXd::Zero(N_fil_ + 1);
@@ -122,6 +123,20 @@ Eigen::VectorXd SingleStageSim<SP>::derive_resistance(const SimState& state) con
 }
 
 template<typename SP>
+void SingleStageSim<SP>::initialize_constant_matrix_block() {
+    // The filament-filament block (L_fil_ diagonal + M_mat_ off-diagonal) is
+    // state-independent: write it once and let evaluate_derivatives touch
+    // only row/column 0.
+    auto& matrix = workspace_.system_matrix;
+    for (int filament = 0; filament < N_fil_; ++filament) {
+        const int row = filament + 1;
+        matrix(row, row) = L_fil_(filament);
+        for (int other = 0; other < N_fil_; ++other)
+            if (filament != other) matrix(row, other + 1) = M_mat_(filament, other);
+    }
+}
+
+template<typename SP>
 double SingleStageSim<SP>::compute_force(
     const SimState& state, const Eigen::VectorXd& mutual_gradient) const {
     double force = 0.0;
@@ -152,10 +167,13 @@ DerivativeResult SingleStageSim<SP>::evaluate_derivatives(
         CpuPhaseTimingScope thermal_timing(CpuPhase::Thermal);
         workspace.resistance = derive_resistance(state);
     } else {
-        workspace.resistance = derive_resistance(state);
+        workspace.resistance = R_fil_ref_;
     }
 #else
-    workspace.resistance = derive_resistance(state);
+    if (enable_thermal_)
+        workspace.resistance = derive_resistance(state);
+    else
+        workspace.resistance = R_fil_ref_;
 #endif
 
 {
@@ -180,16 +198,16 @@ DerivativeResult SingleStageSim<SP>::evaluate_derivatives(
 #if COILGUN_ENABLE_CPU_PHASE_TIMING
     CpuPhaseTimingScope assembly_timing(CpuPhase::Assembly);
 #endif
-    matrix.setZero();
+    // Only row/column 0 change per evaluation; the filament-filament block is
+    // constant for the whole simulation (initialized in the constructor).
+    matrix.row(0).segment(1, N_fil_).setZero();
+    matrix.col(0).segment(1, N_fil_).setZero();
     matrix(0, 0) = circuit_active ? L_d_ : 1.0;
-    for (int filament = 0; filament < N_fil_; ++filament) {
-        if (circuit_active) {
+    if (circuit_active) {
+        for (int filament = 0; filament < N_fil_; ++filament) {
             matrix(0, filament + 1) = mutual(filament);
             matrix(filament + 1, 0) = mutual(filament);
         }
-        matrix(filament + 1, filament + 1) = L_fil_(filament);
-        for (int other = 0; other < N_fil_; ++other)
-            if (filament != other) matrix(filament + 1, other + 1) = M_mat_(filament, other);
     }
 
     double motional_emf = 0.0;
@@ -206,16 +224,18 @@ DerivativeResult SingleStageSim<SP>::evaluate_derivatives(
 }
 
     DerivativeResult result;
-    result.physical_derivative.currents.resize(N_fil_ + 1);
 {
 #if COILGUN_ENABLE_CPU_PHASE_TIMING
     CpuPhaseTimingScope solve_timing(CpuPhase::Solve);
 #endif
-    Eigen::LDLT<Eigen::MatrixXd> solver(matrix);
-    if (solver.info() == Eigen::Success)
-        result.physical_derivative.currents = solver.solve(rhs);
-    else
+    auto& solver = workspace.ldlt;
+    solver.compute(matrix);
+    if (solver.info() == Eigen::Success) {
+        solver.solveInPlace(rhs);
+        result.physical_derivative.currents = rhs;
+    } else {
         result.physical_derivative.currents = matrix.colPivHouseholderQr().solve(rhs);
+    }
     if (!result.physical_derivative.currents.allFinite())
         throw std::runtime_error("single-stage circuit solve produced non-finite derivatives");
 }
@@ -329,8 +349,22 @@ IntegrationState SingleStageSim<SP>::advance_rk4_segment(
 
     auto post = clone_integration_state(pre);
     auto weighted = k1.physical_derivative;
-    weighted += 2.0 * k2.physical_derivative;
-    weighted += 2.0 * k3.physical_derivative;
+    // Scaling by 2.0 is exact in binary floating point, so accumulating the
+    // scaled terms in place matches the previous temporary-based arithmetic.
+    weighted.currents += 2.0 * k2.physical_derivative.currents;
+    weighted.arm_position += 2.0 * k2.physical_derivative.arm_position;
+    weighted.arm_velocity += 2.0 * k2.physical_derivative.arm_velocity;
+    if (weighted.filament_temperatures.size() != 0 &&
+        k2.physical_derivative.filament_temperatures.size() != 0)
+        weighted.filament_temperatures +=
+            2.0 * k2.physical_derivative.filament_temperatures;
+    weighted.currents += 2.0 * k3.physical_derivative.currents;
+    weighted.arm_position += 2.0 * k3.physical_derivative.arm_position;
+    weighted.arm_velocity += 2.0 * k3.physical_derivative.arm_velocity;
+    if (weighted.filament_temperatures.size() != 0 &&
+        k3.physical_derivative.filament_temperatures.size() != 0)
+        weighted.filament_temperatures +=
+            2.0 * k3.physical_derivative.filament_temperatures;
     weighted += k4.physical_derivative;
     post.physical += (dt / 6.0) * weighted;
     ExcitationDerivative derivative;
@@ -465,11 +499,12 @@ void SingleStageSim<SP>::prepare_summary() {
 
 template<typename SP>
 const SimStep& SingleStageSim<SP>::step() {
-    const IntegrationState pre = clone_integration_state(integration_state_);
+    // The advance functions never write through their input, so the member
+    // state can be passed directly; make_trial/advance clone what they mutate.
     if constexpr (std::is_same_v<SP, RK4Stepper>)
-        integration_state_ = advance_rk4_event_aware(pre, dt_);
+        integration_state_ = advance_rk4_event_aware(integration_state_, dt_);
     else
-        integration_state_ = advance_euler(pre, dt_);
+        integration_state_ = advance_euler(integration_state_, dt_);
     excitation_->restore(*integration_state_.excitations.front());
     record_step((step_count_ + 1) * dt_);
     ++step_count_;

@@ -280,8 +280,11 @@ GpuAssemblySnapshot GpuEngine::assemble_device_for_test() {
 }
 
 bool cuda_device_available() noexcept {
-    int count = 0;
-    return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
+    const int device = preferred_cuda_device();
+    if (device < 0) return false;
+    // Make the preferred device current so callers that run raw runtime APIs
+    // after this gate (tests allocate buffers directly) land on it.
+    return cudaSetDevice(device) == cudaSuccess;
 }
 
 std::unique_ptr<GpuExecutionContext> make_gpu_execution_context() {
@@ -601,8 +604,18 @@ void GpuEngine::record_runtime_failure(const SolverStatus& status) {
     select_graph_variant_at_boundary();
 }
 
+void GpuEngine::take_solver_state_snapshots() {
+    auto& workspace = step_workspace_;
+    if (workspace.solver_snapshots_valid) return;
+    workspace.matrices_snapshot = matrices_;
+    workspace.rhs_snapshot = rhs_;
+    workspace.solution_snapshot = solution_;
+    workspace.solver_snapshots_valid = true;
+}
+
 void GpuEngine::execute_solver_step() {
     if (!solver_) return;
+    take_solver_state_snapshots();
 
     const auto B = layout_.B;
     const auto D = layout_.D;

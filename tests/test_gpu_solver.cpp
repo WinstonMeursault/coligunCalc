@@ -23,10 +23,6 @@
 using namespace coilgun::simulation::cuda;
 
 namespace {
-bool gpu_available() {
-    int count = 0;
-    return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
-}
 
 template<typename T>
 class DeviceAllocation {
@@ -188,7 +184,7 @@ TEST_CASE("Moved-from solver is safe to query and use") {
 }
 
 TEST_CASE("CUDA solver performs FP64 column-major batched LU without solve allocations") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping batched LU test");
         return;
     }
@@ -221,7 +217,7 @@ TEST_CASE("CUDA solver performs FP64 column-major batched LU without solve alloc
 }
 
 TEST_CASE("CUDA solver reports the failed batch and backend info") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping batched LU diagnostics test");
         return;
     }
@@ -243,7 +239,7 @@ TEST_CASE("CUDA solver reports the failed batch and backend info") {
 }
 
 TEST_CASE("CUDA device solver preserves assembly input and reports residual") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping device solver test");
         return;
     }
@@ -285,7 +281,7 @@ TEST_CASE("CUDA device solver preserves assembly input and reports residual") {
 }
 
 TEST_CASE("CUDA device residual preserves large-dimension validation") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping large-dimension residual test");
         return;
     }
@@ -329,7 +325,7 @@ TEST_CASE("CUDA device residual preserves large-dimension validation") {
 }
 
 TEST_CASE("CUDA device solver defers singular-system failure to validation") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping deferred device status test");
         return;
     }
@@ -366,7 +362,7 @@ TEST_CASE("CUDA device solver defers singular-system failure to validation") {
 }
 
 TEST_CASE("CUDA device solver reuses a stable output view across repeated solves") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping repeated device solver test");
         return;
     }
@@ -417,7 +413,7 @@ TEST_CASE("CUDA device solver reuses a stable output view across repeated solves
 }
 
 TEST_CASE("CUDA context operations preserve the caller's current device") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping context device guard test");
         return;
     }
@@ -439,7 +435,7 @@ TEST_CASE("CUDA context operations preserve the caller's current device") {
 }
 
 TEST_CASE("CUDA batched solver reuses host staging after initialization") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping staging reuse test");
         return;
     }
@@ -458,7 +454,7 @@ TEST_CASE("CUDA batched solver reuses host staging after initialization") {
 }
 
 TEST_CASE("CUDA device solver skips inactive identity rows") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping inactive-row solver test");
         return;
     }
@@ -595,7 +591,7 @@ TEST_CASE("CUDA device solver skips inactive identity rows") {
 }
 
 TEST_CASE("CUDA device solver ignores residuals for inactive rows") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping inactive residual test");
         return;
     }
@@ -641,7 +637,7 @@ TEST_CASE("Engine exposes one resolved policy and one calibration report") {
     config.enable_calibration = true;
     GpuEngine engine(std::move(geometry), std::move(state), config);
 
-    const bool has_gpu = gpu_available();
+    const bool has_gpu = cuda_device_available();
     CHECK(engine.policy().solver == (has_gpu ? SolverMode::Batched : SolverMode::Eigen));
     CHECK(engine.graph_variant().solver == engine.policy().solver);
     CHECK(engine.report().solver == engine.policy().solver);
@@ -656,7 +652,7 @@ TEST_CASE("Engine exposes one resolved policy and one calibration report") {
 }
 
 TEST_CASE("Engine reports fallback when graph execution is not implemented") {
-    if (!gpu_available()) {
+    if (!cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping engine resource test");
         return;
     }

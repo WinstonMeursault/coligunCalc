@@ -62,13 +62,17 @@ struct GpuExecutionConfig {
     ThermalMode thermal = ThermalMode::Auto;
     bool enable_calibration = false;
     bool deterministic = false;
-    int device_id = 0;
+    // -1 requests automatic device placement: the first discrete
+    // (non-integrated) CUDA device, resolved when the engine initializes.
+    int device_id = -1;
     int threads_per_block = 512;
     // Request metadata copied to ExecutionReport. Host-wall timing categories
     // are collected independently; this flag does not enable NVTX.
     bool enable_profiling = false;
     void validate() const {
-        if (device_id < 0) throw std::invalid_argument("GPU device_id must not be negative");
+        if (device_id < -1)
+            throw std::invalid_argument(
+                "GPU device_id must be -1 (automatic) or a non-negative device index");
         if (threads_per_block <= 0) {
             throw std::invalid_argument("GPU threads_per_block must be positive");
         }
