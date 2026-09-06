@@ -8,6 +8,15 @@
 namespace coilgun::optimization {
 namespace {
 
+void validate_bounds(double lower, double upper) {
+    if (!std::isfinite(lower) || !std::isfinite(upper) || lower > upper)
+        throw std::invalid_argument("variable bounds must be finite and ordered");
+}
+
+bool is_known_variable_type(VariableType type) {
+    return type == VariableType::Continuous || type == VariableType::Integer || type == VariableType::Enum;
+}
+
 double repair_bounded(double value, double lower, double upper) {
     if (std::isnan(value) || value == -std::numeric_limits<double>::infinity()) return lower;
     if (value == std::numeric_limits<double>::infinity()) return upper;
@@ -17,12 +26,17 @@ double repair_bounded(double value, double lower, double upper) {
 } // namespace
 
 VariableSpec VariableSpec::continuous(std::string id, double lower, double upper) {
+    validate_bounds(lower, upper);
     return VariableSpec{std::move(id), VariableType::Continuous, lower, upper, {}};
 }
 
 VariableSpec VariableSpec::integer(std::string id, long long lower, long long upper) {
-    return VariableSpec{std::move(id), VariableType::Integer, static_cast<double>(lower),
-                        static_cast<double>(upper), {}};
+    const double lower_bound = static_cast<double>(lower);
+    const double upper_bound = static_cast<double>(upper);
+    validate_bounds(lower_bound, upper_bound);
+    if (std::trunc(lower_bound) != lower_bound || std::trunc(upper_bound) != upper_bound)
+        throw std::invalid_argument("integer variable bounds must be integral");
+    return VariableSpec{std::move(id), VariableType::Integer, lower_bound, upper_bound, {}};
 }
 
 VariableSpec VariableSpec::enumeration(std::string id, std::vector<std::string> values) {
@@ -36,9 +50,12 @@ VariableSchema::VariableSchema(std::vector<VariableSpec> variables) : variables_
     for (const auto& variable : variables_) {
         if (variable.id.empty()) throw std::invalid_argument("variable ID must not be empty");
         if (!ids.insert(variable.id).second) throw std::invalid_argument("duplicate variable ID: " + variable.id);
-        if (!std::isfinite(variable.lower_bound) || !std::isfinite(variable.upper_bound) ||
-            variable.lower_bound > variable.upper_bound) {
-            throw std::invalid_argument("variable bounds must be finite and ordered");
+        if (!is_known_variable_type(variable.type)) throw std::invalid_argument("unknown variable type");
+        validate_bounds(variable.lower_bound, variable.upper_bound);
+        if (variable.type == VariableType::Integer &&
+            (std::trunc(variable.lower_bound) != variable.lower_bound ||
+             std::trunc(variable.upper_bound) != variable.upper_bound)) {
+            throw std::invalid_argument("integer variable bounds must be integral");
         }
         if (variable.type == VariableType::Enum &&
             (variable.enum_values.empty() || variable.lower_bound != 0.0 ||

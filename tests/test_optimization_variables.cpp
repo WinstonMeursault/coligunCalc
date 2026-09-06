@@ -57,6 +57,29 @@ TEST_CASE("schema construction rejects invalid bounds, enum definitions, and dup
     CHECK_THROWS_AS(VariableSchema({VariableSpec::enumeration("mode", {})}), std::invalid_argument);
 }
 
+TEST_CASE("schema construction rejects non-finite or non-integral integer bounds") {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    CHECK_THROWS_AS(VariableSchema({VariableSpec{"fractional", VariableType::Integer, 0.5, 2.0, {}}}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(VariableSchema({VariableSpec{"infinite", VariableType::Integer, 0.0,
+                                                  std::numeric_limits<double>::infinity(), {}}}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(VariableSchema({VariableSpec{"nan", VariableType::Integer, nan, 2.0, {}}}),
+                    std::invalid_argument);
+}
+
+TEST_CASE("schema construction rejects unknown variable types") {
+    const auto unknown = static_cast<VariableType>(99);
+    CHECK_THROWS_AS(VariableSchema({VariableSpec{"unknown", unknown, 0.0, 1.0, {}}}),
+                    std::invalid_argument);
+}
+
+TEST_CASE("continuous factory validates its bounds") {
+    CHECK_THROWS_AS(VariableSpec::continuous("x", 2.0, 1.0), std::invalid_argument);
+    CHECK_THROWS_AS(VariableSpec::continuous("x", -std::numeric_limits<double>::infinity(), 1.0),
+                    std::invalid_argument);
+}
+
 TEST_CASE("repair rejects candidate dimensionality mismatch without mutating input or schema") {
     const VariableSchema schema({VariableSpec::continuous("x", 0.0, 1.0)});
     const CandidateVariables input{{2.0}};
