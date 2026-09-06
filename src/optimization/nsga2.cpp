@@ -16,6 +16,9 @@ struct ObjectiveView {
     const std::vector<ObjectiveDefinition>* definitions = nullptr;
 
     double oriented(const Candidate& candidate, std::size_t objective) const {
+        if (candidate.evaluation_status != EvaluationStatus::Success ||
+            objective >= candidate.objectives.size())
+            return inf;
         const auto& value = candidate.objectives[objective];
         if (definitions != nullptr && !definitions->empty()) {
             try {
@@ -32,13 +35,27 @@ struct ObjectiveView {
 void validate_input(const std::vector<Candidate>& candidates,
                     const std::vector<ObjectiveDefinition>& definitions) {
     std::size_t count = definitions.size();
-    if (candidates.empty() && definitions.empty()) return;
-    if (count == 0 && !candidates.empty()) count = candidates.front().objectives.size();
-    if (count < 2) throw std::invalid_argument("NSGA-II requires at least two objectives");
+    bool has_success = false;
     if (!definitions.empty()) {
         for (const auto& definition : definitions) definition.validate();
     }
+
+    // Failed and invalid evaluations are represented by empty objective lists.
+    // Infer the schema only from successful candidates and leave an entirely
+    // unsuccessful population objective-free (its candidates tie as infeasible).
+    if (count == 0) {
+        for (const auto& candidate : candidates) {
+            if (candidate.evaluation_status == EvaluationStatus::Success) {
+                has_success = true;
+                count = candidate.objectives.size();
+                break;
+            }
+        }
+    }
+    if (count != 0 && count < 2) throw std::invalid_argument("NSGA-II requires at least two objectives");
+    if (has_success && count == 0) throw std::invalid_argument("NSGA-II requires at least two objectives");
     for (const auto& candidate : candidates) {
+        if (candidate.evaluation_status != EvaluationStatus::Success) continue;
         if (candidate.objectives.size() != count)
             throw std::invalid_argument("all candidates must have the fixed objective count");
     }
@@ -46,7 +63,12 @@ void validate_input(const std::vector<Candidate>& candidates,
 
 std::size_t objective_count(const std::vector<Candidate>& candidates,
                             const std::vector<ObjectiveDefinition>& definitions) {
-    return definitions.empty() ? candidates.front().objectives.size() : definitions.size();
+    if (!definitions.empty()) return definitions.size();
+    for (const auto& candidate : candidates) {
+        if (candidate.evaluation_status == EvaluationStatus::Success)
+            return candidate.objectives.size();
+    }
+    return 0;
 }
 
 double hard_violation(const Candidate& candidate) {
@@ -61,7 +83,7 @@ bool dominates(const Candidate& lhs, const Candidate& rhs, const ObjectiveView& 
     const bool lhs_feasible = lhs_violation == 0.0;
     const bool rhs_feasible = rhs_violation == 0.0;
     if (lhs_feasible != rhs_feasible) return lhs_feasible;
-    if (!lhs_feasible && lhs_violation != rhs_violation) return lhs_violation < rhs_violation;
+    if (!lhs_feasible) return lhs_violation < rhs_violation;
 
     bool strictly_better = false;
     for (std::size_t i = 0; i < view.count; ++i) {

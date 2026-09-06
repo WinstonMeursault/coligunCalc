@@ -85,6 +85,40 @@ TEST_CASE("NSGA-II gives feasible candidates priority over infeasible candidates
     CHECK(ranking.fronts[2] == std::vector<std::size_t>{1});
 }
 
+TEST_CASE("NSGA-II ties infeasible candidates with equal total hard violation") {
+    // Candidate 1 would dominate candidate 0 by objectives alone. Constraint
+    // domination must treat equal-violation infeasible candidates as tied.
+    const auto ranking = nsga2_rank({constrained(0, 1.0, 1.0, 1.0),
+                                     constrained(1, 2.0, 2.0, 1.0)});
+    REQUIRE(ranking.fronts.size() == 1);
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{0, 1});
+    CHECK(ranking.ranks[0] == 0);
+    CHECK(ranking.ranks[1] == 0);
+}
+
+TEST_CASE("NSGA-II accepts failed candidates with empty objectives") {
+    Candidate failed;
+    failed.id = 0;
+    failed.evaluation_status = EvaluationStatus::Failed;
+    Candidate invalid;
+    invalid.id = 1;
+    invalid.evaluation_status = EvaluationStatus::Invalid;
+    Candidate another_failed;
+    another_failed.id = 2;
+    another_failed.evaluation_status = EvaluationStatus::Failed;
+
+    const auto failed_only = nsga2_rank({failed, invalid});
+    REQUIRE(failed_only.fronts.size() == 1);
+    CHECK(failed_only.fronts[0] == std::vector<std::size_t>{0, 1});
+
+    const auto mixed = nsga2_rank({failed, candidate(3, 1.0, 2.0), invalid, another_failed});
+    REQUIRE(mixed.fronts.size() == 2);
+    CHECK(mixed.fronts[0] == std::vector<std::size_t>{1});
+    CHECK(mixed.fronts[1] == std::vector<std::size_t>{0, 2, 3});
+    for (const auto index : mixed.fronts[1])
+        CHECK(std::isinf(mixed.crowding_distances[index]));
+}
+
 TEST_CASE("NSGA-II merges parents and offspring then truncates by rank and crowding") {
     std::vector<Candidate> parents{candidate(0, 0.0, 3.0), candidate(1, 1.0, 2.0)};
     std::vector<Candidate> offspring{candidate(2, 2.0, 1.0), candidate(3, 3.0, 0.0)};
