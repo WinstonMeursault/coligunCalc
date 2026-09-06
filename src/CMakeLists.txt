@@ -24,6 +24,8 @@ add_library(coilgun STATIC
   optimization/objective.cpp
   optimization/constraint.cpp
   optimization/comparator.cpp
+  optimization/cache.cpp
+  optimization/evaluator.cpp
 )
 
 target_include_directories(coilgun
