@@ -137,6 +137,7 @@ private:
     void complete_quiet_stages(IntegrationState& state) const;
     void     build_filament_M_matrix();
     void     precompute_M_cc();
+    void     initialize_constant_matrix_block();
     bool     is_stage_within_range(int stage_idx) const;
     double   compute_force(const MultiStageState& state,
                            const Eigen::MatrixXd& mutual_gradient,

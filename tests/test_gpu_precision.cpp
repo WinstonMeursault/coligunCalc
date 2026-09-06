@@ -102,8 +102,7 @@ SingleStageRun run_single_stage(GpuOptLevel mode, bool thermal = false) {
 
 TEST_CASE("GPU mutual pipeline uses fixed B-S-F indexing and active masks") {
     CHECK(mutual_pipeline_index(1, 2, 3, 4, 5) == 33);
-    int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    if (!coilgun::simulation::cuda::cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping mutual-kernel test");
         return;
     }

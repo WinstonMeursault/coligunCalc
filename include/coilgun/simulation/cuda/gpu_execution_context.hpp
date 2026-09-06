@@ -14,8 +14,19 @@
 
 namespace coilgun::simulation::cuda {
 
+/// Index of the preferred CUDA device: the first discrete (non-integrated)
+/// device, or device 0 when only integrated devices exist. Returns -1 when no
+/// usable CUDA device is present. The result is resolved once per process.
+int preferred_cuda_device() noexcept;
+
+/// True when a usable CUDA device exists; as a side effect the preferred
+/// device is made current (cudaSetDevice) so raw runtime calls after this
+/// gate land on it.
+bool cuda_device_available() noexcept;
+
 struct GpuExecutionContextConfig {
-    int device_id = 0;
+    // -1 requests automatic device placement via preferred_cuda_device().
+    int device_id = -1;
     unsigned int stream_flags = cudaStreamNonBlocking;
     std::size_t workspace_bytes = 0;
     // Metadata request only. Host-wall timings are recorded by GpuEngine and

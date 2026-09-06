@@ -1,5 +1,6 @@
 #include "coilgun/simulation/cuda/gpu_mutual_pipeline.hpp"
 #include "gpu_kernel_launch_detail.hpp"
+#include "coilgun/simulation/cuda/device_queries.hpp"
 #include "coilgun/physics/mutual_inductance.cuh"
 #include "coilgun/physics/quadrature.hpp"
 #include <cuda_runtime.h>
@@ -144,20 +145,10 @@ void launch_mutual_pipeline_impl(const MutualPipelineView& view, GpuOptLevel opt
     if (!view.coils || !view.filaments || !view.separations || !view.active_mask
         || !view.mutual || !view.gradient)
         throw std::invalid_argument("mutual pipeline requires non-null buffers");
-    const auto device_pointer = [](const void* pointer) {
-        cudaPointerAttributes attributes{};
-        const auto status = cudaPointerGetAttributes(&attributes, pointer);
-#if CUDART_VERSION >= 10000
-        return status == cudaSuccess &&
-               (attributes.type == cudaMemoryTypeDevice || attributes.type == cudaMemoryTypeManaged);
-#else
-        return status == cudaSuccess && attributes.memoryType == cudaMemoryTypeDevice;
-#endif
-    };
     if (validate_buffers &&
-        (!device_pointer(view.coils) || !device_pointer(view.filaments) ||
-         !device_pointer(view.separations) || !device_pointer(view.active_mask) ||
-         !device_pointer(view.mutual) || !device_pointer(view.gradient)))
+        (!detail::is_device_pointer(view.coils) || !detail::is_device_pointer(view.filaments) ||
+         !detail::is_device_pointer(view.separations) || !detail::is_device_pointer(view.active_mask) ||
+         !detail::is_device_pointer(view.mutual) || !detail::is_device_pointer(view.gradient)))
         throw std::invalid_argument("mutual pipeline buffers must be device-accessible");
     if (view.batch_size == 0 || view.stage_count == 0 || view.filament_count == 0
         || view.batch_size > 0x7fffffff || view.stage_count > 0x7fffffff
@@ -179,13 +170,11 @@ void launch_mutual_pipeline_impl(const MutualPipelineView& view, GpuOptLevel opt
     // Geometry buffers are device-resident. Validate their host-side source
     // data before upload; dereferencing them here would be an invalid host read.
     if (validate_buffers) {
-        int current_device = -1;
-        cudaDeviceProp properties{};
-        if (cudaGetDevice(&current_device) != cudaSuccess || current_device < 0 ||
-            cudaGetDeviceProperties(&properties, current_device) != cudaSuccess ||
-            view.filament_count > static_cast<std::size_t>(properties.maxGridSize[0]) ||
-            view.stage_count > static_cast<std::size_t>(properties.maxGridSize[1]) ||
-            view.batch_size > static_cast<std::size_t>(properties.maxGridSize[2]))
+        std::size_t grid_limits[3] = {};
+        if (!detail::device_max_grid(grid_limits) ||
+            view.filament_count > grid_limits[0] ||
+            view.stage_count > grid_limits[1] ||
+            view.batch_size > grid_limits[2])
             throw std::invalid_argument("mutual pipeline grid exceeds device limits");
     }
 

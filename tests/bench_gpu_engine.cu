@@ -550,9 +550,9 @@ void print_runtime_metadata(bool cuda_available, int device_count) {
 } // namespace
 
 int main() {
+    const bool cuda_available = coilgun::simulation::cuda::cuda_device_available();
     int device_count = 0;
-    const auto device_status = cudaGetDeviceCount(&device_count);
-    const bool cuda_available = device_status == cudaSuccess && device_count > 0;
+    (void)cudaGetDeviceCount(&device_count);
     print_runtime_metadata(cuda_available, device_count);
 
     const std::vector<Case> cases = {
