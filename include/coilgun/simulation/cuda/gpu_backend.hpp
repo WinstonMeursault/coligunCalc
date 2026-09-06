@@ -33,7 +33,9 @@ enum class GpuOptLevel {
  * @brief GPU backend configuration.
  */
 struct GpuBackend {
-    int     device_id         = 0;    ///< cudaSetDevice target.
+    // -1 requests automatic device placement: the first discrete
+    // (non-integrated) CUDA device, resolved when the engine initializes.
+    int     device_id         = -1;   ///< cudaSetDevice target; -1 selects automatically.
     int     threads_per_block = 512;  ///< Threads per block for integration kernel.
     size_t  max_batch_sims    = 256;  ///< Pre-allocated buffer size for batch mode.
     bool    enable_profiling  = false; ///< Retain profiling-request metadata; host-wall timing fields are always collected. No NVTX guarantee.
@@ -55,7 +57,9 @@ struct GpuBackend {
         default:
             throw std::invalid_argument("GPU backend mode is invalid");
         }
-        if (device_id < 0) throw std::invalid_argument("GPU device_id must not be negative");
+        if (device_id < -1)
+            throw std::invalid_argument(
+                "GPU device_id must be -1 (automatic) or a non-negative device index");
         if (threads_per_block <= 0 || threads_per_block > 512 ||
             (threads_per_block & (threads_per_block - 1)) != 0) {
             throw std::invalid_argument("GPU threads_per_block must be a positive power of two no greater than 512");

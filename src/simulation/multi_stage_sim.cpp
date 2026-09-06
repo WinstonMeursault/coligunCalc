@@ -107,6 +107,7 @@ MultiStageSim<SP>::MultiStageSim(
     precompute_M_cc();
     workspace_.resize(static_cast<std::size_t>(n_stages_),
                       static_cast<std::size_t>(N_fil_));
+    initialize_constant_matrix_block();
 
     auto& physical = integration_state_.physical;
     physical.currents = Eigen::VectorXd::Zero(n_stages_ + N_fil_);
@@ -176,6 +177,21 @@ void MultiStageSim<SP>::precompute_M_cc() {
 }
 
 template<typename SP>
+void MultiStageSim<SP>::initialize_constant_matrix_block() {
+    // The filament-filament block (L_fil_ diagonal + M_mat_ off-diagonal) is
+    // independent of the simulation state, so it is written once here and
+    // preserved across evaluations; evaluate_derivatives only rewrites the
+    // stage rows and the coupling strips.
+    auto& matrix = workspace_.system_matrix;
+    for (int filament = 0; filament < N_fil_; ++filament) {
+        const int row = n_stages_ + filament;
+        matrix(row, row) = L_fil_(filament);
+        for (int other = 0; other < N_fil_; ++other)
+            if (filament != other) matrix(row, n_stages_ + other) = M_mat_(filament, other);
+    }
+}
+
+template<typename SP>
 bool MultiStageSim<SP>::is_stage_within_range(int stage) const {
     if (opt_level_ != OptimizationLevel::Full) return true;
     return std::abs(integration_state_.physical.arm_position - coils_[stage].position()) <=
@@ -226,14 +242,21 @@ DerivativeResult MultiStageSim<SP>::evaluate_derivatives(
         CpuPhaseTimingScope thermal_timing(CpuPhase::Thermal);
         workspace.resistance = derive_resistance(state.physical);
     } else {
-        workspace.resistance = derive_resistance(state.physical);
+        workspace.resistance = R_fil_ref_;
     }
 #else
-    workspace.resistance = derive_resistance(state.physical);
+    if (enable_thermal_)
+        workspace.resistance = derive_resistance(state.physical);
+    else
+        workspace.resistance = R_fil_ref_;
 #endif
     auto& matrix = workspace.system_matrix;
     auto& rhs = workspace.rhs;
-    matrix.setZero();
+    // The filament-filament block is constant for the whole simulation
+    // (initialized in the constructor) and is deliberately not zeroed here.
+    matrix.topLeftCorner(n_stages_, n_stages_).setZero();
+    matrix.topRightCorner(n_stages_, N_fil_).setZero();
+    matrix.bottomLeftCorner(N_fil_, n_stages_).setZero();
     rhs.setZero();
 
     Eigen::Map<Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> mutual(
@@ -251,20 +274,21 @@ DerivativeResult MultiStageSim<SP>::evaluate_derivatives(
     for (int stage = 0; stage < n_stages_; ++stage) {
         const auto& runtime = state.stages[stage];
         if (!runtime.circuit_active || !is_stage_within_range(stage)) continue;
+        const auto& coil = coils_[stage];
+        const double coil_position = coil.position();
+        const int nodes =
+            (opt_level_ == OptimizationLevel::Full &&
+             std::abs(state.physical.arm_position - coil_position) > coil.length())
+                ? 4 : 9;
 #pragma omp parallel for if (N_fil_ >= 8)
         for (int filament = 0; filament < N_fil_; ++filament) {
             const double separation =
                 state.physical.arm_position +
                 filament_relative_axial_positions_[filament] -
-                coils_[stage].position();
-            int nodes = 9;
-            if (opt_level_ == OptimizationLevel::Full &&
-                std::abs(state.physical.arm_position - coils_[stage].position()) >
-                    coils_[stage].length())
-                nodes = 4;
+                coil_position;
             const auto pair = physics::mutual_detail::mutual_inductance_coil_pair(
-                coils_[stage].inner_radius(), coils_[stage].outer_radius(),
-                coils_[stage].length(), coils_[stage].turns(),
+                coil.inner_radius(), coil.outer_radius(),
+                coil.length(), coil.turns(),
                 filament_inner_radii_[filament], filament_outer_radii_[filament],
                 filament_lengths_[filament], 1,
                 separation, nodes, false);
@@ -295,12 +319,6 @@ DerivativeResult MultiStageSim<SP>::evaluate_derivatives(
             }
         }
     }
-    for (int filament = 0; filament < N_fil_; ++filament) {
-        const int row = n_stages_ + filament;
-        matrix(row, row) = L_fil_(filament);
-        for (int other = 0; other < N_fil_; ++other)
-            if (filament != other) matrix(row, n_stages_ + other) = M_mat_(filament, other);
-    }
 
     const double velocity = state.physical.arm_velocity;
     for (int stage = 0; stage < n_stages_; ++stage) {
@@ -328,16 +346,18 @@ DerivativeResult MultiStageSim<SP>::evaluate_derivatives(
 }
 
     DerivativeResult result;
-    result.physical_derivative.currents.resize(dimension);
 {
 #if COILGUN_ENABLE_CPU_PHASE_TIMING
     CpuPhaseTimingScope solve_timing(CpuPhase::Solve);
 #endif
-    Eigen::LDLT<Eigen::MatrixXd> solver(matrix);
-    if (solver.info() == Eigen::Success)
-        result.physical_derivative.currents = solver.solve(rhs);
-    else
+    auto& solver = workspace.ldlt;
+    solver.compute(matrix);
+    if (solver.info() == Eigen::Success) {
+        solver.solveInPlace(rhs);
+        result.physical_derivative.currents = rhs;
+    } else {
         result.physical_derivative.currents = matrix.colPivHouseholderQr().solve(rhs);
+    }
     if (!result.physical_derivative.currents.allFinite())
         throw std::runtime_error("multi-stage circuit solve produced non-finite derivatives");
 }
@@ -495,8 +515,22 @@ IntegrationState MultiStageSim<SP>::advance_rk4_segment(
 
     auto post = clone_integration_state(pre);
     auto physical = k1.physical_derivative;
-    physical += 2.0 * k2.physical_derivative;
-    physical += 2.0 * k3.physical_derivative;
+    // Scaling by 2.0 is exact in binary floating point, so accumulating the
+    // scaled terms in place matches the previous temporary-based arithmetic.
+    physical.currents += 2.0 * k2.physical_derivative.currents;
+    physical.arm_position += 2.0 * k2.physical_derivative.arm_position;
+    physical.arm_velocity += 2.0 * k2.physical_derivative.arm_velocity;
+    if (physical.filament_temperatures.size() != 0 &&
+        k2.physical_derivative.filament_temperatures.size() != 0)
+        physical.filament_temperatures +=
+            2.0 * k2.physical_derivative.filament_temperatures;
+    physical.currents += 2.0 * k3.physical_derivative.currents;
+    physical.arm_position += 2.0 * k3.physical_derivative.arm_position;
+    physical.arm_velocity += 2.0 * k3.physical_derivative.arm_velocity;
+    if (physical.filament_temperatures.size() != 0 &&
+        k3.physical_derivative.filament_temperatures.size() != 0)
+        physical.filament_temperatures +=
+            2.0 * k3.physical_derivative.filament_temperatures;
     physical += k4.physical_derivative;
     post.physical += (dt / 6.0) * physical;
     for (int stage = 0; stage < n_stages_; ++stage) {
@@ -693,11 +727,12 @@ void MultiStageSim<SP>::prepare_summary() {
 
 template<typename SP>
 const MultiStageStep& MultiStageSim<SP>::step() {
-    const auto pre = clone_integration_state(integration_state_);
+    // The advance functions clone their input before mutating anything, so
+    // the member state can be passed directly without an extra copy here.
     if constexpr (std::is_same_v<SP, RK4Stepper>)
-        integration_state_ = advance_rk4_event_aware(pre, dt_);
+        integration_state_ = advance_rk4_event_aware(integration_state_, dt_);
     else
-        integration_state_ = advance_euler(pre, dt_);
+        integration_state_ = advance_euler(integration_state_, dt_);
     for (int stage = 0; stage < n_stages_; ++stage)
         excitations_[stage]->restore(*integration_state_.excitations[stage]);
     record_step((step_count_ + 1) * dt_);

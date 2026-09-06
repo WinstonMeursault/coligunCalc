@@ -16,6 +16,7 @@
 #include "coilgun/physics/quadrature.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <functional>
@@ -48,19 +49,21 @@ static M_cache grad_cache;
 constexpr double k_min = 1e-12;
 constexpr double k_max = 1.0 - 1e-12;
 
-mutual_detail::MutualPairResult compute_filament_pair(double radius_a,
-                                               double radius_b,
-                                               double separation) {
+// Common body of the closed-form filament pair; sqrt_ab is hoisted by callers
+// that evaluate many separations for the same radius pair.
+mutual_detail::MutualPairResult compute_filament_pair_with_sqrt_ab(
+        double radius_a, double radius_b, double sqrt_ab, double separation) {
     const double abs_separation = std::abs(separation);
     double k = elliptic_modulus(radius_a, radius_b, abs_separation);
     k = std::clamp(k, k_min, k_max);
     const double m = k * k;
     const double one_minus_m = 1.0 - m;
-    const double K = elliptic_k(m);
-    const double E = elliptic_e(m);
-    const double sqrt_ab = std::sqrt(radius_a * radius_b);
+    const auto ke = elliptic_ke(m);
+    const double K = ke.k;
+    const double E = ke.e;
+    const double inv2k = 2.0 / k;
     const double mutual = MU0 * sqrt_ab
-        * ((2.0 / k - k) * K - (2.0 / k) * E);
+        * ((inv2k - k) * K - inv2k * E);
 
     double gradient = 0.0;
     if (abs_separation >= 1e-16) {
@@ -70,6 +73,13 @@ mutual_detail::MutualPairResult compute_filament_pair(double radius_a,
                    / (4.0 * one_minus_m * sqrt_ab) * bracket;
     }
     return {mutual, gradient};
+}
+
+mutual_detail::MutualPairResult compute_filament_pair(double radius_a,
+                                               double radius_b,
+                                               double separation) {
+    return compute_filament_pair_with_sqrt_ab(
+        radius_a, radius_b, std::sqrt(radius_a * radius_b), separation);
 }
 
 mutual_detail::MutualPairResult filament_pair(double radius_a, double radius_b,
@@ -148,6 +158,14 @@ mutual_detail::MutualPairResult integrate_4d_pair(const F& integrand, int n_node
 
 namespace mutual_detail {
 
+namespace {
+
+// Stack-resident table bound for the fast quadrature path; larger requests
+// fall back to the generic integrand-driven loop.
+constexpr std::size_t k_stack_quadrature_nodes = 64;
+
+} // namespace
+
 MutualPairResult mutual_inductance_coil_pair(
         double rai, double rae, double la, int na,
         double rbi, double rbe, double lb, int nb,
@@ -158,6 +176,61 @@ MutualPairResult mutual_inductance_coil_pair(
     const double rb_half = 0.5 * (rbe - rbi);
     const double la_half = 0.5 * la;
     const double lb_half = 0.5 * lb;
+    const double prefactor = (na * nb) / 16.0;
+
+    const auto& gl = gauss_legendre_cached(n_nodes);
+    const std::size_t n = gl.nodes.size();
+
+    if (!use_cache && n <= k_stack_quadrature_nodes) {
+        // Radial/axial coordinates depend on a single quadrature axis and
+        // sqrt_ab on a radial pair, so precompute them once instead of at
+        // every one of the n^4 nodes. Node values and accumulation order
+        // match the generic path exactly.
+        std::array<double, k_stack_quadrature_nodes> nodes{};
+        std::array<double, k_stack_quadrature_nodes> weights{};
+        std::array<double, k_stack_quadrature_nodes> ra_axis{};
+        std::array<double, k_stack_quadrature_nodes> rb_axis{};
+        std::array<double, k_stack_quadrature_nodes> za_axis{};
+        std::array<double, k_stack_quadrature_nodes> zb_axis{};
+        std::array<double, k_stack_quadrature_nodes * k_stack_quadrature_nodes>
+            sqrt_ab{};
+        for (std::size_t i = 0; i < n; ++i) {
+            nodes[i] = gl.nodes[i];
+            weights[i] = gl.weights[i];
+            ra_axis[i] = map_coord(ra_mid, ra_half, nodes[i]);
+            rb_axis[i] = map_coord(rb_mid, rb_half, nodes[i]);
+            za_axis[i] = map_coord(0.0, la_half, nodes[i]);
+            zb_axis[i] = map_coord(separation, lb_half, nodes[i]);
+        }
+        for (std::size_t i1 = 0; i1 < n; ++i1) {
+            for (std::size_t i2 = 0; i2 < n; ++i2) {
+                sqrt_ab[i1 * n + i2] =
+                    std::sqrt(ra_axis[i1] * rb_axis[i2]);
+            }
+        }
+
+        MutualPairResult integral{0.0, 0.0};
+        for (std::size_t i1 = 0; i1 < n; ++i1) {
+            const double w1 = weights[i1];
+            for (std::size_t j1 = 0; j1 < n; ++j1) {
+                const double w2 = w1 * weights[j1];
+                const double za = za_axis[j1];
+                for (std::size_t i2 = 0; i2 < n; ++i2) {
+                    const double w3 = w2 * weights[i2];
+                    const double rb = rb_axis[i2];
+                    for (std::size_t j2 = 0; j2 < n; ++j2) {
+                        const double weight = w3 * weights[j2];
+                        const auto pair = compute_filament_pair_with_sqrt_ab(
+                            ra_axis[i1], rb, sqrt_ab[i1 * n + i2],
+                            zb_axis[j2] - za);
+                        integral.mutual += weight * pair.mutual;
+                        integral.gradient += weight * pair.gradient;
+                    }
+                }
+            }
+        }
+        return {prefactor * integral.mutual, prefactor * integral.gradient};
+    }
 
     auto kernel = [&](double r1, double z1, double r2, double z2) {
         const double ra = map_coord(ra_mid, ra_half, r1);
@@ -168,7 +241,6 @@ MutualPairResult mutual_inductance_coil_pair(
     };
 
     const auto integral = integrate_4d_pair(kernel, n_nodes);
-    const double prefactor = (na * nb) / 16.0;
     return {prefactor * integral.mutual, prefactor * integral.gradient};
 }
 

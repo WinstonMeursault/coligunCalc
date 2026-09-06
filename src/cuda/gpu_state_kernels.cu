@@ -1,5 +1,6 @@
 #include "coilgun/simulation/cuda/gpu_state_kernels.hpp"
 #include "gpu_kernel_launch_detail.hpp"
+#include "coilgun/simulation/cuda/device_queries.hpp"
 
 #include <cuda_runtime.h>
 
@@ -293,24 +294,14 @@ enum class LaunchValidation { Checked, Trusted };
 
 bool valid_grid(std::size_t blocks, LaunchValidation validation) {
     if (validation == LaunchValidation::Trusted) return true;
-    int device = 0;
-    cudaDeviceProp properties{};
-    return cudaGetDevice(&device) == cudaSuccess &&
-           cudaGetDeviceProperties(&properties, device) == cudaSuccess &&
-           blocks <= static_cast<std::size_t>(properties.maxGridSize[0]);
+    std::size_t limits[3] = {};
+    return detail::device_max_grid(limits) && blocks <= limits[0];
 }
 
 bool device_pointer(const void* pointer, LaunchValidation validation) {
     if (!pointer) return false;
     if (validation == LaunchValidation::Trusted) return true;
-    cudaPointerAttributes attributes{};
-    const auto status = cudaPointerGetAttributes(&attributes, pointer);
-#if CUDART_VERSION >= 10000
-    return status == cudaSuccess && (attributes.type == cudaMemoryTypeDevice ||
-                                     attributes.type == cudaMemoryTypeManaged);
-#else
-    return status == cudaSuccess && attributes.memoryType == cudaMemoryTypeDevice;
-#endif
+    return detail::is_device_pointer(pointer);
 }
 
 } // namespace

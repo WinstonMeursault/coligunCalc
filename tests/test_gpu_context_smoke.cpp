@@ -5,8 +5,7 @@
 #include <cuda_runtime_api.h>
 
 TEST_CASE("GPU execution context smoke") {
-    int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+    if (!coilgun::simulation::cuda::cuda_device_available()) {
         MESSAGE("CUDA device unavailable; skipping context smoke test");
         return;
     }
@@ -14,7 +13,9 @@ TEST_CASE("GPU execution context smoke") {
     int before = -1;
     REQUIRE(cudaGetDevice(&before) == cudaSuccess);
     {
-        coilgun::simulation::cuda::GpuExecutionContext context({0, cudaStreamNonBlocking, 4096});
+        coilgun::simulation::cuda::GpuExecutionContextConfig config;
+        config.workspace_bytes = 4096;
+        coilgun::simulation::cuda::GpuExecutionContext context(config);
         context.record_start();
         context.record_stop();
         context.synchronize();

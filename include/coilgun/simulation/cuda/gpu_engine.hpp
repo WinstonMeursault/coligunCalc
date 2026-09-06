@@ -56,7 +56,6 @@ struct GpuEngineFaultInjection {
 enum class PipelineStage { Mutual, Matrix, Solver, Force, Thermal, State };
 
 #if defined(COILGUN_CUDA_AVAILABLE)
-bool cuda_device_available() noexcept;
 std::unique_ptr<GpuExecutionContext> make_gpu_execution_context();
 #endif
 
@@ -227,6 +226,12 @@ public:
                                                 config.thermal == ThermalMode::Gpu,
                                                  capability,
                                                   config_)) {
+#if defined(COILGUN_CUDA_AVAILABLE)
+          // device_id < 0 requests automatic placement: the first discrete
+          // (non-integrated) CUDA device, resolved once so every runtime path
+          // observes the same concrete device.
+          if (config_.device_id < 0) config_.device_id = preferred_cuda_device();
+#endif
           fault_injection_ = fault_injection;
           if (geometry_.stage_mutual_inductances.empty()) {
               geometry_.stage_mutual_inductances.assign(
@@ -395,10 +400,10 @@ public:
         workspace.pipeline_snapshot = pipeline_order_;
         workspace.report_snapshot = report_;
         workspace.policy_snapshot = policy_;
-        workspace.matrices_snapshot = matrices_;
-        workspace.rhs_snapshot = rhs_;
-        workspace.solution_snapshot = solution_;
         workspace.derivatives_snapshot = current_derivatives_;
+        // matrices_/rhs_/solution_ are only written by the host fallback, so
+        // they are snapshotted lazily inside take_solver_state_snapshots().
+        workspace.solver_snapshots_valid = false;
         const auto& state_snapshot = workspace.state_snapshot;
         const auto& result_snapshot = workspace.result_snapshot;
         const auto& stage_mask_snapshot = workspace.stage_mask_snapshot;
@@ -428,9 +433,11 @@ public:
             pipeline_order_ = pipeline_snapshot;
             report_ = report_snapshot;
             policy_ = policy_snapshot;
-            matrices_ = matrices_snapshot;
-            rhs_ = rhs_snapshot;
-            solution_ = solution_snapshot;
+            if (workspace.solver_snapshots_valid) {
+                matrices_ = matrices_snapshot;
+                rhs_ = rhs_snapshot;
+                solution_ = solution_snapshot;
+            }
             current_derivatives_ = derivatives_snapshot;
             variant_valid_ = variant_valid_snapshot;
             fallback_locked_ = fallback_locked_snapshot;
@@ -449,9 +456,11 @@ public:
                 variant_ = variant_snapshot;
                 selected_variant_ = selected_variant_snapshot;
                 pipeline_order_ = pipeline_snapshot;
-                matrices_ = matrices_snapshot;
-                rhs_ = rhs_snapshot;
-                solution_ = solution_snapshot;
+                if (workspace.solver_snapshots_valid) {
+                    matrices_ = matrices_snapshot;
+                    rhs_ = rhs_snapshot;
+                    solution_ = solution_snapshot;
+                }
                 current_derivatives_ = derivatives_snapshot;
                 variant_valid_ = variant_valid_snapshot;
                 fallback_locked_ = true;
@@ -679,6 +688,10 @@ private:
         std::vector<double> rhs_snapshot;
         std::vector<double> solution_snapshot;
         std::vector<double> derivatives_snapshot;
+        // The solver mirror snapshots are taken lazily, right before the host
+        // fallback path first mutates matrices_/rhs_/solution_ in a step; the
+        // device path never writes them.
+        bool solver_snapshots_valid = false;
         std::vector<std::uint8_t> active_pairs;
         std::vector<double> stage_voltages;
         double control_time = 0.0;
@@ -944,7 +957,7 @@ private:
                             geometry_.stage_inner_radii[s], geometry_.stage_outer_radii[s],
                             geometry_.stage_lengths[s], geometry_.stage_turns[s],
                             geometry_.filament_inner_radii[f], geometry_.filament_outer_radii[f],
-                            geometry_.filament_lengths[f], 1, separation, 9, true);
+                            geometry_.filament_lengths[f], 1, separation, 9, false);
                         m = mutual_pair.mutual;
                         dm = mutual_pair.gradient;
                     }
@@ -970,6 +983,7 @@ private:
 
 #if defined(COILGUN_CUDA_AVAILABLE)
     void initialize_runtime();
+    void take_solver_state_snapshots();
     void execute_solver_step();
     void execute_physical_pipeline();
     void execute_persistent_mutual();

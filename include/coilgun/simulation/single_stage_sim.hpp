@@ -105,6 +105,7 @@ private:
                          const Eigen::VectorXd& mutual_gradient) const;
     Eigen::VectorXd derive_resistance(const SimState& state) const;
     void     build_filament_M_matrix();
+    void     initialize_constant_matrix_block();
     void     record_step(double post_time);
     bool     check_termination(const TerminationPolicy& policy);
     void     prepare_summary();
