@@ -50,6 +50,21 @@ bool objective_is_better(const Candidate& lhs, const Candidate& rhs, double tole
     return l.maximize ? l.value > r.value + tolerance : l.value < r.value - tolerance;
 }
 
+bool non_objective_is_better(const Candidate& lhs, const Candidate& rhs,
+                             const FeasibilityComparator& comparator) {
+    Candidate lhs_without_objective = lhs;
+    Candidate rhs_without_objective = rhs;
+    lhs_without_objective.objectives.clear();
+    rhs_without_objective.objectives.clear();
+    return comparator.better(lhs_without_objective, rhs_without_objective);
+}
+
+bool non_objective_is_tied(const Candidate& lhs, const Candidate& rhs,
+                           const FeasibilityComparator& comparator) {
+    return !non_objective_is_better(lhs, rhs, comparator) &&
+           !non_objective_is_better(rhs, lhs, comparator);
+}
+
 struct EvaluatedBatch {
     std::size_t successful = 0;
     std::size_t failed = 0;
@@ -258,8 +273,10 @@ OptimizationResult GeneticOptimizer::optimize() {
 
         const Candidate current_best = best_candidate(population, comparator_);
         if (current_best.evaluation_status == EvaluationStatus::Success) {
-            const bool improved = !best || objective_is_better(current_best, *best, termination_.improvement_tolerance) ||
-                                  comparator_.better(current_best, *best);
+            const bool improved = !best ||
+                                  non_objective_is_better(current_best, *best, comparator_) ||
+                                  (non_objective_is_tied(current_best, *best, comparator_) &&
+                                   objective_is_better(current_best, *best, termination_.improvement_tolerance));
             if (improved) {
                 best = current_best;
                 no_improvement = 0;
@@ -268,7 +285,7 @@ OptimizationResult GeneticOptimizer::optimize() {
             }
             fill_result(result, *best);
 
-            if (termination_.target_value) {
+            if (termination_.target_value && is_feasible(current_best.constraints)) {
                 const double value = current_best.objectives.front().value;
                 const bool reached = current_best.objectives.front().maximize
                     ? value >= *termination_.target_value : value <= *termination_.target_value;

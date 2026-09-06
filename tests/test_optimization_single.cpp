@@ -79,6 +79,65 @@ public:
     }
 };
 
+class TinyImprovementEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        const double score = calls++ == 0 ? 1.0 : 1.01;
+        std::vector<EvaluationResult> results;
+        results.reserve(values.size());
+        for (const auto& value : values) {
+            (void)value;
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"score", score, true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+
+    std::size_t calls = 0;
+};
+
+class EliteDropEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        const bool first_generation = calls++ == 0;
+        std::vector<EvaluationResult> results;
+        results.reserve(values.size());
+        for (const auto& value : values) {
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"score", first_generation ? 1.0 + value.values.front() : 0.0, true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+
+    std::size_t calls = 0;
+};
+
+class FeasibilityFirstEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        const bool first_generation = calls++ == 0;
+        std::vector<EvaluationResult> results;
+        results.reserve(values.size());
+        const ConstraintDefinition limit{"limit", ConstraintKind::Hard, ConstraintRelation::LessEqual,
+                                        0.0, 0.0, 1.0, 0};
+        for (const auto& value : values) {
+            (void)value;
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"score", first_generation ? 1.0 : 100.0, true});
+            result.constraints.push_back(limit.evaluate(first_generation ? 0.0 : 1.0));
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+
+    std::size_t calls = 0;
+};
+
 OptimizationConfig test_config() {
     OptimizationConfig config;
     config.population_size = 12;
@@ -168,4 +227,53 @@ TEST_CASE("single objective optimizer rejects multiple objectives and all failed
     CHECK(failure.termination.reason == TerminationReason::EvaluationFailure);
     CHECK(failure.pareto_front.empty());
     CHECK(failure.statistics.failed_evaluations == test_config().population_size);
+}
+
+TEST_CASE("single objective optimizer converges when improvement is below tolerance") {
+    auto evaluator = std::make_shared<TinyImprovementEvaluator>();
+    auto config = test_config();
+    config.max_generations = 5;
+    TerminationConfig termination;
+    termination.max_no_improvement_generations = 1;
+    termination.improvement_tolerance = 0.1;
+
+    const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config, termination).optimize();
+
+    CHECK(result.termination.reason == TerminationReason::Converged);
+    CHECK(result.statistics.generations == 2);
+    REQUIRE(result.best_by_objective.count("score") == 1);
+    CHECK(result.best_by_objective.at("score").objectives.front().value == doctest::Approx(1.0));
+}
+
+TEST_CASE("single objective optimizer preserves the actual elite across generations") {
+    auto evaluator = std::make_shared<EliteDropEvaluator>();
+    auto config = test_config();
+    config.max_generations = 2;
+    config.crossover_rate = 0.0;
+    config.mutation_rate = 0.0;
+
+    const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config).optimize();
+
+    REQUIRE(result.best_by_objective.count("score") == 1);
+    CHECK(result.best_by_objective.at("score").objectives.front().value > 1.0);
+    CHECK(result.termination.reason == TerminationReason::MaxGenerations);
+}
+
+TEST_CASE("single objective optimizer keeps feasible incumbent ahead of infeasible objective gain") {
+    auto evaluator = std::make_shared<FeasibilityFirstEvaluator>();
+    auto config = test_config();
+    config.max_generations = 3;
+    config.crossover_rate = 0.0;
+    config.mutation_rate = 0.0;
+    TerminationConfig termination;
+    termination.max_no_improvement_generations = 1;
+
+    const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config, termination).optimize();
+
+    CHECK(result.termination.reason == TerminationReason::Converged);
+    CHECK(result.statistics.generations == 2);
+    REQUIRE(result.best_by_objective.count("score") == 1);
+    const auto& best = result.best_by_objective.at("score");
+    CHECK(best.objectives.front().value == doctest::Approx(1.0));
+    CHECK(is_feasible(best.constraints));
 }
