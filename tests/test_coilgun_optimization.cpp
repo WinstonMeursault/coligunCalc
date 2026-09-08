@@ -94,6 +94,41 @@ TEST_CASE("coilgun adapter isolates invalid candidates and falls back from GPU b
     CHECK(problem.statistics_snapshot()->fallbacks == 1);
 }
 
+TEST_CASE("coilgun adapter preserves valid GPU invalid candidates alongside successes") {
+    VariableSchema schema({VariableSpec::continuous("voltage", 100.0, 1000.0)});
+    auto config = make_config();
+    config.coils.erase(config.coils.begin() + 1, config.coils.end());
+    config.excitations.resize(1);
+    config.triggers.clear();
+    config.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
+    CoilgunOptimizationProblem problem(schema, std::move(config));
+
+    problem.set_gpu_batch_evaluator([](const std::vector<CandidateVariables>& candidates,
+                                       const EvaluationContext&) {
+        std::vector<EvaluationResult> output;
+        output.reserve(candidates.size());
+        output.push_back(EvaluationResult::invalid("candidate_invalid", "synthetic invalid candidate"));
+        for (std::size_t i = 1; i < candidates.size(); ++i) {
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"muzzle_velocity", static_cast<double>(i), true});
+            output.push_back(std::move(result));
+        }
+        return output;
+    });
+
+    const auto results = problem.evaluate_batch({CandidateVariables{{500.0}},
+                                                  CandidateVariables{{600.0}},
+                                                  CandidateVariables{{700.0}}}, {});
+    REQUIRE(results.size() == 3);
+    CHECK(results[0].status == EvaluationStatus::Invalid);
+    CHECK(results[0].diagnostics.front().code == "candidate_invalid");
+    CHECK(results[1].status == EvaluationStatus::Success);
+    CHECK(results[2].status == EvaluationStatus::Success);
+    CHECK_FALSE(problem.last_batch_used_fallback());
+    REQUIRE(problem.statistics_snapshot());
+    CHECK(problem.statistics_snapshot()->fallbacks == 0);
+}
+
 TEST_CASE("optimizer reports per-run actual GPU callback fallbacks and seed") {
     VariableSchema schema({VariableSpec::continuous("voltage", 100.0, 1000.0)});
     auto config = make_config();

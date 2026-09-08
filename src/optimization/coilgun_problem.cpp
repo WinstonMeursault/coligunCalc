@@ -278,8 +278,7 @@ std::vector<EvaluationResult> CoilgunOptimizationProblem::evaluate_batch(
                                       std::isfinite(constraint.normalized_violation);
                         if (!finite) malformed = true;
                     }
-                    if (result.status == EvaluationStatus::Unevaluated ||
-                        result.status == EvaluationStatus::Invalid)
+                    if (result.status == EvaluationStatus::Unevaluated)
                         malformed = true;
                 }
                 if (!malformed) return results;
