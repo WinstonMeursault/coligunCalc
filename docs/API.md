@@ -165,8 +165,8 @@ include/coilgun/
 │   ├── trigger_config.hpp      — TriggerMode, TriggerConfig
 │   ├── multi_stage_result.hpp  — StepSnapshot, MultiStageStep, PerStageSummary, MultiStageSummary, MultiStageResult
 │   └── multi_stage_sim.hpp     — OptimizationLevel, MultiStageState, MultiStageSim<StepperPolicy>
+├── optimization/               — public optimization framework and coilgun adapter
 └── coilgun.hpp                 — convenience umbrella header
-└── optimization/                — public optimization framework and coilgun adapter
 ```
 
 ### Optimization
@@ -179,8 +179,9 @@ front. Use `MaxObjective`, `MinConstraintViolationMargin`, `IdealPointDistance`,
 `WeightedScore`, or `LexicographicObjectives` to explicitly select a
 representative candidate. Selectors do not mutate the result.
 
-The CMake install exports the `coilgun::coilgun` target and installs all
-headers, including the optimization headers. Consumers can use
+The CMake install exports the CPU-only `coilgun::coilgun` target and installs
+the supported CPU and optimization headers. CUDA, internal detail, and build-tool
+headers remain source-tree interfaces and are not installed. Consumers can use
 `find_package(coilgun CONFIG REQUIRED)` and link `coilgun::coilgun`.
 
 `coilgun/coilgun.hpp` includes the complete CPU API listed above. The CUDA

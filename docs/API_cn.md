@@ -158,8 +158,8 @@ include/coilgun/
 │   ├── trigger_config.hpp      — TriggerMode、TriggerConfig
 │   ├── multi_stage_result.hpp  — StepSnapshot、MultiStageStep、PerStageSummary、MultiStageSummary、MultiStageResult
 │   └── multi_stage_sim.hpp     — OptimizationLevel、MultiStageState、MultiStageSim<StepperPolicy>
+├── optimization/               — 公共优化框架和线圈炮适配器
 └── coilgun.hpp                 — 便利总头文件
-└── optimization/                — 公共优化框架和线圈炮适配器
 ```
 
 ### 优化
@@ -171,9 +171,9 @@ front 的 `OptimizationResult`。可使用 `MaxObjective`、
 `MinConstraintViolationMargin`、`IdealPointDistance`、`WeightedScore` 或
 `LexicographicObjectives` 明确选择代表候选解。选择器不会修改结果。
 
-CMake 安装会导出 `coilgun::coilgun` 目标并安装全部头文件（包括优化头文件）。
-使用者可通过 `find_package(coilgun CONFIG REQUIRED)` 查找并链接
-`coilgun::coilgun`。
+CMake 安装会导出仅支持 CPU 的 `coilgun::coilgun` 目标，并安装受支持的 CPU
+与优化头文件。CUDA、内部 detail 和构建工具头文件仅保留为源码树接口，不会安装。
+使用者可通过 `find_package(coilgun CONFIG REQUIRED)` 查找并链接 `coilgun::coilgun`。
 
 `coilgun/coilgun.hpp` 包含上面列出的完整 CPU API。CUDA 总头文件
 `coilgun/coilgun_cuda.hpp` 在此基础上额外包含 `gpu_backend.hpp`、

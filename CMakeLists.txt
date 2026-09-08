@@ -83,7 +83,48 @@ install(TARGETS coilgun
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+install(FILES include/coilgun/coilgun.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun
+)
+install(FILES include/coilgun/core/types.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/core
+)
+install(FILES
+  include/coilgun/components/armature.hpp
+  include/coilgun/components/driving_coil.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/components
+)
+install(FILES
+  include/coilgun/physics/cache.hpp
+  include/coilgun/physics/constants.hpp
+  include/coilgun/physics/elliptic.hpp
+  include/coilgun/physics/lookup_tables.hpp
+  include/coilgun/physics/mutual_inductance.hpp
+  include/coilgun/physics/quadrature.hpp
+  include/coilgun/physics/self_inductance.hpp
+  include/coilgun/physics/struve.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/physics
+)
+install(FILES
+  include/coilgun/simulation/cpu_phase_timing.hpp
+  include/coilgun/simulation/derivative_workspace.hpp
+  include/coilgun/simulation/excitation.hpp
+  include/coilgun/simulation/excitation_snapshot.hpp
+  include/coilgun/simulation/integration_state.hpp
+  include/coilgun/simulation/multi_stage_result.hpp
+  include/coilgun/simulation/multi_stage_sim.hpp
+  include/coilgun/simulation/sim_result.hpp
+  include/coilgun/simulation/single_stage_sim.hpp
+  include/coilgun/simulation/termination.hpp
+  include/coilgun/simulation/time_stepper.hpp
+  include/coilgun/simulation/trigger_config.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/simulation
+)
+install(DIRECTORY include/coilgun/optimization/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/optimization
+  FILES_MATCHING PATTERN "*.hpp"
+)
 
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfigVersion.cmake"
