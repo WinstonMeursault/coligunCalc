@@ -24,7 +24,7 @@ CoilgunOptimizationProblem::Config workload_config() {
                               COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
     config.armature = Armature(0.002, 0.008, 0.010,
                                ALUMINUM.resistivity_ref, ALUMINUM.density,
-                               0.0, 0.005, 1, 1, 0.003);
+                               0.0, 0.005, 1, 1, 0.015);
     config.excitations = {{500.0, 500e-6, true}};
     config.dt = 1e-6;
     config.termination.max_steps = 8;
@@ -32,7 +32,7 @@ CoilgunOptimizationProblem::Config workload_config() {
     config.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
     config.constraints.push_back({"velocity_floor", CoilgunMetric::TerminalVelocity,
         ConstraintDefinition{"velocity_floor", ConstraintKind::Hard,
-            ConstraintRelation::GreaterEqual, 0.27, 0.0, 0.01}});
+            ConstraintRelation::GreaterEqual, 0.0095, 0.0, 0.001}});
     return config;
 }
 }
@@ -110,11 +110,12 @@ int main() {
     const bool fallback_observed = problem.last_batch_used_fallback();
 
     std::cout << std::setprecision(10)
-              << "base_commit=" << OPTIMIZATION_BENCH_BASE_COMMIT << '\n'
+              << "source_revision=" << OPTIMIZATION_BENCH_SOURCE_REVISION << '\n'
+              << "worktree_state=" << OPTIMIZATION_BENCH_WORKTREE_STATE << '\n'
               << "preset=" << OPTIMIZATION_BENCH_PRESET << '\n'
               << "seed=" << config.random_seed << '\n'
               << "setup_seconds=" << setup_seconds << '\n'
-              << "first_step_seconds=" << first_seconds << '\n'
+              << "first_batch_seconds=" << first_seconds << '\n'
               << "warmup_runs=" << warmup_runs << '\n'
               << "steady_state_runs=" << steady_runs << '\n'
               << "steady_state_seconds=" << steady_seconds << '\n'

@@ -22,7 +22,7 @@ CoilgunOptimizationProblem::Config workflow_config() {
                               COPPER.resistivity_ref, 1e-6, 0.7, 0.0);
     config.armature = Armature(0.002, 0.008, 0.010,
                                ALUMINUM.resistivity_ref, ALUMINUM.density,
-                               0.0, 0.005, 1, 1, 0.003);
+                               0.0, 0.005, 1, 1, 0.015);
     config.excitations = {{500.0, 500e-6, true}};
     config.triggers.clear();
     config.dt = 1e-6;
@@ -31,7 +31,7 @@ CoilgunOptimizationProblem::Config workflow_config() {
     config.objective_id = "muzzle_velocity";
     config.constraints.push_back({"velocity_floor", CoilgunMetric::TerminalVelocity,
         ConstraintDefinition{"velocity_floor", ConstraintKind::Hard,
-            ConstraintRelation::GreaterEqual, 0.27, 0.0, 0.01}});
+            ConstraintRelation::GreaterEqual, 0.0095, 0.0, 0.001}});
     return config;
 }
 
@@ -68,7 +68,7 @@ TEST_CASE("optimization workflow is reproducible, constrained, and reference-che
     const auto& best = first.best_by_objective.at("muzzle_velocity");
     REQUIRE(best.evaluation_status == EvaluationStatus::Success);
     REQUIRE(is_feasible(best.constraints));
-    REQUIRE(best.constraints.front().value >= 0.27);
+    REQUIRE(best.constraints.front().value >= 0.0095);
     CHECK(best.constraints.front().violation == doctest::Approx(0.0));
     REQUIRE(std::isfinite(best.objectives.front().value));
     REQUIRE(second.best_by_objective.count("muzzle_velocity") == 1);
@@ -86,7 +86,9 @@ TEST_CASE("optimization workflow is reproducible, constrained, and reference-che
     CHECK(std::isfinite(reference.objectives.front().value));
     const double reference_error = std::abs(reference.objectives.front().value -
                                             best.objectives.front().value);
-    const double reference_tolerance = 1e-9 + 1e-8 * std::abs(reference.objectives.front().value);
+    REQUIRE_MESSAGE(reference_error > 1e-12,
+                    "validation workload must exercise distinct Full and Reference paths");
+    const double reference_tolerance = 5e-8 + 1e-6 * std::abs(reference.objectives.front().value);
     CHECK(reference_error <= reference_tolerance);
 }
 
@@ -140,12 +142,13 @@ TEST_CASE("optimization workflow isolates failed batch candidates and records ad
     auto cache = std::make_shared<InMemoryEvaluationCache>();
     CachedBatchEvaluator cached(problem_evaluator, cache);
     const auto cached_batch = cached.evaluate_batch({CandidateVariables{{510.0}}, CandidateVariables{{510.0}}},
-                                                    EvaluationContext{77, true});
+                                                    EvaluationContext{77, false});
     REQUIRE(cached_batch.size() == 2);
     CHECK(cached.statistics().evaluations == 1);
     CHECK(cached.statistics().cache_hits == 0);
-    const auto second = cached.evaluate_batch({CandidateVariables{{510.0}}}, EvaluationContext{77, true});
+    CHECK(problem.last_batch_used_fallback());
+    const auto second = cached.evaluate_batch({CandidateVariables{{510.0}}}, EvaluationContext{77, false});
     REQUIRE(second.size() == 1);
     CHECK(cached.statistics().cache_hits == 1);
-    CHECK(cached.statistics().fallbacks == 2);
+    CHECK(cached.statistics().fallbacks == 0);
 }

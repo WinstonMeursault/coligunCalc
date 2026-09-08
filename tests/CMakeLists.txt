@@ -56,7 +56,7 @@ add_coilgun_test(test_optimization_selectors)
 add_coilgun_test(test_optimization_public_api)
 add_coilgun_test(test_optimization_integration)
 set_tests_properties(test_optimization_integration PROPERTIES
-    LABELS "validation;quick;integration" TIMEOUT 300 RESOURCE_LOCK gpu)
+    LABELS "validation;quick;integration" TIMEOUT 300)
 
 add_executable(bench_optimization EXCLUDE_FROM_ALL bench_optimization.cpp)
 target_link_libraries(bench_optimization PRIVATE coilgun)
@@ -65,6 +65,15 @@ execute_process(COMMAND git rev-parse --short HEAD
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     OUTPUT_VARIABLE OPTIMIZATION_BENCH_BASE_COMMIT
     OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND git status --porcelain --untracked-files=normal
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE OPTIMIZATION_BENCH_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(OPTIMIZATION_BENCH_STATUS STREQUAL "")
+    set(OPTIMIZATION_BENCH_WORKTREE_STATE "clean")
+else()
+    set(OPTIMIZATION_BENCH_WORKTREE_STATE "dirty")
+endif()
 string(TOLOWER "${CMAKE_BUILD_TYPE}" OPTIMIZATION_BENCH_BUILD_TYPE)
 if(COILGUN_ENABLE_CUDA)
     set(OPTIMIZATION_BENCH_BACKEND "cuda")
@@ -72,7 +81,8 @@ else()
     set(OPTIMIZATION_BENCH_BACKEND "cpu")
 endif()
 target_compile_definitions(bench_optimization PRIVATE
-    OPTIMIZATION_BENCH_BASE_COMMIT="${OPTIMIZATION_BENCH_BASE_COMMIT}"
+    OPTIMIZATION_BENCH_SOURCE_REVISION="${OPTIMIZATION_BENCH_BASE_COMMIT}"
+    OPTIMIZATION_BENCH_WORKTREE_STATE="${OPTIMIZATION_BENCH_WORKTREE_STATE}"
     OPTIMIZATION_BENCH_PRESET="${OPTIMIZATION_BENCH_BACKEND}-${OPTIMIZATION_BENCH_BUILD_TYPE}")
 add_validation_test(test_coupled_integrator)
 
