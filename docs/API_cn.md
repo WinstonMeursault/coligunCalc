@@ -26,6 +26,33 @@
 target_link_libraries(your_target PRIVATE coilgun)
 ```
 
+总头文件也公开优化 API。无需引入优化子头文件，即可定义自定义问题、
+计算结果并选择代表解：
+
+```cpp
+#include <coilgun/coilgun.hpp>
+
+class ScoreProblem final : public coilgun::optimization::OptimizationProblem {
+public:
+    coilgun::optimization::EvaluationResult evaluate(
+        const coilgun::optimization::CandidateVariables&) const override {
+        auto result = coilgun::optimization::EvaluationResult::success();
+        result.objectives.push_back({"score", 1.0, true});
+        return result;
+    }
+};
+
+ScoreProblem problem;
+auto schema = coilgun::optimization::VariableSchema({
+    coilgun::optimization::VariableSpec::continuous("x", 0.0, 1.0)});
+auto config = coilgun::optimization::OptimizationConfig::defaults();
+config.population_size = 20;
+config.max_generations = 10;
+const auto result = coilgun::optimization::GeneticOptimizer(schema, problem, config).run();
+const auto representative =
+    result.select_representative(coilgun::optimization::MaxObjective{"score"});
+```
+
 临时脚本也可以直接编译链接：
 
 ```sh
@@ -39,6 +66,7 @@ g++ -std=c++20 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_b
 | `coilgun::physics` | 物理常量、椭圆积分、Struve 函数、数值求积、自感/互感、LRU 缓存、查表 |
 | `coilgun::components` | DrivingCoil 和 Armature 类 |
 | `coilgun::simulation` | 仿真引擎：时间步进器、激励模型、终止策略、触发配置、SimState/MultiStageState、SingleStageSim、MultiStageSim |
+| `coilgun::optimization` | 变量模式、目标/约束定义、评估器、遗传与 NSGA-II 优化器、优化结果和代表解选择器 |
 | `coilgun::physics::detail` | 内部实现细节（查表数据）——不应直接依赖 |
 
 ### API 契约、所有权与错误
@@ -131,7 +159,21 @@ include/coilgun/
 │   ├── multi_stage_result.hpp  — StepSnapshot、MultiStageStep、PerStageSummary、MultiStageSummary、MultiStageResult
 │   └── multi_stage_sim.hpp     — OptimizationLevel、MultiStageState、MultiStageSim<StepperPolicy>
 └── coilgun.hpp                 — 便利总头文件
+└── optimization/                — 公共优化框架和线圈炮适配器
 ```
+
+### 优化
+
+优化 API 可通过 `<coilgun/coilgun.hpp>` 使用，也可按需引入
+`coilgun/optimization/` 下的单个头文件。`OptimizationProblem` 和
+`BatchEvaluator` 定义评估边界；`GeneticOptimizer` 生成包含 Pareto
+front 的 `OptimizationResult`。可使用 `MaxObjective`、
+`MinConstraintViolationMargin`、`IdealPointDistance`、`WeightedScore` 或
+`LexicographicObjectives` 明确选择代表候选解。选择器不会修改结果。
+
+CMake 安装会导出 `coilgun::coilgun` 目标并安装全部头文件（包括优化头文件）。
+使用者可通过 `find_package(coilgun CONFIG REQUIRED)` 查找并链接
+`coilgun::coilgun`。
 
 `coilgun/coilgun.hpp` 包含上面列出的完整 CPU API。CUDA 总头文件
 `coilgun/coilgun_cuda.hpp` 在此基础上额外包含 `gpu_backend.hpp`、

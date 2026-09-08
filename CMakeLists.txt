@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(coilgunCalc VERSION 4.1.0 LANGUAGES CXX C)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -72,3 +74,34 @@ if(COILGUN_BUILD_GENERATOR)
   target_include_directories(generate_t_table
     PRIVATE $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>)
 endif()
+
+# --- Installation and package export ---
+include(CMakePackageConfigHelpers)
+
+install(TARGETS coilgun
+  EXPORT coilgunTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/coilgunConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/coilgun"
+)
+install(EXPORT coilgunTargets
+  FILE coilgunTargets.cmake
+  NAMESPACE coilgun::
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/coilgun"
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfigVersion.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/coilgun"
+)

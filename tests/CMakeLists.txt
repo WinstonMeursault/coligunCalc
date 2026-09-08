@@ -7,6 +7,7 @@ if(NOT doctest_FOUND)
     URL https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz
     URL_HASH SHA256=174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331
   )
+  set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(doctest)
 endif()
 
@@ -52,6 +53,7 @@ add_coilgun_test(test_optimization_nsga2)
 add_coilgun_test(test_optimization_routing)
 add_coilgun_test(test_coilgun_optimization)
 add_coilgun_test(test_optimization_selectors)
+add_coilgun_test(test_optimization_public_api)
 add_validation_test(test_coupled_integrator)
 
 if(COILGUN_BUILD_GENERATOR_TESTS)
