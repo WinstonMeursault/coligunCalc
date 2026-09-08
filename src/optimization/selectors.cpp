@@ -41,35 +41,51 @@ std::optional<Candidate> choose(const OptimizationResult& result, Better better)
     return result.pareto_front[best];
 }
 
-std::vector<std::vector<double>> normalized_objectives(const OptimizationResult& result) {
-    if (result.pareto_front.empty()) return {};
+struct ObjectiveSchema {
+    std::vector<std::string> ids;
+    std::vector<bool> maximize;
+};
+
+ObjectiveSchema validate_objective_schema(const OptimizationResult& result) {
     const auto count = result.pareto_front.front().objectives.size();
     if (count == 0) throw std::invalid_argument("Pareto candidates have no objectives");
-    const auto& schema = result.pareto_front.front().objectives;
-    std::vector<std::string> objective_ids;
-    objective_ids.reserve(count);
-    std::vector<bool> maximize;
-    maximize.reserve(count);
-    for (const auto& value : schema) {
-        objective_ids.push_back(value.id);
-        maximize.push_back(value.maximize);
+
+    ObjectiveSchema schema;
+    schema.ids.reserve(count);
+    schema.maximize.reserve(count);
+    for (const auto& value : result.pareto_front.front().objectives) {
+        schema.ids.push_back(value.id);
+        schema.maximize.push_back(value.maximize);
     }
+
+    for (const auto& candidate : result.pareto_front) {
+        if (candidate.objectives.size() != count)
+            throw std::invalid_argument("Pareto candidates have inconsistent objective counts");
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& value = candidate.objectives[i];
+            if (value.id != schema.ids[i])
+                throw std::invalid_argument("Pareto candidates have inconsistent objective ids");
+            if (value.maximize != schema.maximize[i])
+                throw std::invalid_argument("Pareto candidates have inconsistent objective directions");
+            if (!std::isfinite(value.value)) throw std::invalid_argument("objective value is not finite");
+        }
+    }
+    return schema;
+}
+
+std::vector<std::vector<double>> normalized_objectives(const OptimizationResult& result) {
+    if (result.pareto_front.empty()) return {};
+    const auto schema = validate_objective_schema(result);
+    const auto count = schema.ids.size();
 
     std::vector<double> minimum(count, std::numeric_limits<double>::infinity());
     std::vector<double> maximum(count, -std::numeric_limits<double>::infinity());
     std::vector<std::vector<double>> oriented_values(result.pareto_front.size(), std::vector<double>(count));
     for (std::size_t row = 0; row < result.pareto_front.size(); ++row) {
         const auto& candidate = result.pareto_front[row];
-        if (candidate.objectives.size() != count)
-            throw std::invalid_argument("Pareto candidates have inconsistent objective counts");
         for (std::size_t i = 0; i < count; ++i) {
             const auto& objective_value = candidate.objectives[i];
-            if (objective_value.id != objective_ids[i])
-                throw std::invalid_argument("Pareto candidates have inconsistent objective ids");
-            if (objective_value.maximize != maximize[i])
-                throw std::invalid_argument("Pareto candidates have inconsistent objective directions");
             const double value = oriented(objective_value);
-            if (!std::isfinite(value)) throw std::invalid_argument("objective value is not finite");
             oriented_values[row][i] = value;
             minimum[i] = std::min(minimum[i], value);
             maximum[i] = std::max(maximum[i], value);
@@ -102,6 +118,8 @@ std::vector<std::vector<double>> normalized_objectives(const OptimizationResult&
 }
 
 std::optional<Candidate> MaxObjective::select(const OptimizationResult& result) const {
+    if (result.pareto_front.empty()) return std::nullopt;
+    validate_objective_schema(result);
     return choose(result, [&](const Candidate& lhs, const Candidate& rhs) {
         return oriented(objective(lhs, objective_id_)) > oriented(objective(rhs, objective_id_));
     });
@@ -151,6 +169,7 @@ std::optional<Candidate> WeightedScore::select(const OptimizationResult& result)
 std::optional<Candidate> LexicographicObjectives::select(const OptimizationResult& result) const {
     if (result.pareto_front.empty()) return std::nullopt;
     if (objective_ids_.empty()) throw std::invalid_argument("lexicographic objective list cannot be empty");
+    validate_objective_schema(result);
     return choose(result, [&](const Candidate& lhs, const Candidate& rhs) {
         for (const auto& id : objective_ids_) {
             const double left = oriented(objective(lhs, id));

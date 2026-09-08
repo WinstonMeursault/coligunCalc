@@ -161,6 +161,27 @@ TEST_CASE("normalized selectors reject Pareto objective direction changes") {
     CHECK_THROWS_AS(result.select_representative(WeightedScore{{0.5, 0.5}}), std::invalid_argument);
 }
 
+TEST_CASE("MaxObjective rejects inconsistent Pareto objective directions") {
+    OptimizationResult result;
+    result.pareto_front = {
+        candidate(1, {{"score", 10.0, true}}),
+        candidate(2, {{"score", 12.0, false}}),
+    };
+
+    CHECK_THROWS_AS(result.select_representative(MaxObjective{"score"}), std::invalid_argument);
+}
+
+TEST_CASE("LexicographicObjectives rejects inconsistent Pareto objective directions") {
+    OptimizationResult result;
+    result.pareto_front = {
+        candidate(1, {{"score", 10.0, true}, {"cost", 2.0, false}}),
+        candidate(2, {{"score", 12.0, false}, {"cost", 1.0, false}}),
+    };
+
+    CHECK_THROWS_AS(result.select_representative(LexicographicObjectives{{"score", "cost"}}),
+                    std::invalid_argument);
+}
+
 TEST_CASE("normalized selectors handle opposite finite extrema without overflow") {
     OptimizationResult result;
     result.pareto_front = {
