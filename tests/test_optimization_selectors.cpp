@@ -4,6 +4,7 @@
 #include "coilgun/optimization/selectors.hpp"
 
 #include <functional>
+#include <limits>
 #include <stdexcept>
 
 using namespace coilgun::optimization;
@@ -136,4 +137,37 @@ TEST_CASE("invalid selector configuration is reported") {
     const auto result = sample_result();
     CHECK_THROWS_AS(result.select_representative(MaxObjective{"missing"}), std::invalid_argument);
     CHECK_THROWS_AS(result.select_representative(WeightedScore{{}}), std::invalid_argument);
+}
+
+TEST_CASE("normalized selectors reject reordered Pareto objective IDs") {
+    OptimizationResult result;
+    result.pareto_front = {
+        candidate(1, {{"velocity", 10.0, true}, {"cost", 8.0, false}}),
+        candidate(2, {{"cost", 5.0, false}, {"velocity", 14.0, true}}),
+    };
+
+    CHECK_THROWS_AS(result.select_representative(IdealPointDistance{}), std::invalid_argument);
+    CHECK_THROWS_AS(result.select_representative(WeightedScore{{0.5, 0.5}}), std::invalid_argument);
+}
+
+TEST_CASE("normalized selectors reject Pareto objective direction changes") {
+    OptimizationResult result;
+    result.pareto_front = {
+        candidate(1, {{"velocity", 10.0, true}, {"cost", 8.0, false}}),
+        candidate(2, {{"velocity", 14.0, false}, {"cost", 5.0, false}}),
+    };
+
+    CHECK_THROWS_AS(result.select_representative(IdealPointDistance{}), std::invalid_argument);
+    CHECK_THROWS_AS(result.select_representative(WeightedScore{{0.5, 0.5}}), std::invalid_argument);
+}
+
+TEST_CASE("normalized selectors handle opposite finite extrema without overflow") {
+    OptimizationResult result;
+    result.pareto_front = {
+        candidate(1, {{"score", -std::numeric_limits<double>::max(), true}}),
+        candidate(2, {{"score", std::numeric_limits<double>::max(), true}}),
+    };
+
+    CHECK(result.select_representative(IdealPointDistance{})->id == 2);
+    CHECK(result.select_representative(WeightedScore{{1.0}})->id == 2);
 }

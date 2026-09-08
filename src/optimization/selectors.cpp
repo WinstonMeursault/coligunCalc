@@ -45,25 +45,55 @@ std::vector<std::vector<double>> normalized_objectives(const OptimizationResult&
     if (result.pareto_front.empty()) return {};
     const auto count = result.pareto_front.front().objectives.size();
     if (count == 0) throw std::invalid_argument("Pareto candidates have no objectives");
+    const auto& schema = result.pareto_front.front().objectives;
+    std::vector<std::string> objective_ids;
+    objective_ids.reserve(count);
+    std::vector<bool> maximize;
+    maximize.reserve(count);
+    for (const auto& value : schema) {
+        objective_ids.push_back(value.id);
+        maximize.push_back(value.maximize);
+    }
+
     std::vector<double> minimum(count, std::numeric_limits<double>::infinity());
     std::vector<double> maximum(count, -std::numeric_limits<double>::infinity());
-    for (const auto& candidate : result.pareto_front) {
+    std::vector<std::vector<double>> oriented_values(result.pareto_front.size(), std::vector<double>(count));
+    for (std::size_t row = 0; row < result.pareto_front.size(); ++row) {
+        const auto& candidate = result.pareto_front[row];
         if (candidate.objectives.size() != count)
             throw std::invalid_argument("Pareto candidates have inconsistent objective counts");
         for (std::size_t i = 0; i < count; ++i) {
-            const double value = oriented(candidate.objectives[i]);
+            const auto& objective_value = candidate.objectives[i];
+            if (objective_value.id != objective_ids[i])
+                throw std::invalid_argument("Pareto candidates have inconsistent objective ids");
+            if (objective_value.maximize != maximize[i])
+                throw std::invalid_argument("Pareto candidates have inconsistent objective directions");
+            const double value = oriented(objective_value);
             if (!std::isfinite(value)) throw std::invalid_argument("objective value is not finite");
+            oriented_values[row][i] = value;
             minimum[i] = std::min(minimum[i], value);
             maximum[i] = std::max(maximum[i], value);
         }
     }
+
     std::vector<std::vector<double>> normalized(result.pareto_front.size(), std::vector<double>(count));
     for (std::size_t row = 0; row < result.pareto_front.size(); ++row) {
         for (std::size_t i = 0; i < count; ++i) {
-            const double range = maximum[i] - minimum[i];
-            normalized[row][i] = range > 0.0
-                ? (oriented(result.pareto_front[row].objectives[i]) - minimum[i]) / range
-                : 0.5;
+            const double scale = std::max(std::fabs(minimum[i]), std::fabs(maximum[i]));
+            if (scale == 0.0) {
+                normalized[row][i] = 0.5;
+                continue;
+            }
+            const double scaled_minimum = minimum[i] / scale;
+            const double scaled_maximum = maximum[i] / scale;
+            const double scaled_range = scaled_maximum - scaled_minimum;
+            if (scaled_range == 0.0) {
+                normalized[row][i] = 0.5;
+                continue;
+            }
+            if (!std::isfinite(scaled_range) || scaled_range <= 0.0)
+                throw std::invalid_argument("objective range cannot be normalized");
+            normalized[row][i] = (oriented_values[row][i] / scale - scaled_minimum) / scaled_range;
         }
     }
     return normalized;

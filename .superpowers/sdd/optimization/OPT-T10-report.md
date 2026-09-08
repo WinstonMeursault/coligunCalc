@@ -23,6 +23,19 @@ Equal scores retain Pareto-front order, so selection is deterministic. Invalid
 selector configuration or malformed objective data throws
 `std::invalid_argument`.
 
+### Pareto normalization invariants
+
+The normalized selectors now treat the first Pareto candidate as the positional
+objective schema. Every later candidate must have the same objective count and,
+at each position, the same ID and maximize/minimize direction. Reordered
+objectives or direction changes throw `std::invalid_argument` instead of being
+silently normalized as unrelated quantities.
+
+Normalization scales each objective by the larger absolute endpoint before
+subtracting endpoints. This keeps scaled endpoints in `[-1, 1]` and the range
+in `[0, 2]`, avoiding the overflow and `NaN` produced by a direct `DBL_MAX -
+(-DBL_MAX)` range while retaining neutral `0.5` normalization for zero spans.
+
 ## API Integration
 
 `include/coilgun/optimization/types.hpp` receives the member declaration,
@@ -45,11 +58,20 @@ included.
 
 ### GREEN
 
-The focused selector executable passes 9 test cases and 31 assertions covering
+The focused selector executable passes 12 test cases and 37 assertions covering
 direction handling, deterministic ties, hard and soft constraint violations,
 normalization, multi-objective trade-offs, lexicographic ordering, callback and
 derived custom selectors, non-mutation, empty fronts, invalid configuration,
-and the unified single-objective result model.
+the unified single-objective result model, schema mismatch rejection, and
+opposite finite extrema.
+
+### Normalization regression fix
+
+The new regression tests first failed: both normalized selectors accepted
+reordered IDs and changed directions, while an opposite `DBL_MAX`/
+`-DBL_MAX` range overflowed and selected the first candidate as a tie. The
+stable scaled normalization and positional schema checks make the same tests
+pass for both `IdealPointDistance` and `WeightedScore`.
 
 ## Files
 
@@ -70,7 +92,7 @@ cmake --build --preset cpu-debug --target test_optimization_selectors
 ./build/cpu-debug/tests/test_optimization_selectors
 ```
 
-Result: 9 test cases passed, 31 assertions passed.
+Result: 12 test cases passed, 37 assertions passed.
 
 ```text
 cmake --build --preset cpu-debug -j2
