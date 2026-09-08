@@ -19,11 +19,13 @@ struct Nsga2Ranking {
 // Objective definitions are optional; when omitted, each ObjectiveValue's
 // maximize flag is used and objective scales are one.
 Nsga2Ranking nsga2_rank(const std::vector<Candidate>& candidates,
-                        const std::vector<ObjectiveDefinition>& definitions = {});
+                        const std::vector<ObjectiveDefinition>& definitions = {},
+                        const FeasibilityComparator& comparator = FeasibilityComparator{});
 
 std::vector<std::vector<std::size_t>> non_dominated_sort(
     const std::vector<Candidate>& candidates,
-    const std::vector<ObjectiveDefinition>& definitions = {});
+    const std::vector<ObjectiveDefinition>& definitions = {},
+    const FeasibilityComparator& comparator = FeasibilityComparator{});
 
 std::vector<double> crowding_distances(
     const std::vector<Candidate>& candidates,
@@ -45,20 +47,23 @@ std::vector<Candidate> nsga2_select(
     const std::vector<Candidate>& parents,
     const std::vector<Candidate>& offspring,
     std::size_t target_size,
-    const std::vector<ObjectiveDefinition>& definitions = {});
+    const std::vector<ObjectiveDefinition>& definitions = {},
+    const FeasibilityComparator& comparator = FeasibilityComparator{});
 
 Population nsga2_select(
     const Population& parents,
     const Population& offspring,
     std::size_t target_size,
-    const std::vector<ObjectiveDefinition>& definitions = {});
+    const std::vector<ObjectiveDefinition>& definitions = {},
+    const FeasibilityComparator& comparator = FeasibilityComparator{});
 
 inline std::vector<Candidate> select_next_generation(
     const std::vector<Candidate>& parents,
     const std::vector<Candidate>& offspring,
     std::size_t target_size,
-    const std::vector<ObjectiveDefinition>& definitions = {}) {
-    return nsga2_select(parents, offspring, target_size, definitions);
+    const std::vector<ObjectiveDefinition>& definitions = {},
+    const FeasibilityComparator& comparator = FeasibilityComparator{}) {
+    return nsga2_select(parents, offspring, target_size, definitions, comparator);
 }
 
 } // namespace coilgun::optimization

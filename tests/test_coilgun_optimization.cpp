@@ -90,6 +90,39 @@ TEST_CASE("coilgun adapter isolates invalid candidates and falls back from GPU b
     CHECK(results[0].status == EvaluationStatus::Success);
     CHECK(results[1].status == EvaluationStatus::Success);
     CHECK(problem.last_batch_used_fallback());
+    REQUIRE(problem.statistics_snapshot());
+    CHECK(problem.statistics_snapshot()->fallbacks == 1);
+}
+
+TEST_CASE("optimizer reports per-run actual GPU callback fallbacks and seed") {
+    VariableSchema schema({VariableSpec::continuous("voltage", 100.0, 1000.0)});
+    auto config = make_config();
+    config.coils.erase(config.coils.begin() + 1, config.coils.end());
+    config.excitations.resize(1);
+    config.triggers.clear();
+    config.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
+    CoilgunOptimizationProblem problem(schema, std::move(config));
+    problem.set_gpu_batch_evaluator([](const std::vector<CandidateVariables>&,
+                                       const EvaluationContext&) -> std::vector<EvaluationResult> {
+        throw std::runtime_error("GPU unavailable");
+    });
+
+    OptimizationConfig optimization;
+    optimization.population_size = 2;
+    optimization.max_generations = 1;
+    optimization.random_seed = 314159;
+    TerminationConfig termination;
+    termination.max_generations = 1;
+
+    const auto first = GeneticOptimizer(schema, problem, optimization, termination).optimize();
+    const auto second = GeneticOptimizer(schema, problem, optimization, termination).optimize();
+
+    CHECK(first.statistics.seed == optimization.random_seed);
+    CHECK(second.statistics.seed == optimization.random_seed);
+    CHECK(first.statistics.gpu_fallbacks == 1);
+    CHECK(second.statistics.gpu_fallbacks == 1);
+    REQUIRE(problem.statistics_snapshot());
+    CHECK(problem.statistics_snapshot()->fallbacks == 2);
 }
 
 TEST_CASE("coilgun adapter dispatches injected batch evaluator through genetic optimizer") {

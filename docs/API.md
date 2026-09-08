@@ -179,6 +179,25 @@ front. Use `MaxObjective`, `MinConstraintViolationMargin`, `IdealPointDistance`,
 `WeightedScore`, or `LexicographicObjectives` to explicitly select a
 representative candidate. Selectors do not mutate the result.
 
+`optimize_single_objective(...)` always selects the `SingleObjective` strategy
+and reports `ConfigurationError` when the evaluator returns anything other
+than one objective. `OptimizationStatistics` records the configured run
+`seed`, attempted `evaluations`, successful and failed evaluations,
+`skipped_due_to_budget`, cache hits, actual `gpu_fallbacks`, generation count,
+and elapsed evaluation time. Candidates skipped because `max_evaluations` was
+exhausted are left `Unevaluated`; they are not failures.
+
+`BatchEvaluator::statistics_snapshot()` is an optional cumulative statistics
+interface. `StatisticsBatchEvaluator` and `CachedBatchEvaluator` implement it
+and preserve a wrapped evaluator's actual fallback count through nested
+wrappers. The optimizer snapshots the evaluator at the beginning of each run
+and reports the delta, so reuse of an evaluator does not carry cache hits,
+fallbacks, or elapsed time into a later result. In
+`CoilgunOptimizationProblem`, `gpu_fallbacks` increases only when its injected
+GPU batch callback throws or produces malformed batch output and evaluation
+continues on the CPU; merely requesting a GPU callback does not count as a
+fallback.
+
 The CMake install exports the CPU-only `coilgun::coilgun` target and installs
 the supported CPU and optimization headers. CUDA, internal detail, and build-tool
 headers remain source-tree interfaces and are not installed. Consumers can use

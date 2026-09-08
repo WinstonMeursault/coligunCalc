@@ -148,6 +148,17 @@ public:
     }
 };
 
+class SingletonOnlyEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        if (values.size() != 1) throw std::runtime_error("batch requires singleton retry");
+        auto result = EvaluationResult::success();
+        result.objectives.push_back({"score", values.front().values.front(), true});
+        return {std::move(result)};
+    }
+};
+
 class FeasibilityFirstEvaluator final : public BatchEvaluator {
 public:
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
@@ -230,11 +241,13 @@ TEST_CASE("single objective optimizer supports target, evaluation, and no-improv
 
     auto budget_evaluator = std::make_shared<ScoreEvaluator>();
     TerminationConfig budget;
-    budget.max_evaluations = config.population_size;
+    budget.max_evaluations = config.population_size - 1;
     const auto budget_result = GeneticOptimizer(one_variable_schema(), budget_evaluator, config, budget).optimize();
     CHECK(budget_result.termination.reason == TerminationReason::MaxGenerations);
     CHECK(genetic_termination_reason(budget_result.termination) == GeneticTerminationReason::MaxEvaluations);
     CHECK(budget_result.statistics.evaluations <= budget.max_evaluations);
+    CHECK(budget_result.statistics.failed_evaluations == 0);
+    CHECK(budget_result.statistics.skipped_due_to_budget == 1);
 
     auto stagnant_evaluator = std::make_shared<ScoreEvaluator>(true, true);
     TerminationConfig stagnant;
@@ -242,6 +255,27 @@ TEST_CASE("single objective optimizer supports target, evaluation, and no-improv
     const auto converged = GeneticOptimizer(one_variable_schema(), stagnant_evaluator, config, stagnant).optimize();
     CHECK(converged.termination.reason == TerminationReason::Converged);
     CHECK(converged.statistics.generations == 2);
+}
+
+TEST_CASE("optimizer isolates direct batch exceptions by retrying candidates in order") {
+    auto config = test_config();
+    config.max_generations = 1;
+    SingletonOnlyEvaluator evaluator;
+
+    const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config).optimize();
+
+    CHECK(result.termination.reason == TerminationReason::MaxGenerations);
+    CHECK(result.statistics.evaluations == config.population_size);
+    CHECK(result.statistics.successful_evaluations == config.population_size);
+    CHECK(result.statistics.failed_evaluations == 0);
+}
+
+TEST_CASE("single objective convenience API forces single objective routing") {
+    TwoObjectiveEvaluator evaluator;
+
+    const auto result = optimize_single_objective(one_variable_schema(), evaluator, test_config());
+
+    CHECK(result.termination.reason == TerminationReason::ConfigurationError);
 }
 
 TEST_CASE("automatic routing selects NSGA-II and explicit single objective rejects multiple objectives") {

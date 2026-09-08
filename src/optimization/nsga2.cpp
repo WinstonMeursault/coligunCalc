@@ -77,13 +77,15 @@ double hard_violation(const Candidate& candidate) {
     return std::isfinite(violation) && violation >= 0.0 ? violation : inf;
 }
 
-bool dominates(const Candidate& lhs, const Candidate& rhs, const ObjectiveView& view) {
-    const double lhs_violation = hard_violation(lhs);
-    const double rhs_violation = hard_violation(rhs);
-    const bool lhs_feasible = lhs_violation == 0.0;
-    const bool rhs_feasible = rhs_violation == 0.0;
-    if (lhs_feasible != rhs_feasible) return lhs_feasible;
-    if (!lhs_feasible) return lhs_violation < rhs_violation;
+bool dominates(const Candidate& lhs, const Candidate& rhs, const ObjectiveView& view,
+               const FeasibilityComparator& comparator) {
+    Candidate lhs_constraints = lhs;
+    Candidate rhs_constraints = rhs;
+    lhs_constraints.objectives.clear();
+    rhs_constraints.objectives.clear();
+    const bool lhs_better = comparator.better(lhs_constraints, rhs_constraints);
+    const bool rhs_better = comparator.better(rhs_constraints, lhs_constraints);
+    if (lhs_better != rhs_better) return lhs_better;
 
     bool strictly_better = false;
     for (std::size_t i = 0; i < view.count; ++i) {
@@ -137,7 +139,8 @@ std::vector<double> crowding_for_front(const std::vector<Candidate>& candidates,
 } // namespace
 
 Nsga2Ranking nsga2_rank(const std::vector<Candidate>& candidates,
-                        const std::vector<ObjectiveDefinition>& definitions) {
+                        const std::vector<ObjectiveDefinition>& definitions,
+                        const FeasibilityComparator& comparator) {
     validate_input(candidates, definitions);
     Nsga2Ranking result;
     result.ranks.assign(candidates.size(), 0);
@@ -151,10 +154,10 @@ Nsga2Ranking nsga2_rank(const std::vector<Candidate>& candidates,
     std::vector<std::size_t> first;
     for (std::size_t lhs = 0; lhs < candidates.size(); ++lhs) {
         for (std::size_t rhs = lhs + 1; rhs < candidates.size(); ++rhs) {
-            if (dominates(candidates[lhs], candidates[rhs], view)) {
+            if (dominates(candidates[lhs], candidates[rhs], view, comparator)) {
                 dominated[lhs].push_back(rhs);
                 ++domination_count[rhs];
-            } else if (dominates(candidates[rhs], candidates[lhs], view)) {
+            } else if (dominates(candidates[rhs], candidates[lhs], view, comparator)) {
                 dominated[rhs].push_back(lhs);
                 ++domination_count[lhs];
             }
@@ -183,8 +186,9 @@ Nsga2Ranking nsga2_rank(const std::vector<Candidate>& candidates,
 
 std::vector<std::vector<std::size_t>> non_dominated_sort(
     const std::vector<Candidate>& candidates,
-    const std::vector<ObjectiveDefinition>& definitions) {
-    return nsga2_rank(candidates, definitions).fronts;
+    const std::vector<ObjectiveDefinition>& definitions,
+    const FeasibilityComparator& comparator) {
+    return nsga2_rank(candidates, definitions, comparator).fronts;
 }
 
 std::vector<double> crowding_distances(
@@ -227,13 +231,14 @@ std::vector<Candidate> nsga2_select(
     const std::vector<Candidate>& parents,
     const std::vector<Candidate>& offspring,
     std::size_t target_size,
-    const std::vector<ObjectiveDefinition>& definitions) {
+    const std::vector<ObjectiveDefinition>& definitions,
+    const FeasibilityComparator& comparator) {
     std::vector<Candidate> merged;
     merged.reserve(parents.size() + offspring.size());
     merged.insert(merged.end(), parents.begin(), parents.end());
     merged.insert(merged.end(), offspring.begin(), offspring.end());
     if (merged.empty() || target_size == 0) return {};
-    const auto ranking = nsga2_rank(merged, definitions);
+    const auto ranking = nsga2_rank(merged, definitions, comparator);
     const std::size_t count = std::min(target_size, merged.size());
     std::vector<std::size_t> selected;
     selected.reserve(count);
@@ -260,10 +265,11 @@ Population nsga2_select(
     const Population& parents,
     const Population& offspring,
     std::size_t target_size,
-    const std::vector<ObjectiveDefinition>& definitions) {
+    const std::vector<ObjectiveDefinition>& definitions,
+    const FeasibilityComparator& comparator) {
     std::vector<Candidate> parent_values(parents.begin(), parents.end());
     std::vector<Candidate> offspring_values(offspring.begin(), offspring.end());
-    const auto selected = nsga2_select(parent_values, offspring_values, target_size, definitions);
+    const auto selected = nsga2_select(parent_values, offspring_values, target_size, definitions, comparator);
     Population result;
     for (auto candidate : selected) result.push_back(std::move(candidate));
     return result;

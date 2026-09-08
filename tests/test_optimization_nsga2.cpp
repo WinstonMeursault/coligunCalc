@@ -25,6 +25,11 @@ Candidate constrained(CandidateId id, double first, double second, double violat
                                   violation, 0.0, 0.0, violation, violation, violation == 0.0, 0});
     return result;
 }
+
+ConstraintReport soft_constraint(std::string id, double violation, int priority) {
+    return {std::move(id), ConstraintKind::Soft, ConstraintRelation::LessEqual,
+            violation, 0.0, 0.0, violation, violation, violation == 0.0, priority};
+}
 }
 
 TEST_CASE("NSGA-II sorts a known two-objective front and normalizes directions") {
@@ -85,14 +90,39 @@ TEST_CASE("NSGA-II gives feasible candidates priority over infeasible candidates
     CHECK(ranking.fronts[2] == std::vector<std::size_t>{1});
 }
 
-TEST_CASE("NSGA-II ties infeasible candidates with equal total hard violation") {
-    // Candidate 1 would dominate candidate 0 by objectives alone. Constraint
-    // domination must treat equal-violation infeasible candidates as tied.
+TEST_CASE("NSGA-II constrained dominance honors the configured comparator") {
+    const auto feasible = constrained(0, 1.0, 1.0, 0.0);
+    const auto hard_infeasible = constrained(1, 100.0, 100.0, 1.0);
+    const auto feasibility = nsga2_rank({feasible, hard_infeasible}, {}, FeasibilityComparator{});
+    CHECK(feasibility.fronts[0] == std::vector<std::size_t>{0});
+
+    auto soft_low = constrained(2, 1.0, 1.0, 0.0);
+    auto soft_high = constrained(3, 100.0, 100.0, 0.0);
+    soft_low.constraints.front().kind = ConstraintKind::Soft;
+    soft_low.constraints.front().normalized_violation = 0.1;
+    soft_high.constraints.front().kind = ConstraintKind::Soft;
+    soft_high.constraints.front().normalized_violation = 1.0;
+    const auto penalty = nsga2_rank({soft_low, soft_high}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Penalty, 2.0});
+    CHECK(penalty.fronts[0] == std::vector<std::size_t>{0});
+
+    auto lexicographic_low_priority = candidate(4, 1.0, 1.0);
+    lexicographic_low_priority.constraints = {soft_constraint("low", 0.1, 0),
+                                              soft_constraint("high", 10.0, 1)};
+    auto lexicographic_high_priority = candidate(5, 100.0, 100.0);
+    lexicographic_high_priority.constraints = {soft_constraint("low", 0.2, 0)};
+    const auto lexicographic = nsga2_rank(
+        {lexicographic_low_priority, lexicographic_high_priority}, {},
+        FeasibilityComparator{FeasibilityStrategy::Lexicographic});
+    CHECK(lexicographic.fronts[0] == std::vector<std::size_t>{0});
+}
+
+TEST_CASE("NSGA-II applies Pareto dominance after tied constraints") {
     const auto ranking = nsga2_rank({constrained(0, 1.0, 1.0, 1.0),
                                      constrained(1, 2.0, 2.0, 1.0)});
-    REQUIRE(ranking.fronts.size() == 1);
-    CHECK(ranking.fronts[0] == std::vector<std::size_t>{0, 1});
-    CHECK(ranking.ranks[0] == 0);
+    REQUIRE(ranking.fronts.size() == 2);
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{1});
+    CHECK(ranking.ranks[0] == 1);
     CHECK(ranking.ranks[1] == 0);
 }
 
@@ -108,15 +138,25 @@ TEST_CASE("NSGA-II accepts failed candidates with empty objectives") {
     another_failed.evaluation_status = EvaluationStatus::Failed;
 
     const auto failed_only = nsga2_rank({failed, invalid});
-    REQUIRE(failed_only.fronts.size() == 1);
-    CHECK(failed_only.fronts[0] == std::vector<std::size_t>{0, 1});
+    REQUIRE(failed_only.fronts.size() == 2);
+    CHECK(failed_only.fronts[0] == std::vector<std::size_t>{1});
 
     const auto mixed = nsga2_rank({failed, candidate(3, 1.0, 2.0), invalid, another_failed});
-    REQUIRE(mixed.fronts.size() == 2);
+    REQUIRE(mixed.fronts.size() == 3);
     CHECK(mixed.fronts[0] == std::vector<std::size_t>{1});
-    CHECK(mixed.fronts[1] == std::vector<std::size_t>{0, 2, 3});
-    for (const auto index : mixed.fronts[1])
+    CHECK(mixed.fronts[1] == std::vector<std::size_t>{2});
+    CHECK(mixed.fronts[2] == std::vector<std::size_t>{0, 3});
+    for (const auto index : mixed.fronts[2])
         CHECK(std::isinf(mixed.crowding_distances[index]));
+}
+
+TEST_CASE("NSGA-II next-generation convenience API retains comparator semantics") {
+    const auto feasible = constrained(0, 1.0, 1.0, 0.0);
+    const auto infeasible = constrained(1, 100.0, 100.0, 1.0);
+    const auto selected = select_next_generation(
+        {infeasible}, {feasible}, 1, {}, FeasibilityComparator{FeasibilityStrategy::FeasibilityFirst});
+    REQUIRE(selected.size() == 1);
+    CHECK(selected.front().id == feasible.id);
 }
 
 TEST_CASE("NSGA-II merges parents and offspring then truncates by rank and crowding") {

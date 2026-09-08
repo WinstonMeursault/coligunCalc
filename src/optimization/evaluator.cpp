@@ -94,6 +94,11 @@ void record_status(EvaluationStatistics& statistics, const EvaluationResult& res
 SerialBatchEvaluator::SerialBatchEvaluator(std::shared_ptr<const Evaluator> e) : evaluator_(std::move(e)) { if (!evaluator_) throw std::invalid_argument("evaluator must not be null"); }
 std::vector<EvaluationResult> SerialBatchEvaluator::evaluate_batch(const std::vector<CandidateVariables>& c, const EvaluationContext& x) { std::vector<EvaluationResult> r; r.reserve(c.size()); for (const auto& v:c) r.push_back(one(*evaluator_,v,x)); return r; }
 StatisticsBatchEvaluator::StatisticsBatchEvaluator(std::shared_ptr<BatchEvaluator> e) : evaluator_(std::move(e)) { if (!evaluator_) throw std::invalid_argument("evaluator must not be null"); }
+std::optional<EvaluationStatistics> StatisticsBatchEvaluator::statistics_snapshot() const {
+    auto snapshot = statistics_;
+    if (const auto nested = evaluator_->statistics_snapshot()) snapshot.fallbacks = nested->fallbacks;
+    return snapshot;
+}
 std::vector<EvaluationResult> StatisticsBatchEvaluator::evaluate_batch(const std::vector<CandidateVariables>& c, const EvaluationContext& x) {
     const auto start = std::chrono::steady_clock::now();
     statistics_.seed = x.seed;
@@ -105,6 +110,11 @@ std::vector<EvaluationResult> StatisticsBatchEvaluator::evaluate_batch(const std
     return results;
 }
 CachedBatchEvaluator::CachedBatchEvaluator(std::shared_ptr<BatchEvaluator> e,std::shared_ptr<EvaluationCache> c):evaluator_(std::move(e)),cache_(std::move(c)){if(!evaluator_||!cache_)throw std::invalid_argument("evaluator and cache must not be null");}
+std::optional<EvaluationStatistics> CachedBatchEvaluator::statistics_snapshot() const {
+    auto snapshot = statistics_;
+    if (const auto nested = evaluator_->statistics_snapshot()) snapshot.fallbacks = nested->fallbacks;
+    return snapshot;
+}
 std::vector<EvaluationResult> CachedBatchEvaluator::evaluate_batch(const std::vector<CandidateVariables>& c,const EvaluationContext& x){
     const auto start = std::chrono::steady_clock::now();
     std::vector<EvaluationResult> results;

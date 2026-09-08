@@ -99,6 +99,7 @@ public:
     [[nodiscard]] bool last_batch_used_fallback() const noexcept { return last_batch_used_fallback_; }
     [[nodiscard]] const VariableSchema& schema() const noexcept { return schema_; }
     [[nodiscard]] const Config& config() const noexcept { return config_; }
+    [[nodiscard]] std::optional<EvaluationStatistics> statistics_snapshot() const override;
 
 private:
     EvaluationResult evaluate_cpu(const CandidateVariables&) const;
@@ -111,6 +112,7 @@ private:
     Config config_;
     GpuBatchEvaluator gpu_evaluator_;
     mutable bool last_batch_used_fallback_ = false;
+    mutable EvaluationStatistics statistics_;
 };
 
 using CoilgunOptimizationConfig = CoilgunOptimizationProblem::Config;

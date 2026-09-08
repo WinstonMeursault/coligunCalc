@@ -103,6 +103,27 @@ public:
         return {std::move(result)};
     }
 };
+
+class FallbackReportingEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& candidates,
+                                                 const EvaluationContext&) override {
+        ++statistics_.fallbacks;
+        std::vector<EvaluationResult> results;
+        results.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"value", candidate.values.front(), true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+
+    std::optional<EvaluationStatistics> statistics_snapshot() const override { return statistics_; }
+
+private:
+    EvaluationStatistics statistics_;
+};
 }
 
 TEST_CASE("serial adapter preserves order, isolates failures, and accepts empty batches") {
@@ -271,4 +292,25 @@ TEST_CASE("statistics tracks evaluations, failures, fallback, seed, and duration
     CHECK(adapter.statistics().fallbacks == 1);
     CHECK(adapter.statistics().seed == 1234);
     CHECK(adapter.statistics().elapsed_seconds >= 0.0);
+}
+
+TEST_CASE("statistics snapshots retain nested actual fallbacks across cache hits") {
+    auto source = std::make_shared<FallbackReportingEvaluator>();
+    auto tracked = std::make_shared<StatisticsBatchEvaluator>(source);
+    CachedBatchEvaluator cached(tracked, std::make_shared<InMemoryEvaluationCache>());
+    const EvaluationContext context{42, false};
+
+    cached.evaluate_batch({cv(1.0)}, context);
+    REQUIRE(cached.statistics_snapshot());
+    CHECK(cached.statistics_snapshot()->fallbacks == 1);
+    CHECK(cached.statistics_snapshot()->cache_hits == 0);
+
+    cached.evaluate_batch({cv(1.0)}, context);
+    REQUIRE(cached.statistics_snapshot());
+    CHECK(cached.statistics_snapshot()->fallbacks == 1);
+    CHECK(cached.statistics_snapshot()->cache_hits == 1);
+
+    cached.evaluate_batch({cv(2.0)}, context);
+    REQUIRE(cached.statistics_snapshot());
+    CHECK(cached.statistics_snapshot()->fallbacks == 2);
 }

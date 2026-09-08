@@ -283,11 +283,16 @@ std::vector<EvaluationResult> CoilgunOptimizationProblem::evaluate_batch(
         } catch (...) {
         }
         last_batch_used_fallback_ = true;
+        ++statistics_.fallbacks;
     }
     std::vector<EvaluationResult> results;
     results.reserve(variables.size());
     for (const auto& candidate : variables) results.push_back(evaluate_cpu(candidate));
     return results;
+}
+
+std::optional<EvaluationStatistics> CoilgunOptimizationProblem::statistics_snapshot() const {
+    return statistics_;
 }
 
 } // namespace coilgun::optimization

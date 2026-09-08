@@ -171,6 +171,19 @@ front 的 `OptimizationResult`。可使用 `MaxObjective`、
 `MinConstraintViolationMargin`、`IdealPointDistance`、`WeightedScore` 或
 `LexicographicObjectives` 明确选择代表候选解。选择器不会修改结果。
 
+`optimize_single_objective(...)` 始终选择 `SingleObjective` 策略；当评估器返回的
+目标数不是一个时，它会报告 `ConfigurationError`。`OptimizationStatistics` 记录配置的
+运行 `seed`、已尝试的 `evaluations`、成功和失败评估、`skipped_due_to_budget`、缓存命中、
+实际 `gpu_fallbacks`、代数和评估耗时。因 `max_evaluations` 耗尽而跳过的候选解保持
+`Unevaluated`，不属于失败。
+
+`BatchEvaluator::statistics_snapshot()` 是可选的累计统计接口。
+`StatisticsBatchEvaluator` 和 `CachedBatchEvaluator` 都实现它，并会在嵌套包装器中
+保留被包装评估器的实际回退计数。优化器在每次运行开始时取得评估器快照并报告差值，
+因此重复使用评估器不会把缓存命中、回退或耗时带入下一次结果。对于
+`CoilgunOptimizationProblem`，只有注入的 GPU 批量回调抛出异常或产生格式错误的批量
+输出、随后继续在 CPU 上评估时，`gpu_fallbacks` 才会增加；仅请求 GPU 回调不算回退。
+
 CMake 安装会导出仅支持 CPU 的 `coilgun::coilgun` 目标，并安装受支持的 CPU
 与优化头文件。CUDA、内部 detail 和构建工具头文件仅保留为源码树接口，不会安装。
 使用者可通过 `find_package(coilgun CONFIG REQUIRED)` 查找并链接 `coilgun::coilgun`。

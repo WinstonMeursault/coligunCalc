@@ -76,11 +76,20 @@ struct EvaluatedBatch {
 };
 
 EvaluatedBatch assign_results(Population& population, const std::vector<EvaluationResult>& results,
-                              std::optional<std::vector<std::pair<std::string, bool>>> objective_schema) {
+                              std::optional<std::vector<std::pair<std::string, bool>>> objective_schema,
+                              std::size_t evaluated_count) {
     EvaluatedBatch summary;
     auto active_schema = objective_schema;
     for (std::size_t i = 0; i < population.size(); ++i) {
         Candidate& candidate = population[i];
+        if (i >= evaluated_count) {
+            candidate.evaluation_status = EvaluationStatus::Unevaluated;
+            candidate.objectives.clear();
+            candidate.constraints.clear();
+            candidate.diagnostics.clear();
+            candidate.metadata.clear();
+            continue;
+        }
         const EvaluationResult* evaluation = i < results.size() ? &results[i] : nullptr;
         if (!evaluation) {
             mark_failure(candidate, EvaluationStatus::Failed, "evaluation_batch_output",
@@ -165,28 +174,26 @@ std::vector<ObjectiveDefinition> objective_definitions(
 }
 
 void fill_multi_result(OptimizationResult& result, const Population& population,
-                       const std::vector<ObjectiveDefinition>& definitions) {
+                       const std::vector<ObjectiveDefinition>& definitions,
+                       const FeasibilityComparator& comparator) {
     std::vector<Candidate> candidates(population.begin(), population.end());
     if (candidates.empty()) return;
-    const auto ranking = nsga2_rank(candidates, definitions);
+    const auto ranking = nsga2_rank(candidates, definitions, comparator);
     if (ranking.fronts.empty()) return;
     result.pareto_front.clear();
     for (const auto index : ranking.fronts.front()) result.pareto_front.push_back(candidates[index]);
 }
 
-void copy_evaluator_statistics(OptimizationResult& result, const BatchEvaluator& evaluator) {
-    const EvaluationStatistics* statistics = nullptr;
-    if (const auto* tracked = dynamic_cast<const StatisticsBatchEvaluator*>(&evaluator))
-        statistics = &tracked->statistics();
-    else if (const auto* cached = dynamic_cast<const CachedBatchEvaluator*>(&evaluator))
-        statistics = &cached->statistics();
-    if (!statistics) return;
-    result.statistics.evaluations = statistics->evaluations;
-    result.statistics.successful_evaluations = statistics->successful_evaluations;
-    result.statistics.failed_evaluations = statistics->failed_evaluations;
-    result.statistics.cache_hits = statistics->cache_hits;
-    result.statistics.gpu_fallbacks = statistics->fallbacks;
-    result.statistics.elapsed_seconds = statistics->elapsed_seconds;
+EvaluationStatistics subtract_statistics(const EvaluationStatistics& after, const EvaluationStatistics& before) {
+    EvaluationStatistics delta;
+    delta.seed = after.seed;
+    delta.evaluations = after.evaluations - before.evaluations;
+    delta.successful_evaluations = after.successful_evaluations - before.successful_evaluations;
+    delta.failed_evaluations = after.failed_evaluations - before.failed_evaluations;
+    delta.cache_hits = after.cache_hits - before.cache_hits;
+    delta.fallbacks = after.fallbacks - before.fallbacks;
+    delta.elapsed_seconds = after.elapsed_seconds - before.elapsed_seconds;
+    return delta;
 }
 
 std::vector<EvaluationResult> evaluate_safely(BatchEvaluator& evaluator,
@@ -197,8 +204,17 @@ std::vector<EvaluationResult> evaluate_safely(BatchEvaluator& evaluator,
     } catch (const std::exception& error) {
         std::vector<EvaluationResult> results;
         results.reserve(variables.size());
-        for (std::size_t i = 0; i < variables.size(); ++i)
-            results.push_back(EvaluationResult::failed("evaluation_exception", error.what()));
+        for (const auto& variable : variables) {
+            try {
+                auto single = evaluator.evaluate_batch({variable}, context);
+                if (single.size() == 1) results.push_back(std::move(single.front()));
+                else results.push_back(EvaluationResult::failed("evaluation_batch_output", "singleton retry returned wrong result count"));
+            } catch (const std::exception& single_error) {
+                results.push_back(EvaluationResult::failed("evaluation_exception", single_error.what()));
+            } catch (...) {
+                results.push_back(EvaluationResult::failed("evaluation_exception", "unknown exception"));
+            }
+        }
         return results;
     } catch (...) {
         std::vector<EvaluationResult> results;
@@ -234,6 +250,7 @@ GeneticOptimizer::GeneticOptimizer(VariableSchema schema, const OptimizationProb
 
 OptimizationResult GeneticOptimizer::optimize() {
     OptimizationResult result;
+    result.statistics.seed = config_.random_seed;
     try {
         config_.validate();
         termination_.validate();
@@ -254,22 +271,26 @@ OptimizationResult GeneticOptimizer::optimize() {
     std::size_t no_improvement = 0;
     std::size_t evaluations = 0;
     std::uint64_t next_id = static_cast<std::uint64_t>(config_.population_size);
+    const auto evaluator_before = evaluator_->statistics_snapshot();
 
     for (std::size_t generation = 0; generation < max_generations; ++generation) {
         const std::size_t remaining = termination_.max_evaluations == 0
             ? population.size() : (evaluations >= termination_.max_evaluations
                 ? 0 : termination_.max_evaluations - evaluations);
         std::vector<EvaluationResult> evaluated;
+        std::size_t evaluated_count = 0;
         if (remaining >= population.size()) {
             evaluated = evaluate_safely(*evaluator_, variables_for(population),
                                          EvaluationContext{config_.random_seed, false});
             evaluations += population.size();
+            evaluated_count = population.size();
         } else if (remaining > 0) {
             std::vector<CandidateVariables> prefix;
             prefix.reserve(remaining);
             for (std::size_t i = 0; i < remaining; ++i) prefix.push_back(population[i].variables);
             evaluated = evaluate_safely(*evaluator_, prefix, EvaluationContext{config_.random_seed, false});
             evaluations += remaining;
+            evaluated_count = remaining;
             evaluated.resize(population.size());
             for (std::size_t i = remaining; i < population.size(); ++i)
                 evaluated[i] = EvaluationResult::failed("evaluation_budget", "evaluation budget exhausted");
@@ -278,14 +299,21 @@ OptimizationResult GeneticOptimizer::optimize() {
                 "evaluation_budget", "evaluation budget exhausted"));
         }
 
-        const auto summary = assign_results(population, evaluated, objective_schema);
+        const auto summary = assign_results(population, evaluated, objective_schema, evaluated_count);
         if (!objective_schema && summary.objective_schema_set)
             objective_schema = summary.objective_schema;
         result.statistics.evaluations = evaluations;
         result.statistics.successful_evaluations += summary.successful;
         result.statistics.failed_evaluations += summary.failed;
+        result.statistics.skipped_due_to_budget += population.size() - evaluated_count;
         result.statistics.generations = generation + 1;
-        copy_evaluator_statistics(result, *evaluator_);
+        if (const auto evaluator_after = evaluator_->statistics_snapshot()) {
+            const auto baseline = evaluator_before.value_or(EvaluationStatistics{});
+            const auto delta = subtract_statistics(*evaluator_after, baseline);
+            result.statistics.cache_hits = delta.cache_hits;
+            result.statistics.gpu_fallbacks = delta.fallbacks;
+            result.statistics.elapsed_seconds = delta.elapsed_seconds;
+        }
 
         if (summary.schema_error) {
             result.termination = {TerminationReason::ConfigurationError,
@@ -318,12 +346,12 @@ OptimizationResult GeneticOptimizer::optimize() {
 
         if (resolved_strategy == SelectionStrategy::NSGA2 && pending_parents) {
             population = nsga2_select(*pending_parents, population, config_.population_size,
-                                      objective_definitions(*objective_schema));
+                                      objective_definitions(*objective_schema), comparator_);
             pending_parents.reset();
         }
 
         if (resolved_strategy == SelectionStrategy::NSGA2) {
-            fill_multi_result(result, population, objective_definitions(*objective_schema));
+            fill_multi_result(result, population, objective_definitions(*objective_schema), comparator_);
         }
 
         const Candidate current_best = best_candidate(population, comparator_);
@@ -378,7 +406,7 @@ OptimizationResult GeneticOptimizer::optimize() {
         std::optional<Nsga2Ranking> mating_ranking;
         if (resolved_strategy == SelectionStrategy::NSGA2) {
             const std::vector<Candidate> candidates(population.begin(), population.end());
-            mating_ranking = nsga2_rank(candidates, objective_definitions(*objective_schema));
+            mating_ranking = nsga2_rank(candidates, objective_definitions(*objective_schema), comparator_);
         }
         while (next.size() < config_.population_size) {
             const auto parent_a = resolved_strategy == SelectionStrategy::NSGA2
@@ -403,7 +431,9 @@ OptimizationResult optimize_single_objective(const VariableSchema& schema, Batch
                                               const OptimizationConfig& config,
                                               const TerminationConfig& termination,
                                               const FeasibilityComparator& comparator) {
-    return GeneticOptimizer(schema, evaluator, config, termination, comparator).optimize();
+    auto single_config = config;
+    single_config.strategy = SelectionStrategy::SingleObjective;
+    return GeneticOptimizer(schema, evaluator, single_config, termination, comparator).optimize();
 }
 
 } // namespace coilgun::optimization

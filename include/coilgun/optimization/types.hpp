@@ -88,11 +88,13 @@ struct Candidate {
 };
 
 struct OptimizationStatistics {
+    std::uint64_t seed = 0;
     std::uint64_t evaluations = 0;
     std::uint64_t successful_evaluations = 0;
     std::uint64_t failed_evaluations = 0;
     std::uint64_t cache_hits = 0;
     std::uint64_t gpu_fallbacks = 0;
+    std::uint64_t skipped_due_to_budget = 0;
     std::uint64_t generations = 0;
     double elapsed_seconds = 0.0;
 };
