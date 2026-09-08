@@ -66,8 +66,8 @@ TMPDIR=/dev/shm cmake --build --preset cuda-release --target bench_optimization 
 ```
 
 Raw environment and timing data are saved in
-`docs/benchmarks/optimization-2026-09-08.md`. CPU-release recorded 0.015047905 s
-setup, 0.000378017 s first batch, 0.000285401 s steady-state batch, 7 optimizer
+`docs/benchmarks/optimization-2026-09-08.md`. CPU-release recorded 0.015040301 s
+setup, 0.000373103 s first batch, 0.0002866844 s steady-state batch, 7 optimizer
 evaluations, 1 cache hit, 1 isolated callback failure, 1 fallback, a feasible
 0.009764939958 m/s terminal velocity, and a `2.955109129e-08` Reference recheck error.
 
@@ -118,8 +118,7 @@ Tolerance                   = 5e-8 + 1e-6 * abs(reference)
 
 `first_step_seconds` was renamed to `first_batch_seconds` because the benchmark
 times a four-candidate batch, not one simulation step. CMake now injects both
-the actual source revision and dirty/clean worktree state; this run reports
-`source_revision=635e1b3` and `worktree_state=dirty`.
+the actual source revision and dirty/clean worktree state.
 
 The adapter's `last_batch_used_fallback()` is asserted independently after an
 actual throwing callback. `CachedBatchEvaluator::statistics().fallbacks` is
@@ -138,3 +137,35 @@ Result: 2/2 cases and 35/35 assertions passed. CPU-debug, CPU-release,
 CUDA-debug, and CUDA-release benchmark targets all ran and reported the same
 nonzero Full/Reference delta. The CPU-only integration test no longer holds the
 GPU CTest resource lock.
+
+## Persisted Revision Evidence
+
+The benchmark was configured, built, and run from a clean detached worktree at
+the exact code revision containing the validation implementation:
+
+```text
+git worktree add --detach .worktrees/opt-t12-evidence 677ce3f
+TMPDIR=/dev/shm cmake --preset cpu-release
+TMPDIR=/dev/shm cmake --build --preset cpu-release --target bench_optimization -j2
+git status --short --branch
+./build/cpu-release/tests/bench_optimization
+```
+
+The status and benchmark metadata were:
+
+```text
+## HEAD (no branch)
+source_revision=677ce3f
+worktree_state=clean
+preset=cpu-release
+setup_seconds=0.015040301
+first_batch_seconds=0.000373103
+steady_state_per_batch_seconds=0.0002866844
+terminal_velocity=0.009764939958
+feasible=1
+reference_terminal_velocity=0.009764969509
+reference_recheck_error=2.955109129e-08
+```
+
+This evidence corrects the earlier persisted pre-commit revision and dirty
+state. No source, test, or build configuration changed during the correction.

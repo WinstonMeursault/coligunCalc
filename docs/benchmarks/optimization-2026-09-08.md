@@ -3,9 +3,8 @@
 ## Environment
 
 - Validation commit: the commit containing this report (`Validate optimization workflow`)
-- Source revision embedded at configure time: `635e1b3`
-- Worktree state embedded at configure time: `dirty` (the validation changes
-  plus preserved unrelated user edits were present)
+- Source revision embedded at configure time: `677ce3f`
+- Worktree state embedded at configure time: `clean`
 - Compiler: `c++ (GCC) 16.2.1 20260810`
 - CPU: Intel Core Ultra 9 275HX, 24 cores / 24 online CPUs
 - GPU: NVIDIA GeForce RTX 5080 Laptop GPU, driver 610.57.04
@@ -19,16 +18,16 @@
 ## CPU Release Raw Output
 
 ```text
-source_revision=635e1b3
-worktree_state=dirty
+source_revision=677ce3f
+worktree_state=clean
 preset=cpu-release
 seed=20260908
-setup_seconds=0.015047905
-first_batch_seconds=0.000378017
+setup_seconds=0.015040301
+first_batch_seconds=0.000373103
 warmup_runs=2
 steady_state_runs=5
-steady_state_seconds=0.001427005
-steady_state_per_batch_seconds=0.000285401
+steady_state_seconds=0.001433422
+steady_state_per_batch_seconds=0.0002866844
 evaluations=7
 cache_hits=1
 optimizer_failed_evaluations=0
@@ -43,7 +42,7 @@ gpu_callback_calls=2
 gpu_callback_isolated_failures=1
 gpu_callback_isolated_successes=3
 gpu_callback_fallback_observed=1
-gpu_callback_fallback_seconds=0.000309274
+gpu_callback_fallback_seconds=0.000313326
 gpu_callback_fallback_successes=4
 first_batch_successes=4
 ```
@@ -53,7 +52,7 @@ first_batch_successes=4
 | Preset | Setup (s) | First CPU batch (s) | Steady CPU batch (s) | Callback fallback (s) |
 |---|---:|---:|---:|---:|
 | `cpu-debug` | 0.014895153 | 0.000360979 | 0.0002855976 | 0.000306574 |
-| `cpu-release` | 0.015047905 | 0.000378017 | 0.0002854010 | 0.000309274 |
+| `cpu-release` | 0.015040301 | 0.000373103 | 0.0002866844 | 0.000313326 |
 | `cuda-debug` | 0.014927227 | 0.000386981 | 0.0002815340 | 0.000309433 |
 | `cuda-release` | 0.015056662 | 0.000361383 | 0.0002856108 | 0.000311673 |
 
