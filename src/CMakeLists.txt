@@ -20,6 +20,8 @@ add_library(coilgun STATIC
   optimization/config.cpp
   optimization/problem.cpp
   optimization/types.cpp
+  optimization/result.cpp
+  optimization/selectors.cpp
   optimization/variables.cpp
   optimization/objective.cpp
   optimization/constraint.cpp

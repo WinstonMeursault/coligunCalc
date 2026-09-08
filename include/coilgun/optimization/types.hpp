@@ -1,12 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace coilgun::optimization {
+
+class RepresentativeSelector;
 
 using CandidateId = std::uint64_t;
 
@@ -108,6 +111,8 @@ struct OptimizationResult {
     std::unordered_map<std::string, Candidate> best_by_objective;
     OptimizationStatistics statistics;
     OptimizationTermination termination;
+
+    std::optional<Candidate> select_representative(const RepresentativeSelector& selector) const;
 };
 
 } // namespace coilgun::optimization
