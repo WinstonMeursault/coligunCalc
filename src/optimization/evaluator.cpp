@@ -103,7 +103,7 @@ std::vector<EvaluationResult> StatisticsBatchEvaluator::evaluate_batch(const std
     const auto start = std::chrono::steady_clock::now();
     statistics_.seed = x.seed;
     if (x.fallback) ++statistics_.fallbacks;
-    auto results = safe_batch(*evaluator_, c, x);
+    auto results = safe_batch_with_isolation(*evaluator_, c, x);
     statistics_.evaluations += c.size();
     for (const auto& result : results) record_status(statistics_, result);
     statistics_.elapsed_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

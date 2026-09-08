@@ -196,32 +196,34 @@ EvaluationStatistics subtract_statistics(const EvaluationStatistics& after, cons
     return delta;
 }
 
+std::vector<EvaluationResult> retry_singletons(BatchEvaluator& evaluator,
+                                                const std::vector<CandidateVariables>& variables,
+                                                const EvaluationContext& context) {
+    std::vector<EvaluationResult> results;
+    results.reserve(variables.size());
+    for (const auto& variable : variables) {
+        try {
+            auto single = evaluator.evaluate_batch({variable}, context);
+            if (single.size() == 1) results.push_back(std::move(single.front()));
+            else results.push_back(EvaluationResult::failed("evaluation_batch_output", "singleton retry returned wrong result count"));
+        } catch (const std::exception& single_error) {
+            results.push_back(EvaluationResult::failed("evaluation_exception", single_error.what()));
+        } catch (...) {
+            results.push_back(EvaluationResult::failed("evaluation_exception", "unknown exception"));
+        }
+    }
+    return results;
+}
+
 std::vector<EvaluationResult> evaluate_safely(BatchEvaluator& evaluator,
                                                const std::vector<CandidateVariables>& variables,
                                                const EvaluationContext& context) {
     try {
         return evaluator.evaluate_batch(variables, context);
-    } catch (const std::exception& error) {
-        std::vector<EvaluationResult> results;
-        results.reserve(variables.size());
-        for (const auto& variable : variables) {
-            try {
-                auto single = evaluator.evaluate_batch({variable}, context);
-                if (single.size() == 1) results.push_back(std::move(single.front()));
-                else results.push_back(EvaluationResult::failed("evaluation_batch_output", "singleton retry returned wrong result count"));
-            } catch (const std::exception& single_error) {
-                results.push_back(EvaluationResult::failed("evaluation_exception", single_error.what()));
-            } catch (...) {
-                results.push_back(EvaluationResult::failed("evaluation_exception", "unknown exception"));
-            }
-        }
-        return results;
+    } catch (const std::exception&) {
+        return retry_singletons(evaluator, variables, context);
     } catch (...) {
-        std::vector<EvaluationResult> results;
-        results.reserve(variables.size());
-        for (std::size_t i = 0; i < variables.size(); ++i)
-            results.push_back(EvaluationResult::failed("evaluation_exception", "unknown exception"));
-        return results;
+        return retry_singletons(evaluator, variables, context);
     }
 }
 

@@ -178,6 +178,18 @@ TEST_CASE("NSGA-II validates fixed objective count") {
                     std::invalid_argument);
 }
 
+TEST_CASE("NSGA-II rejects objective definition metadata mismatches") {
+    const auto values = std::vector<Candidate>{candidate(0, 1.0, 2.0)};
+    CHECK_THROWS_AS(nsga2_rank(values,
+                               {ObjectiveDefinition{"wrong", true, 1.0},
+                                ObjectiveDefinition{"second", true, 1.0}}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(nsga2_rank(values,
+                               {ObjectiveDefinition{"first", false, 1.0},
+                                ObjectiveDefinition{"second", true, 1.0}}),
+                    std::invalid_argument);
+}
+
 TEST_CASE("NSGA-II mating tournaments prefer Pareto rank over first objective") {
     Candidate low_first_rank_zero = candidate(0, 0.0, 100.0);
     Candidate high_first_rank_one = candidate(1, 100.0, 0.0);

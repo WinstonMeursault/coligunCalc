@@ -198,8 +198,53 @@ TEST_CASE("coilgun adapter rejects malformed variables and non-finite GPU output
                                                     CandidateVariables{{600.0}}},
                                                    EvaluationContext{});
     REQUIRE(non_finite.size() == 2);
-    CHECK(non_finite.front().status == EvaluationStatus::Failed);
-    CHECK(non_finite.front().diagnostics.front().code == "non_finite_result");
+    CHECK(non_finite.front().status == EvaluationStatus::Success);
+    CHECK(problem.last_batch_used_fallback());
+}
+
+TEST_CASE("coilgun adapter falls back for malformed GPU batch shape and constraints") {
+    VariableSchema schema({VariableSpec::continuous("voltage", 100.0, 1000.0)});
+    auto config = make_config();
+    config.coils.erase(config.coils.begin() + 1, config.coils.end());
+    config.excitations.resize(1);
+    config.triggers.clear();
+    config.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
+    CoilgunOptimizationProblem problem(schema, std::move(config));
+
+    problem.set_gpu_batch_evaluator([](const std::vector<CandidateVariables>& candidates,
+                                       const EvaluationContext&) {
+        std::vector<EvaluationResult> output(candidates.size() - 1, EvaluationResult::success());
+        return output;
+    });
+    const auto wrong_size = problem.evaluate_batch({CandidateVariables{{500.0}}, CandidateVariables{{600.0}}}, {});
+    REQUIRE(wrong_size.size() == 2);
+    CHECK(problem.last_batch_used_fallback());
+
+    problem.set_gpu_batch_evaluator([](const std::vector<CandidateVariables>& candidates,
+                                       const EvaluationContext&) {
+        std::vector<EvaluationResult> output(candidates.size(), EvaluationResult::success());
+        for (auto& result : output) {
+            result.objectives.push_back({"muzzle_velocity", 1.0, true});
+            result.constraints.push_back({"finite", ConstraintKind::Hard, ConstraintRelation::LessEqual,
+                                          INFINITY, 0.0, 1.0, 0.0, 0.0, false, 0});
+        }
+        return output;
+    });
+    const auto nonfinite_constraint = problem.evaluate_batch({CandidateVariables{{500.0}}}, {});
+    REQUIRE(nonfinite_constraint.size() == 1);
+    CHECK(problem.last_batch_used_fallback());
+
+    problem.set_gpu_batch_evaluator([](const std::vector<CandidateVariables>& candidates,
+                                       const EvaluationContext&) {
+        std::vector<EvaluationResult> output(candidates.size(), EvaluationResult::success());
+        for (auto& result : output) result.objectives.push_back({"wrong_objective", 1.0, true});
+        return output;
+    });
+    const auto wrong_objective = problem.evaluate_batch({CandidateVariables{{500.0}}}, {});
+    REQUIRE(wrong_objective.size() == 1);
+    CHECK(problem.last_batch_used_fallback());
+    REQUIRE(problem.statistics_snapshot());
+    CHECK(problem.statistics_snapshot()->fallbacks == 3);
 }
 
 TEST_CASE("fixed coils preserve their original inductance semantics") {

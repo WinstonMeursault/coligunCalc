@@ -58,6 +58,27 @@ public:
     }
 };
 
+class UnknownThrowingBatchEvaluator final : public BatchEvaluator {
+public:
+    std::size_t calls = 0;
+
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& candidates,
+                                                 const EvaluationContext&) override {
+        ++calls;
+        for (const auto& candidate : candidates) {
+            if (candidate.values.front() < 0.0) throw 42;
+        }
+        std::vector<EvaluationResult> results;
+        results.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"value", candidate.values.front(), true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+};
+
 class EmptyBatchEvaluator final : public BatchEvaluator {
 public:
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>&,
@@ -203,6 +224,18 @@ TEST_CASE("cached batch retries thrown batches per candidate") {
     CHECK(delegate->calls == 4);
     CHECK(adapter.statistics().evaluations == 3);
     CHECK(adapter.statistics().cache_hits == 3);
+}
+
+TEST_CASE("nested cached statistics evaluator retries thrown batches per candidate") {
+    auto delegate = std::make_shared<CandidateThrowingBatchEvaluator>();
+    auto tracked = std::make_shared<StatisticsBatchEvaluator>(delegate);
+    CachedBatchEvaluator adapter{tracked, std::make_shared<InMemoryEvaluationCache>()};
+    const auto results = adapter.evaluate_batch({cv(1.0), cv(-1.0), cv(2.0)}, EvaluationContext{5, false});
+    REQUIRE(results.size() == 3);
+    CHECK(results[0].status == EvaluationStatus::Success);
+    CHECK(results[1].status == EvaluationStatus::Failed);
+    CHECK(results[2].status == EvaluationStatus::Success);
+    CHECK(delegate->calls == 4);
 }
 
 TEST_CASE("cached evaluator batches misses once and restores input order") {

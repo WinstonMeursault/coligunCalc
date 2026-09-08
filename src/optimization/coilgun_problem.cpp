@@ -268,16 +268,20 @@ std::vector<EvaluationResult> CoilgunOptimizationProblem::evaluate_batch(
                 bool malformed = false;
                 for (auto& result : results) {
                     if (result.status == EvaluationStatus::Success) {
-                        bool finite = !result.objectives.empty();
-                        for (const auto& objective : result.objectives) finite &= std::isfinite(objective.value);
+                        bool finite = result.objectives.size() == 1;
+                        for (const auto& objective : result.objectives)
+                            finite &= objective.id == config_.objective_id && std::isfinite(objective.value);
                         for (const auto& constraint : result.constraints)
-                            finite &= std::isfinite(constraint.value) && std::isfinite(constraint.violation);
-                        if (!finite) result = EvaluationResult::failed(
-                            "non_finite_result", "GPU evaluator returned a non-finite result");
+                            finite &= !constraint.id.empty() && std::isfinite(constraint.value) &&
+                                      std::isfinite(constraint.lower_bound) && std::isfinite(constraint.upper_bound) &&
+                                      std::isfinite(constraint.violation) &&
+                                      std::isfinite(constraint.normalized_violation);
+                        if (!finite) malformed = true;
                     }
+                    if (result.status == EvaluationStatus::Unevaluated ||
+                        result.status == EvaluationStatus::Invalid)
+                        malformed = true;
                 }
-                for (const auto& result : results)
-                    malformed |= result.status == EvaluationStatus::Unevaluated;
                 if (!malformed) return results;
             }
         } catch (...) {

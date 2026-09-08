@@ -58,6 +58,13 @@ void validate_input(const std::vector<Candidate>& candidates,
         if (candidate.evaluation_status != EvaluationStatus::Success) continue;
         if (candidate.objectives.size() != count)
             throw std::invalid_argument("all candidates must have the fixed objective count");
+        if (!definitions.empty()) {
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto& objective = candidate.objectives[i];
+                if (objective.id != definitions[i].id || objective.maximize != definitions[i].maximize)
+                    throw std::invalid_argument("candidate objective metadata does not match definitions");
+            }
+        }
     }
 }
 

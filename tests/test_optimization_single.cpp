@@ -159,6 +159,18 @@ public:
     }
 };
 
+class UnknownExceptionEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        if (values.size() > 1) throw 42;
+        if (values.front().values.front() < 0.0) throw 42;
+        auto result = EvaluationResult::success();
+        result.objectives.push_back({"score", values.front().values.front(), true});
+        return {std::move(result)};
+    }
+};
+
 class FeasibilityFirstEvaluator final : public BatchEvaluator {
 public:
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
@@ -265,6 +277,18 @@ TEST_CASE("optimizer isolates direct batch exceptions by retrying candidates in 
     const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config).optimize();
 
     CHECK(result.termination.reason == TerminationReason::MaxGenerations);
+    CHECK(result.statistics.evaluations == config.population_size);
+    CHECK(result.statistics.successful_evaluations == config.population_size);
+    CHECK(result.statistics.failed_evaluations == 0);
+}
+
+TEST_CASE("optimizer isolates unknown batch exceptions and preserves successful siblings") {
+    auto config = test_config();
+    config.max_generations = 1;
+    UnknownExceptionEvaluator evaluator;
+
+    const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config).optimize();
+
     CHECK(result.statistics.evaluations == config.population_size);
     CHECK(result.statistics.successful_evaluations == config.population_size);
     CHECK(result.statistics.failed_evaluations == 0);
