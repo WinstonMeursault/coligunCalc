@@ -65,6 +65,15 @@ void validate_input(const std::vector<Candidate>& candidates,
                     throw std::invalid_argument("candidate objective metadata does not match definitions");
             }
         }
+        for (const auto& objective : candidate.objectives) {
+            if (!std::isfinite(objective.value))
+                throw std::invalid_argument("NSGA-II objective value must be finite");
+        }
+        for (const auto& constraint : candidate.constraints) {
+            if (!std::isfinite(constraint.normalized_violation) || constraint.normalized_violation < 0.0)
+                throw std::invalid_argument(
+                    "NSGA-II normalized constraint violation must be finite and non-negative");
+        }
     }
 }
 

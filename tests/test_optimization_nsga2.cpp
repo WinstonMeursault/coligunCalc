@@ -190,6 +190,32 @@ TEST_CASE("NSGA-II rejects objective definition metadata mismatches") {
                     std::invalid_argument);
 }
 
+TEST_CASE("NSGA-II rejects non-finite successful objective values") {
+    auto nan_objective = candidate(0, std::numeric_limits<double>::quiet_NaN(), 1.0);
+    CHECK_THROWS_WITH_AS(nsga2_rank({nan_objective}),
+                         "NSGA-II objective value must be finite", std::invalid_argument);
+
+    auto infinite_objective = candidate(1, 1.0, std::numeric_limits<double>::infinity());
+    CHECK_THROWS_WITH_AS(nsga2_rank({infinite_objective}),
+                         "NSGA-II objective value must be finite", std::invalid_argument);
+}
+
+TEST_CASE("NSGA-II rejects invalid normalized constraint violations") {
+    auto nan_constraint = constrained(0, 1.0, 1.0, 0.0);
+    nan_constraint.constraints.front().normalized_violation = std::numeric_limits<double>::quiet_NaN();
+    CHECK_THROWS_WITH_AS(nsga2_rank({nan_constraint}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Penalty}),
+                         "NSGA-II normalized constraint violation must be finite and non-negative",
+                         std::invalid_argument);
+
+    auto negative_constraint = constrained(1, 1.0, 1.0, 0.0);
+    negative_constraint.constraints.front().normalized_violation = -0.1;
+    CHECK_THROWS_WITH_AS(nsga2_rank({negative_constraint}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Lexicographic}),
+                         "NSGA-II normalized constraint violation must be finite and non-negative",
+                         std::invalid_argument);
+}
+
 TEST_CASE("NSGA-II mating tournaments prefer Pareto rank over first objective") {
     Candidate low_first_rank_zero = candidate(0, 0.0, 100.0);
     Candidate high_first_rank_one = candidate(1, 100.0, 0.0);
