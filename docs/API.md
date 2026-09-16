@@ -26,6 +26,34 @@ Link against the static library:
 target_link_libraries(your_target PRIVATE coilgun)
 ```
 
+The umbrella header also exposes the optimization API. A minimal custom
+problem can be evaluated and its result selected without including any
+optimization subheader:
+
+```cpp
+#include <coilgun/coilgun.hpp>
+
+class ScoreProblem final : public coilgun::optimization::OptimizationProblem {
+public:
+    coilgun::optimization::EvaluationResult evaluate(
+        const coilgun::optimization::CandidateVariables&) const override {
+        auto result = coilgun::optimization::EvaluationResult::success();
+        result.objectives.push_back({"score", 1.0, true});
+        return result;
+    }
+};
+
+ScoreProblem problem;
+auto schema = coilgun::optimization::VariableSchema({
+    coilgun::optimization::VariableSpec::continuous("x", 0.0, 1.0)});
+auto config = coilgun::optimization::OptimizationConfig::defaults();
+config.population_size = 20;
+config.max_generations = 10;
+const auto result = coilgun::optimization::GeneticOptimizer(schema, problem, config).run();
+const auto representative =
+    result.select_representative(coilgun::optimization::MaxObjective{"score"});
+```
+
 For one-off scripts you can also compile directly against the static lib:
 
 ```sh
@@ -39,6 +67,7 @@ g++ -std=c++20 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_b
 | `coilgun::physics` | Physical constants, elliptic integrals, Struve functions, quadrature, self/mutual inductance, LRU cache, lookup tables |
 | `coilgun::components` | DrivingCoil and Armature classes |
 | `coilgun::simulation` | Simulation engine: time steppers, excitation models, termination, trigger config, SimState/MultiStageState, SingleStageSim, MultiStageSim |
+| `coilgun::optimization` | Variable schemas, objective/constraint definitions, evaluators, genetic and NSGA-II optimizers, optimization results, and representative selectors |
 | `coilgun::physics::detail` | Internal helpers (lookup table data) — do not rely on these |
 
 ### API Contract, Ownership, and Errors
@@ -136,8 +165,43 @@ include/coilgun/
 │   ├── trigger_config.hpp      — TriggerMode, TriggerConfig
 │   ├── multi_stage_result.hpp  — StepSnapshot, MultiStageStep, PerStageSummary, MultiStageSummary, MultiStageResult
 │   └── multi_stage_sim.hpp     — OptimizationLevel, MultiStageState, MultiStageSim<StepperPolicy>
+├── optimization/               — public optimization framework and coilgun adapter
 └── coilgun.hpp                 — convenience umbrella header
 ```
+
+### Optimization
+
+The optimization API is available through `<coilgun/coilgun.hpp>` or through
+the individual headers under `coilgun/optimization/`. `OptimizationProblem`
+and `BatchEvaluator` define evaluation boundaries; `GeneticOptimizer` produces
+`OptimizationResult` values containing the Pareto
+front. Use `MaxObjective`, `MinConstraintViolationMargin`, `IdealPointDistance`,
+`WeightedScore`, or `LexicographicObjectives` to explicitly select a
+representative candidate. Selectors do not mutate the result.
+
+`optimize_single_objective(...)` always selects the `SingleObjective` strategy
+and reports `ConfigurationError` when the evaluator returns anything other
+than one objective. `OptimizationStatistics` records the configured run
+`seed`, attempted `evaluations`, successful and failed evaluations,
+`skipped_due_to_budget`, cache hits, actual `gpu_fallbacks`, generation count,
+and elapsed evaluation time. Candidates skipped because `max_evaluations` was
+exhausted are left `Unevaluated`; they are not failures.
+
+`BatchEvaluator::statistics_snapshot()` is an optional cumulative statistics
+interface. `StatisticsBatchEvaluator` and `CachedBatchEvaluator` implement it
+and preserve a wrapped evaluator's actual fallback count through nested
+wrappers. The optimizer snapshots the evaluator at the beginning of each run
+and reports the delta, so reuse of an evaluator does not carry cache hits,
+fallbacks, or elapsed time into a later result. In
+`CoilgunOptimizationProblem`, `gpu_fallbacks` increases only when its injected
+GPU batch callback throws or produces malformed batch output and evaluation
+continues on the CPU; merely requesting a GPU callback does not count as a
+fallback.
+
+The CMake install exports the CPU-only `coilgun::coilgun` target and installs
+the supported CPU and optimization headers. CUDA, internal detail, and build-tool
+headers remain source-tree interfaces and are not installed. Consumers can use
+`find_package(coilgun CONFIG REQUIRED)` and link `coilgun::coilgun`.
 
 `coilgun/coilgun.hpp` includes the complete CPU API listed above. The CUDA
 umbrella `coilgun/coilgun_cuda.hpp` includes that CPU umbrella plus

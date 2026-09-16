@@ -17,6 +17,21 @@ add_library(coilgun STATIC
   simulation/single_stage_sim.cpp
   simulation/multi_stage_result.cpp
   simulation/multi_stage_sim.cpp
+  optimization/config.cpp
+  optimization/problem.cpp
+  optimization/types.cpp
+  optimization/result.cpp
+  optimization/selectors.cpp
+  optimization/variables.cpp
+  optimization/objective.cpp
+  optimization/constraint.cpp
+  optimization/comparator.cpp
+  optimization/cache.cpp
+  optimization/evaluator.cpp
+  optimization/genetic_operators.cpp
+  optimization/genetic_optimizer.cpp
+  optimization/nsga2.cpp
+  optimization/coilgun_problem.cpp
 )
 
 target_include_directories(coilgun

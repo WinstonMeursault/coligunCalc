@@ -1,0 +1,242 @@
+#include <doctest/doctest.h>
+
+#include "coilgun/optimization/nsga2.hpp"
+
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <vector>
+
+using namespace coilgun::optimization;
+
+namespace {
+Candidate candidate(CandidateId id, double first, double second, bool first_max = true,
+                   bool second_max = true) {
+    Candidate result;
+    result.id = id;
+    result.evaluation_status = EvaluationStatus::Success;
+    result.objectives = {{"first", first, first_max}, {"second", second, second_max}};
+    return result;
+}
+
+Candidate constrained(CandidateId id, double first, double second, double violation) {
+    auto result = candidate(id, first, second);
+    result.constraints.push_back({"hard", ConstraintKind::Hard, ConstraintRelation::LessEqual,
+                                  violation, 0.0, 0.0, violation, violation, violation == 0.0, 0});
+    return result;
+}
+
+ConstraintReport soft_constraint(std::string id, double violation, int priority) {
+    return {std::move(id), ConstraintKind::Soft, ConstraintRelation::LessEqual,
+            violation, 0.0, 0.0, violation, violation, violation == 0.0, priority};
+}
+}
+
+TEST_CASE("NSGA-II sorts a known two-objective front and normalizes directions") {
+    std::vector<Candidate> candidates{
+        candidate(0, 1.0, 1.0), candidate(1, 2.0, 0.0), candidate(2, 0.0, 2.0),
+        candidate(3, 0.5, 0.5),
+    };
+
+    const auto ranking = nsga2_rank(candidates);
+    REQUIRE(ranking.fronts.size() == 2);
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{0, 1, 2});
+    CHECK(ranking.fronts[1] == std::vector<std::size_t>{3});
+    CHECK(ranking.ranks[0] == 0);
+    CHECK(ranking.ranks[3] == 1);
+
+    const auto min_second = nsga2_rank(
+        {candidate(0, 1.0, 1.0, true, false), candidate(1, 2.0, 0.0, true, false),
+         candidate(2, 0.0, -1.0, true, false)});
+    CHECK(min_second.fronts[0] == std::vector<std::size_t>{1, 2});
+}
+
+TEST_CASE("NSGA-II assigns infinite crowding at objective boundaries") {
+    std::vector<Candidate> candidates{
+        candidate(0, 0.0, 3.0), candidate(1, 1.0, 2.0), candidate(2, 2.0, 1.0),
+        candidate(3, 3.0, 0.0),
+    };
+    const auto ranking = nsga2_rank(candidates);
+    REQUIRE(ranking.fronts.size() == 1);
+    CHECK(std::isinf(ranking.crowding_distances[ranking.fronts[0][0]]));
+    CHECK(std::isinf(ranking.crowding_distances[ranking.fronts[0][3]]));
+    CHECK(ranking.crowding_distances[ranking.fronts[0][1]] == doctest::Approx(4.0 / 3.0));
+    CHECK(ranking.crowding_distances[ranking.fronts[0][2]] == doctest::Approx(4.0 / 3.0));
+}
+
+TEST_CASE("NSGA-II keeps duplicate objective values finite and stable") {
+    std::vector<Candidate> candidates{
+        candidate(10, 1.0, 1.0), candidate(11, 1.0, 1.0), candidate(12, 1.0, 1.0),
+        candidate(13, 2.0, 0.0),
+    };
+    const auto ranking = nsga2_rank(candidates);
+    REQUIRE(ranking.fronts.size() == 1);
+    for (const auto distance : ranking.crowding_distances) CHECK(!std::isnan(distance));
+    const auto selected = nsga2_select(candidates, {}, 2);
+    REQUIRE(selected.size() == 2);
+    CHECK(selected[0].id == 10);
+    CHECK(selected[1].id == 11);
+}
+
+TEST_CASE("NSGA-II gives feasible candidates priority over infeasible candidates") {
+    std::vector<Candidate> candidates{
+        constrained(0, 100.0, 100.0, 0.0), constrained(1, 0.0, 0.0, 1.0),
+        constrained(2, 1.0, 1.0, 0.2),
+    };
+    const auto ranking = nsga2_rank(candidates);
+    REQUIRE(ranking.fronts.size() == 3);
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{0});
+    CHECK(ranking.fronts[1] == std::vector<std::size_t>{2});
+    CHECK(ranking.fronts[2] == std::vector<std::size_t>{1});
+}
+
+TEST_CASE("NSGA-II constrained dominance honors the configured comparator") {
+    const auto feasible = constrained(0, 1.0, 1.0, 0.0);
+    const auto hard_infeasible = constrained(1, 100.0, 100.0, 1.0);
+    const auto feasibility = nsga2_rank({feasible, hard_infeasible}, {}, FeasibilityComparator{});
+    CHECK(feasibility.fronts[0] == std::vector<std::size_t>{0});
+
+    auto soft_low = constrained(2, 1.0, 1.0, 0.0);
+    auto soft_high = constrained(3, 100.0, 100.0, 0.0);
+    soft_low.constraints.front().kind = ConstraintKind::Soft;
+    soft_low.constraints.front().normalized_violation = 0.1;
+    soft_high.constraints.front().kind = ConstraintKind::Soft;
+    soft_high.constraints.front().normalized_violation = 1.0;
+    const auto penalty = nsga2_rank({soft_low, soft_high}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Penalty, 2.0});
+    CHECK(penalty.fronts[0] == std::vector<std::size_t>{0});
+
+    auto lexicographic_low_priority = candidate(4, 1.0, 1.0);
+    lexicographic_low_priority.constraints = {soft_constraint("low", 0.1, 0),
+                                              soft_constraint("high", 10.0, 1)};
+    auto lexicographic_high_priority = candidate(5, 100.0, 100.0);
+    lexicographic_high_priority.constraints = {soft_constraint("low", 0.2, 0)};
+    const auto lexicographic = nsga2_rank(
+        {lexicographic_low_priority, lexicographic_high_priority}, {},
+        FeasibilityComparator{FeasibilityStrategy::Lexicographic});
+    CHECK(lexicographic.fronts[0] == std::vector<std::size_t>{0});
+}
+
+TEST_CASE("NSGA-II applies Pareto dominance after tied constraints") {
+    const auto ranking = nsga2_rank({constrained(0, 1.0, 1.0, 1.0),
+                                     constrained(1, 2.0, 2.0, 1.0)});
+    REQUIRE(ranking.fronts.size() == 2);
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{1});
+    CHECK(ranking.ranks[0] == 1);
+    CHECK(ranking.ranks[1] == 0);
+}
+
+TEST_CASE("NSGA-II accepts failed candidates with empty objectives") {
+    Candidate failed;
+    failed.id = 0;
+    failed.evaluation_status = EvaluationStatus::Failed;
+    Candidate invalid;
+    invalid.id = 1;
+    invalid.evaluation_status = EvaluationStatus::Invalid;
+    Candidate another_failed;
+    another_failed.id = 2;
+    another_failed.evaluation_status = EvaluationStatus::Failed;
+
+    const auto failed_only = nsga2_rank({failed, invalid});
+    REQUIRE(failed_only.fronts.size() == 2);
+    CHECK(failed_only.fronts[0] == std::vector<std::size_t>{1});
+
+    const auto mixed = nsga2_rank({failed, candidate(3, 1.0, 2.0), invalid, another_failed});
+    REQUIRE(mixed.fronts.size() == 3);
+    CHECK(mixed.fronts[0] == std::vector<std::size_t>{1});
+    CHECK(mixed.fronts[1] == std::vector<std::size_t>{2});
+    CHECK(mixed.fronts[2] == std::vector<std::size_t>{0, 3});
+    for (const auto index : mixed.fronts[2])
+        CHECK(std::isinf(mixed.crowding_distances[index]));
+}
+
+TEST_CASE("NSGA-II next-generation convenience API retains comparator semantics") {
+    const auto feasible = constrained(0, 1.0, 1.0, 0.0);
+    const auto infeasible = constrained(1, 100.0, 100.0, 1.0);
+    const auto selected = select_next_generation(
+        {infeasible}, {feasible}, 1, {}, FeasibilityComparator{FeasibilityStrategy::FeasibilityFirst});
+    REQUIRE(selected.size() == 1);
+    CHECK(selected.front().id == feasible.id);
+}
+
+TEST_CASE("NSGA-II merges parents and offspring then truncates by rank and crowding") {
+    std::vector<Candidate> parents{candidate(0, 0.0, 3.0), candidate(1, 1.0, 2.0)};
+    std::vector<Candidate> offspring{candidate(2, 2.0, 1.0), candidate(3, 3.0, 0.0)};
+    const auto selected = nsga2_select(parents, offspring, 3);
+    REQUIRE(selected.size() == 3);
+    CHECK(selected[0].id == 0);
+    CHECK(selected[1].id == 3);
+    CHECK(selected[2].id == 1);
+}
+
+TEST_CASE("NSGA-II validates fixed objective count") {
+    CHECK_THROWS_AS(nsga2_rank({candidate(0, 1.0, 2.0)} ,
+                               {ObjectiveDefinition{"only", true, 1.0}}), std::invalid_argument);
+    CHECK_THROWS_AS(nsga2_rank({candidate(0, 1.0, 2.0), candidate(1, 1.0, 2.0, true, true)},
+                               {ObjectiveDefinition{"a", true, 1.0}, ObjectiveDefinition{"b", true, 1.0},
+                                ObjectiveDefinition{"c", true, 1.0}}),
+                    std::invalid_argument);
+}
+
+TEST_CASE("NSGA-II rejects objective definition metadata mismatches") {
+    const auto values = std::vector<Candidate>{candidate(0, 1.0, 2.0)};
+    CHECK_THROWS_AS(nsga2_rank(values,
+                               {ObjectiveDefinition{"wrong", true, 1.0},
+                                ObjectiveDefinition{"second", true, 1.0}}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(nsga2_rank(values,
+                               {ObjectiveDefinition{"first", false, 1.0},
+                                ObjectiveDefinition{"second", true, 1.0}}),
+                    std::invalid_argument);
+}
+
+TEST_CASE("NSGA-II rejects non-finite successful objective values") {
+    auto nan_objective = candidate(0, std::numeric_limits<double>::quiet_NaN(), 1.0);
+    CHECK_THROWS_WITH_AS(nsga2_rank({nan_objective}),
+                         "NSGA-II objective value must be finite", std::invalid_argument);
+
+    auto infinite_objective = candidate(1, 1.0, std::numeric_limits<double>::infinity());
+    CHECK_THROWS_WITH_AS(nsga2_rank({infinite_objective}),
+                         "NSGA-II objective value must be finite", std::invalid_argument);
+}
+
+TEST_CASE("NSGA-II rejects invalid normalized constraint violations") {
+    auto nan_constraint = constrained(0, 1.0, 1.0, 0.0);
+    nan_constraint.constraints.front().normalized_violation = std::numeric_limits<double>::quiet_NaN();
+    CHECK_THROWS_WITH_AS(nsga2_rank({nan_constraint}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Penalty}),
+                         "NSGA-II normalized constraint violation must be finite and non-negative",
+                         std::invalid_argument);
+
+    auto negative_constraint = constrained(1, 1.0, 1.0, 0.0);
+    negative_constraint.constraints.front().normalized_violation = -0.1;
+    CHECK_THROWS_WITH_AS(nsga2_rank({negative_constraint}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Lexicographic}),
+                         "NSGA-II normalized constraint violation must be finite and non-negative",
+                         std::invalid_argument);
+}
+
+TEST_CASE("NSGA-II mating tournaments prefer Pareto rank over first objective") {
+    Candidate low_first_rank_zero = candidate(0, 0.0, 100.0);
+    Candidate high_first_rank_one = candidate(1, 100.0, 0.0);
+    Candidate rank_zero_dominator = candidate(2, 101.0, 1.0);
+    Population population;
+    population.push_back(low_first_rank_zero);
+    population.push_back(high_first_rank_one);
+    population.push_back(rank_zero_dominator);
+
+    const std::vector<ObjectiveDefinition> definitions{{"first", true, 1.0},
+                                                       {"second", true, 1.0}};
+    const auto ranking = nsga2_rank({low_first_rank_zero, high_first_rank_one,
+                                     rank_zero_dominator}, definitions);
+    RandomContext rng(1234);
+    std::size_t low_first_selected = 0;
+    std::size_t high_first_selected = 0;
+    for (std::size_t i = 0; i < 2000; ++i) {
+        const auto selected = nsga2_tournament_select(population, ranking, rng);
+        if (selected.id == low_first_rank_zero.id) ++low_first_selected;
+        if (selected.id == high_first_rank_one.id) ++high_first_selected;
+    }
+
+    CHECK(low_first_selected > high_first_selected);
+}

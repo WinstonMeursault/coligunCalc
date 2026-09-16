@@ -150,6 +150,7 @@ Notes/
 .reflex/
 .superpowers/
 .worktrees/
+.planning/
 
 # C++ build artifacts
 *.o

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(coilgunCalc VERSION 4.1.0 LANGUAGES CXX C)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -72,3 +74,75 @@ if(COILGUN_BUILD_GENERATOR)
   target_include_directories(generate_t_table
     PRIVATE $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>)
 endif()
+
+# --- Installation and package export ---
+include(CMakePackageConfigHelpers)
+
+install(TARGETS coilgun
+  EXPORT coilgunTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(FILES include/coilgun/coilgun.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun
+)
+install(FILES include/coilgun/core/types.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/core
+)
+install(FILES
+  include/coilgun/components/armature.hpp
+  include/coilgun/components/driving_coil.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/components
+)
+install(FILES
+  include/coilgun/physics/cache.hpp
+  include/coilgun/physics/constants.hpp
+  include/coilgun/physics/elliptic.hpp
+  include/coilgun/physics/lookup_tables.hpp
+  include/coilgun/physics/mutual_inductance.hpp
+  include/coilgun/physics/quadrature.hpp
+  include/coilgun/physics/self_inductance.hpp
+  include/coilgun/physics/struve.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/physics
+)
+install(FILES
+  include/coilgun/simulation/cpu_phase_timing.hpp
+  include/coilgun/simulation/derivative_workspace.hpp
+  include/coilgun/simulation/excitation.hpp
+  include/coilgun/simulation/excitation_snapshot.hpp
+  include/coilgun/simulation/integration_state.hpp
+  include/coilgun/simulation/multi_stage_result.hpp
+  include/coilgun/simulation/multi_stage_sim.hpp
+  include/coilgun/simulation/sim_result.hpp
+  include/coilgun/simulation/single_stage_sim.hpp
+  include/coilgun/simulation/termination.hpp
+  include/coilgun/simulation/time_stepper.hpp
+  include/coilgun/simulation/trigger_config.hpp
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/simulation
+)
+install(DIRECTORY include/coilgun/optimization/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/optimization
+  FILES_MATCHING PATTERN "*.hpp"
+)
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/coilgunConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/coilgun"
+)
+install(EXPORT coilgunTargets
+  FILE coilgunTargets.cmake
+  NAMESPACE coilgun::
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/coilgun"
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfigVersion.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/coilgun"
+)
