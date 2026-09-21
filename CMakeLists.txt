@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(coilgunCalc VERSION 4.1.0 LANGUAGES CXX C)
+project(coilgunCalc VERSION 4.2.0 LANGUAGES CXX C)
 
 include(GNUInstallDirs)
 
