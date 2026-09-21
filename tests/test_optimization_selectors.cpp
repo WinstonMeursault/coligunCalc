@@ -65,6 +65,21 @@ TEST_CASE("objective selectors honor direction and preserve first candidate on t
     CHECK(ties.select_representative(MaxObjective{"score"})->id == 7);
 }
 
+TEST_CASE("all built-in selectors preserve the first candidate on complete ties") {
+    OptimizationResult ties;
+    ties.pareto_front = {
+        candidate(17, {{"score", 2.0, true}, {"cost", 4.0, false}}),
+        candidate(18, {{"score", 2.0, true}, {"cost", 4.0, false}}),
+        candidate(19, {{"score", 2.0, true}, {"cost", 4.0, false}}),
+    };
+
+    CHECK(ties.select_representative(MaxObjective{"score"})->id == 17);
+    CHECK(ties.select_representative(MinConstraintViolationMargin{})->id == 17);
+    CHECK(ties.select_representative(IdealPointDistance{})->id == 17);
+    CHECK(ties.select_representative(WeightedScore{{0.5, 0.5}})->id == 17);
+    CHECK(ties.select_representative(LexicographicObjectives{{"score", "cost"}})->id == 17);
+}
+
 TEST_CASE("constraint selector minimizes normalized violation") {
     const auto result = sample_result();
     CHECK(result.select_representative(MinConstraintViolationMargin{})->id == 1);
@@ -112,6 +127,32 @@ TEST_CASE("custom selector callback can choose a representative") {
     });
     CHECK(result.select_representative(selector)->id == 2);
     CHECK(result.select_representative(LastCandidateSelector{})->id == 3);
+}
+
+TEST_CASE("selectors preserve copied results and the complete Pareto front") {
+    const auto original = sample_result();
+    auto copied = original;
+    const auto before = copied.pareto_front;
+
+    CHECK(copied.select_representative(IdealPointDistance{})->id == 3);
+    CHECK(copied.select_representative(WeightedScore{{0.75, 0.25}})->id == 2);
+    CHECK(copied.select_representative(MaxObjective{"velocity"})->id == 2);
+    CHECK(copied.select_representative(MinConstraintViolationMargin{})->id == 1);
+    CHECK(copied.select_representative(LexicographicObjectives{{"velocity", "cost"}})->id == 2);
+    CHECK(copied.select_representative(LastCandidateSelector{})->id == 3);
+    CHECK(copied.select_representative(CallbackSelector{
+              [](const OptimizationResult& value) { return value.pareto_front.at(1); }})->id == 2);
+
+    REQUIRE(copied.pareto_front.size() == before.size());
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        CHECK(copied.pareto_front[i].id == before[i].id);
+        REQUIRE(copied.pareto_front[i].objectives.size() == before[i].objectives.size());
+        for (std::size_t j = 0; j < before[i].objectives.size(); ++j) {
+            CHECK(copied.pareto_front[i].objectives[j].id == before[i].objectives[j].id);
+            CHECK(copied.pareto_front[i].objectives[j].value == before[i].objectives[j].value);
+            CHECK(copied.pareto_front[i].objectives[j].maximize == before[i].objectives[j].maximize);
+        }
+    }
 }
 
 TEST_CASE("single-objective fronts use the same result selection API") {

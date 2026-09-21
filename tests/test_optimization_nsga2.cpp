@@ -64,6 +64,23 @@ TEST_CASE("NSGA-II assigns infinite crowding at objective boundaries") {
     CHECK(ranking.crowding_distances[ranking.fronts[0][2]] == doctest::Approx(4.0 / 3.0));
 }
 
+TEST_CASE("crowding distances preserves the legacy three-parameter function pointer") {
+    using LegacyCrowdingFunction = std::vector<double> (*) (
+        const std::vector<Candidate>&,
+        const std::vector<std::size_t>&,
+        const std::vector<ObjectiveDefinition>&);
+    const LegacyCrowdingFunction legacy_crowding_distances = &crowding_distances;
+
+    const std::vector<Candidate> candidates{
+        candidate(0, 0.0, 3.0), candidate(1, 1.0, 2.0), candidate(2, 2.0, 1.0),
+        candidate(3, 3.0, 0.0),
+    };
+    const auto distances = legacy_crowding_distances(candidates, {0, 1, 2, 3}, {});
+    REQUIRE(distances.size() == candidates.size());
+    CHECK(std::isinf(distances[0]));
+    CHECK(distances[1] == doctest::Approx(4.0 / 3.0));
+}
+
 TEST_CASE("NSGA-II keeps duplicate objective values finite and stable") {
     std::vector<Candidate> candidates{
         candidate(10, 1.0, 1.0), candidate(11, 1.0, 1.0), candidate(12, 1.0, 1.0),
@@ -104,7 +121,7 @@ TEST_CASE("NSGA-II constrained dominance honors the configured comparator") {
     soft_high.constraints.front().normalized_violation = 1.0;
     const auto penalty = nsga2_rank({soft_low, soft_high}, {},
                                     FeasibilityComparator{FeasibilityStrategy::Penalty, 2.0});
-    CHECK(penalty.fronts[0] == std::vector<std::size_t>{0});
+    CHECK(penalty.fronts[0] == std::vector<std::size_t>{1});
 
     auto lexicographic_low_priority = candidate(4, 1.0, 1.0);
     lexicographic_low_priority.constraints = {soft_constraint("low", 0.1, 0),
@@ -115,6 +132,45 @@ TEST_CASE("NSGA-II constrained dominance honors the configured comparator") {
         {lexicographic_low_priority, lexicographic_high_priority}, {},
         FeasibilityComparator{FeasibilityStrategy::Lexicographic});
     CHECK(lexicographic.fronts[0] == std::vector<std::size_t>{0});
+}
+
+TEST_CASE("NSGA-II penalty applies soft violation to every Pareto objective") {
+    auto soft_low = candidate(0, 0.0, 0.0);
+    auto soft_high = candidate(1, 100.0, 100.0);
+    soft_low.constraints.push_back(soft_constraint("soft", 0.0, 0));
+    soft_high.constraints.push_back(soft_constraint("soft", 1.0, 0));
+    const auto ranking = nsga2_rank({soft_low, soft_high}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Penalty, 1.0});
+    REQUIRE(ranking.fronts.size() == 2);
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{1});
+    CHECK(ranking.fronts[1] == std::vector<std::size_t>{0});
+}
+
+TEST_CASE("NSGA-II penalty keeps hard feasibility and hard violation ahead of objectives") {
+    const auto feasible = constrained(0, 0.0, 0.0, 0.0);
+    const auto hard_infeasible = constrained(1, 100.0, 100.0, 1.0);
+    const auto ranking = nsga2_rank({hard_infeasible, feasible}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Penalty, 100.0});
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{1});
+
+    const auto less_violation = constrained(2, 0.0, 0.0, 1.0);
+    const auto more_violation = constrained(3, 100.0, 100.0, 2.0);
+    const auto infeasible_ranking = nsga2_rank({more_violation, less_violation}, {},
+                                               FeasibilityComparator{FeasibilityStrategy::Penalty, 100.0});
+    CHECK(infeasible_ranking.fronts[0] == std::vector<std::size_t>{1});
+}
+
+TEST_CASE("NSGA-II crowding uses penalized objective values") {
+    auto first = candidate(0, 130.0, 0.0);
+    auto middle = candidate(1, 20.0, 20.0);
+    auto second_middle = candidate(2, 10.0, 80.0);
+    auto last = candidate(3, 0.0, 100.0);
+    first.constraints.push_back(soft_constraint("soft", 100.0, 0));
+    const auto ranking = nsga2_rank({first, middle, second_middle, last}, {},
+                                    FeasibilityComparator{FeasibilityStrategy::Penalty, 1.0});
+    REQUIRE(ranking.fronts.size() == 1);
+    CHECK(ranking.fronts[0] == std::vector<std::size_t>{0, 1, 2, 3});
+    CHECK(ranking.crowding_distances[1] == doctest::Approx(1.5666666666666667));
 }
 
 TEST_CASE("NSGA-II applies Pareto dominance after tied constraints") {

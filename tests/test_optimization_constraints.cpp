@@ -69,7 +69,7 @@ TEST_CASE("comparators prioritize feasibility and then objectives") {
     auto good = candidate(1);
     CHECK(FeasibilityComparator{}.better(good, bad));
     CHECK(FeasibilityComparator{}.better(bad, candidate(0, {bad.constraints.front()})));
-    auto soft_bad = candidate(100, {ConstraintDefinition{"s", ConstraintKind::Soft, ConstraintRelation::LessEqual, 0, 1, 1}.evaluate(3)});
+    auto soft_bad = candidate(0, {ConstraintDefinition{"s", ConstraintKind::Soft, ConstraintRelation::LessEqual, 0, 1, 1}.evaluate(3)});
     CHECK(FeasibilityComparator{FeasibilityStrategy::Lexicographic}.better(good, soft_bad));
     CHECK(FeasibilityComparator{FeasibilityStrategy::Penalty, 2}.better(good, soft_bad));
 }
@@ -85,7 +85,7 @@ TEST_CASE("lexicographic comparison honors per-constraint priorities") {
                                                0.0, 0.0, 1.0, 2};
     const auto lhs = candidate(0.0, {high_lhs.evaluate(1.0), low_lhs.evaluate(100.0)});
     const auto rhs = candidate(0.0, {high_rhs.evaluate(2.0), low_rhs.evaluate(0.0)});
-    CHECK(FeasibilityComparator{FeasibilityStrategy::Lexicographic}.better(lhs, rhs));
+    CHECK(FeasibilityComparator{FeasibilityStrategy::Lexicographic}.better(rhs, lhs));
 
     const auto soft_high_lhs = ConstraintDefinition{"soft-high", ConstraintKind::Soft,
                                                      ConstraintRelation::LessEqual, 0.0, 0.0, 1.0, 1};
@@ -163,6 +163,77 @@ TEST_CASE("non-success statuses have deterministic violation ordering") {
     }
 }
 
+TEST_CASE("penalty comparator adds soft violation to a maximizing objective") {
+    const auto objective_advantage = candidate(100.0, {ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                                                              ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                           .evaluate(0.5)});
+    const auto no_penalty = candidate(99.0);
+    CHECK(FeasibilityComparator{FeasibilityStrategy::Penalty, 1.0}.better(objective_advantage, no_penalty));
+}
+
+TEST_CASE("penalty comparator adds soft violation to a minimizing objective") {
+    auto objective_advantage = candidate(0.0, {ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                                                        ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                     .evaluate(2.0)});
+    objective_advantage.objectives.front().maximize = false;
+    auto no_penalty = candidate(100.0);
+    no_penalty.objectives.front().maximize = false;
+    CHECK(FeasibilityComparator{FeasibilityStrategy::Penalty, 1.0}.better(objective_advantage, no_penalty));
+}
+
+TEST_CASE("penalty comparator honors explicit objective scaling") {
+    const auto scaled_a = candidate(100.0, {ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                                                   ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                .evaluate(1.0)});
+    const auto scaled_b = candidate(98.0);
+    const ObjectiveDefinition definition{"score", true, 100.0};
+    const FeasibilityComparator comparator{FeasibilityStrategy::Penalty, 1.0};
+    CHECK(comparator.better(scaled_b, scaled_a, definition));
+    CHECK(comparator.better(scaled_a, scaled_b, ObjectiveDefinition{"score", true, 1.0}));
+}
+
+TEST_CASE("zero penalty weight disables soft penalties") {
+    const auto soft_bad = candidate(2.0, {ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                                                 ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                              .evaluate(100.0)});
+    const auto soft_good = candidate(1.0);
+    CHECK(FeasibilityComparator{FeasibilityStrategy::Penalty, 0.0}.better(soft_bad, soft_good));
+}
+
+TEST_CASE("penalty keeps hard feasibility ahead of soft penalties and objectives") {
+    const auto feasible = candidate(-1000.0, {ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                                                      ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                   .evaluate(100.0)});
+    const auto hard_infeasible = candidate(1000.0, {ConstraintDefinition{"hard", ConstraintKind::Hard,
+                                                                           ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                        .evaluate(1.0)});
+    const FeasibilityComparator comparator{FeasibilityStrategy::Penalty, 1.0};
+    CHECK(comparator.better(feasible, hard_infeasible));
+
+    const auto less_hard_violation = candidate(-1000.0, {ConstraintDefinition{"hard", ConstraintKind::Hard,
+                                                                                ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                             .evaluate(1.0),
+                                                           ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                                                                ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                             .evaluate(100.0)});
+    const auto more_hard_violation = candidate(1000.0, {ConstraintDefinition{"hard", ConstraintKind::Hard,
+                                                                                ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                                             .evaluate(2.0)});
+    CHECK(comparator.better(less_hard_violation, more_hard_violation));
+}
+
+TEST_CASE("penalty constraint-only comparison ignores soft violations") {
+    auto lhs = candidate(0.0, {ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                                       ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
+                                    .evaluate(100.0)});
+    auto rhs = candidate(0.0);
+    lhs.objectives.clear();
+    rhs.objectives.clear();
+    const FeasibilityComparator comparator{FeasibilityStrategy::Penalty, 10.0};
+    CHECK(comparator.compare(lhs, rhs) == 0);
+    CHECK(comparator.compare(rhs, lhs) == 0);
+}
+
 TEST_CASE("lexicographic status ordering precedes non-success constraint priorities") {
     auto invalid = candidate(0.0, {ConstraintDefinition{"hard", ConstraintKind::Hard,
                                                          ConstraintRelation::LessEqual, 0.0, 0.0, 1.0}
@@ -174,4 +245,50 @@ TEST_CASE("lexicographic status ordering precedes non-success constraint priorit
     const FeasibilityComparator comparator{FeasibilityStrategy::Lexicographic};
     CHECK(comparator.better(invalid, failed));
     CHECK_FALSE(comparator.better(failed, invalid));
+}
+
+TEST_CASE("lexicographic compares constraints for candidates with the same non-success status") {
+    const auto hard = ConstraintDefinition{"hard", ConstraintKind::Hard,
+                                           ConstraintRelation::LessEqual, 0.0, 0.0, 1.0, 1};
+    const auto soft = ConstraintDefinition{"soft", ConstraintKind::Soft,
+                                           ConstraintRelation::LessEqual, 0.0, 0.0, 1.0, 1};
+
+    auto hard_better = candidate(100.0, {hard.evaluate(1.0), soft.evaluate(2.0)});
+    auto hard_worse = candidate(0.0, {hard.evaluate(2.0), soft.evaluate(1.0)});
+    hard_better.evaluation_status = EvaluationStatus::Failed;
+    hard_worse.evaluation_status = EvaluationStatus::Failed;
+
+    const FeasibilityComparator comparator{FeasibilityStrategy::Lexicographic};
+    CHECK(comparator.better(hard_better, hard_worse));
+
+    auto soft_better = candidate(100.0, {hard.evaluate(1.0), soft.evaluate(1.0)});
+    auto soft_worse = candidate(0.0, {hard.evaluate(1.0), soft.evaluate(2.0)});
+    soft_better.evaluation_status = EvaluationStatus::Failed;
+    soft_worse.evaluation_status = EvaluationStatus::Failed;
+    CHECK(comparator.better(soft_better, soft_worse));
+}
+
+TEST_CASE("same-status non-success candidates use raw oriented objective tie breaks") {
+    for (const auto status : {EvaluationStatus::Invalid, EvaluationStatus::Failed,
+                              EvaluationStatus::Unevaluated}) {
+        for (const auto strategy : {FeasibilityStrategy::FeasibilityFirst,
+                                    FeasibilityStrategy::Penalty,
+                                    FeasibilityStrategy::Lexicographic}) {
+            auto objectively_better = candidate(10.0);
+            objectively_better.evaluation_status = status;
+            if (strategy == FeasibilityStrategy::Penalty) {
+                objectively_better.constraints.push_back(
+                    ConstraintDefinition{"soft", ConstraintKind::Soft, ConstraintRelation::LessEqual,
+                                         0.0, 0.0, 1.0}
+                        .evaluate(100.0));
+            }
+
+            auto objectively_worse = candidate(2.0);
+            objectively_worse.evaluation_status = status;
+
+            const FeasibilityComparator comparator{strategy, 100.0};
+            CHECK(comparator.better(objectively_better, objectively_worse));
+            CHECK_FALSE(comparator.better(objectively_worse, objectively_better));
+        }
+    }
 }

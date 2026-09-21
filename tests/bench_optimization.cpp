@@ -41,7 +41,7 @@ int main() {
     using clock = std::chrono::steady_clock;
     const auto setup_start = clock::now();
     const VariableSchema schema({VariableSpec::continuous("voltage", 450.0, 550.0)});
-    CoilgunOptimizationProblem problem(schema, workload_config());
+    auto problem = std::make_shared<CoilgunOptimizationProblem>(schema, workload_config());
     OptimizationConfig config;
     config.population_size = 4;
     config.max_generations = 2;
@@ -53,31 +53,31 @@ int main() {
         CandidateVariables{{500.0}}, CandidateVariables{{510.0}},
         CandidateVariables{{520.0}}, CandidateVariables{{530.0}}};
     const auto first_start = clock::now();
-    const auto first = problem.evaluate_batch(batch, EvaluationContext{config.random_seed, false});
+    const auto first = problem->evaluate_batch(batch, EvaluationContext{config.random_seed, false});
     const auto first_seconds = std::chrono::duration<double>(clock::now() - first_start).count();
 
     constexpr int warmup_runs = 2;
     for (int i = 0; i < warmup_runs; ++i)
-        (void)problem.evaluate_batch(batch, EvaluationContext{config.random_seed, false});
+        (void)problem->evaluate_batch(batch, EvaluationContext{config.random_seed, false});
     const auto steady_start = clock::now();
     constexpr int steady_runs = 5;
     for (int i = 0; i < steady_runs; ++i)
-        (void)problem.evaluate_batch(batch, EvaluationContext{config.random_seed, false});
+        (void)problem->evaluate_batch(batch, EvaluationContext{config.random_seed, false});
     const auto steady_seconds = std::chrono::duration<double>(clock::now() - steady_start).count();
 
     auto cache = std::make_shared<InMemoryEvaluationCache>();
-    auto evaluator = std::shared_ptr<BatchEvaluator>(&problem, [](BatchEvaluator*) {});
+    std::shared_ptr<BatchEvaluator> evaluator = problem;
     auto cached = std::make_shared<CachedBatchEvaluator>(evaluator, cache);
     const auto result = GeneticOptimizer(schema, cached, config).run();
     const auto& best = result.best_by_objective.at("muzzle_velocity");
-    auto reference_config = problem.config();
+    auto reference_config = problem->config();
     reference_config.optimization_level = coilgun::simulation::OptimizationLevel::Reference;
     CoilgunOptimizationProblem reference_problem(schema, std::move(reference_config));
     const auto reference = reference_problem.evaluate(best.variables);
     const double reference_error = std::abs(reference.objectives.front().value - best.objectives.front().value);
 
     std::size_t callback_calls = 0;
-    problem.set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>& candidates,
+    problem->set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>& candidates,
                                                       const EvaluationContext&) {
         ++callback_calls;
         std::vector<EvaluationResult> output;
@@ -88,26 +88,29 @@ int main() {
             } else {
                 auto success = EvaluationResult::success();
                 success.objectives.push_back({"muzzle_velocity", 0.0, true});
+                success.constraints.push_back({"velocity_floor", ConstraintKind::Hard,
+                    ConstraintRelation::GreaterEqual, 0.01, 0.0095, 0.0,
+                    0.0, 0.0, true, 0});
                 output.push_back(std::move(success));
             }
         }
         return output;
     });
-    const auto isolated = problem.evaluate_batch(batch, EvaluationContext{config.random_seed, false});
+    const auto isolated = problem->evaluate_batch(batch, EvaluationContext{config.random_seed, false});
     const auto isolated_failures = std::count_if(isolated.begin(), isolated.end(), [](const auto& value) {
         return value.status != EvaluationStatus::Success;
     });
 
-    problem.set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>&,
+    problem->set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>&,
                                                       const EvaluationContext&)
                                         -> std::vector<EvaluationResult> {
         ++callback_calls;
         throw std::runtime_error("synthetic GPU unavailable");
     });
     const auto fallback_start = clock::now();
-    const auto fallback_batch = problem.evaluate_batch(batch, EvaluationContext{config.random_seed, true});
+    const auto fallback_batch = problem->evaluate_batch(batch, EvaluationContext{config.random_seed, true});
     const auto fallback_seconds = std::chrono::duration<double>(clock::now() - fallback_start).count();
-    const bool fallback_observed = problem.last_batch_used_fallback();
+    const bool fallback_observed = problem->last_batch_used_fallback();
 
     std::cout << std::setprecision(10)
               << "source_revision=" << OPTIMIZATION_BENCH_SOURCE_REVISION << '\n'

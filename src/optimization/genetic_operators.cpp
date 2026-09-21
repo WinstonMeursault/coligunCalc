@@ -5,7 +5,15 @@
 
 namespace coilgun::optimization {
 
-Population Population::initialize(const VariableSchema& schema, std::size_t size, RandomContext rng) {
+Population Population::initialize(const VariableSchema& schema, std::size_t size, RandomContext& rng) {
+    return initialize(schema, size, rng, [&schema](const CandidateVariables& candidate) {
+        return schema.repair(candidate);
+    });
+}
+
+Population Population::initialize(const VariableSchema& schema, std::size_t size, RandomContext& rng,
+                                   const std::function<CandidateVariables(const CandidateVariables&)>& repair) {
+    if (!repair) throw std::invalid_argument("repair policy must be callable");
     Population p;
     p.candidates_.reserve(size);
     for (std::size_t n = 0; n < size; ++n) {
@@ -16,7 +24,7 @@ Population Population::initialize(const VariableSchema& schema, std::size_t size
             else c.variables.values.push_back(static_cast<double>(std::uniform_int_distribution<long long>(
                 static_cast<long long>(v.lower_bound), static_cast<long long>(v.upper_bound))(rng.engine())));
         }
-        c.variables = schema.repair(c.variables);
+        c.variables = repair(c.variables);
         p.push_back(std::move(c));
     }
     return p;

@@ -48,6 +48,7 @@ add_coilgun_test(test_optimization_constraints)
 add_coilgun_test(test_optimization_variables)
 add_coilgun_test(test_optimization_operators)
 add_coilgun_test(test_optimization_evaluator)
+add_coilgun_test(test_optimization_statistics)
 add_coilgun_test(test_optimization_single)
 add_coilgun_test(test_optimization_nsga2)
 add_coilgun_test(test_optimization_routing)
@@ -55,6 +56,7 @@ add_coilgun_test(test_coilgun_optimization)
 add_coilgun_test(test_optimization_selectors)
 add_coilgun_test(test_optimization_public_api)
 add_coilgun_test(test_optimization_integration)
+add_coilgun_test(test_optimization_problem_spec)
 set_tests_properties(test_optimization_integration PROPERTIES
     LABELS "validation;quick;integration" TIMEOUT 300)
 
@@ -122,6 +124,31 @@ if(COILGUN_ENABLE_CUDA)
     add_gpu_test(test_gpu_vs_cpu_multi)
     add_gpu_test(test_gpu_batch)
     add_gpu_test(test_gpu_sim_batch)
+    add_gpu_test(test_gpu_optimization_baseline)
+    add_gpu_test(test_cuda_batch_evaluator)
+    add_executable(bench_gpu_optimization_workflow bench_gpu_optimization_workflow.cpp)
+    target_link_libraries(bench_gpu_optimization_workflow PRIVATE coilgun_cuda coilgun CUDA::cudart)
+    target_compile_definitions(bench_gpu_optimization_workflow PRIVATE EIGEN_MAX_ALIGN_BYTES=32)
+    target_include_directories(bench_gpu_optimization_workflow PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    execute_process(COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GPU_WORKFLOW_BENCH_SOURCE_REVISION
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND git status --porcelain --untracked-files=normal
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GPU_WORKFLOW_BENCH_WORKTREE_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(GPU_WORKFLOW_BENCH_WORKTREE_STATUS STREQUAL "")
+        set(GPU_WORKFLOW_BENCH_WORKTREE_STATE "clean")
+    else()
+        set(GPU_WORKFLOW_BENCH_WORKTREE_STATE "dirty")
+    endif()
+    target_compile_definitions(bench_gpu_optimization_workflow PRIVATE
+        OPTIMIZATION_BENCH_SOURCE_REVISION="${GPU_WORKFLOW_BENCH_SOURCE_REVISION}"
+        OPTIMIZATION_BENCH_WORKTREE_STATE="${GPU_WORKFLOW_BENCH_WORKTREE_STATE}"
+        OPTIMIZATION_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
+        OPTIMIZATION_BENCH_CMAKE_VERSION="${CMAKE_VERSION}"
+        OPTIMIZATION_BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
     add_gpu_test(test_gpu_solver)
     add_gpu_test(test_gpu_paths)
     add_gpu_test(test_gpu_graph)
@@ -147,6 +174,8 @@ set_tests_properties(test_single_stage_sim test_multi_stage_sim
 if(COILGUN_ENABLE_CUDA)
     set_tests_properties(test_gpu_vs_cpu_single test_gpu_vs_cpu_multi
         test_gpu_batch test_gpu_sim_batch test_gpu_precision
+        PROPERTIES LABELS "gpu;slow;integration" TIMEOUT 300)
+    set_tests_properties(test_gpu_optimization_baseline
         PROPERTIES LABELS "gpu;slow;integration" TIMEOUT 300)
 endif()
 

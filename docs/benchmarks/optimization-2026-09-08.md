@@ -1,4 +1,9 @@
-# Optimization Workflow Benchmark - 2026-09-08
+# Optimization Workflow Benchmark - 2026-09-08 (historical)
+
+> Historical scope note: this record predates the production fixed-geometry
+> `CudaBatchEvaluator` delivered by B-T2/B-T3. The “no concrete CUDA optimizer
+> backend” lines below describe the 2026-09-08 measurement only; they are not a
+> current API limitation. Current GPU throughput evidence belongs to B-T4.
 
 ## Environment
 
@@ -56,10 +61,10 @@ first_batch_successes=4
 | `cuda-debug` | 0.014927227 | 0.000386981 | 0.0002815340 | 0.000309433 |
 | `cuda-release` | 0.015056662 | 0.000361383 | 0.0002856108 | 0.000311673 |
 
-The CUDA-configured runs intentionally report the same CPU workload. The
-adapter exposes a GPU batch callback and CPU fallback boundary, but this branch
-does not provide a concrete CUDA optimizer evaluator to inject. Therefore no
-GPU throughput or CPU/GPU speedup is claimed. The measured callback tests show
+The CUDA-configured runs intentionally report the same CPU workload. At the
+historical measurement revision, the adapter exposed only a GPU batch callback
+and CPU fallback boundary, so no GPU throughput or CPU/GPU speedup was claimed.
+The measured callback tests show
 that one failed callback result does not poison three successful candidates,
 and a thrown callback falls back to four successful CPU evaluations.
 

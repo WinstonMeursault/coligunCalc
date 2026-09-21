@@ -37,7 +37,7 @@ std::optional<Candidate> choose(const OptimizationResult& result, Better better)
     if (result.pareto_front.empty()) return std::nullopt;
     std::size_t best = 0;
     for (std::size_t i = 1; i < result.pareto_front.size(); ++i)
-        if (better(result.pareto_front[i], result.pareto_front[best])) best = i;
+        if (better(i, best)) best = i;
     return result.pareto_front[best];
 }
 
@@ -120,14 +120,17 @@ std::vector<std::vector<double>> normalized_objectives(const OptimizationResult&
 std::optional<Candidate> MaxObjective::select(const OptimizationResult& result) const {
     if (result.pareto_front.empty()) return std::nullopt;
     validate_objective_schema(result);
-    return choose(result, [&](const Candidate& lhs, const Candidate& rhs) {
+    return choose(result, [&](std::size_t lhs_index, std::size_t rhs_index) {
+        const auto& lhs = result.pareto_front[lhs_index];
+        const auto& rhs = result.pareto_front[rhs_index];
         return oriented(objective(lhs, objective_id_)) > oriented(objective(rhs, objective_id_));
     });
 }
 
 std::optional<Candidate> MinConstraintViolationMargin::select(const OptimizationResult& result) const {
-    return choose(result, [](const Candidate& lhs, const Candidate& rhs) {
-        return normalized_violation(lhs) < normalized_violation(rhs);
+    return choose(result, [&](std::size_t lhs_index, std::size_t rhs_index) {
+        return normalized_violation(result.pareto_front[lhs_index]) <
+               normalized_violation(result.pareto_front[rhs_index]);
     });
 }
 
@@ -136,12 +139,12 @@ std::optional<Candidate> IdealPointDistance::select(const OptimizationResult& re
     if (!std::isfinite(distance_power_) || distance_power_ <= 0.0)
         throw std::invalid_argument("distance power must be finite and positive");
     const auto values = normalized_objectives(result);
-    return choose(result, [&](const Candidate& lhs, const Candidate& rhs) {
-        const auto index = static_cast<std::size_t>(&lhs - result.pareto_front.data());
-        const auto other = static_cast<std::size_t>(&rhs - result.pareto_front.data());
+    return choose(result, [&](std::size_t lhs_index, std::size_t rhs_index) {
         double left = 0.0, right = 0.0;
-        for (const double value : values[index]) left += std::pow(1.0 - value, distance_power_);
-        for (const double value : values[other]) right += std::pow(1.0 - value, distance_power_);
+        for (const double value : values[lhs_index])
+            left += std::pow(1.0 - value, distance_power_);
+        for (const double value : values[rhs_index])
+            right += std::pow(1.0 - value, distance_power_);
         return left < right;
     });
 }
@@ -154,9 +157,7 @@ std::optional<Candidate> WeightedScore::select(const OptimizationResult& result)
     const auto values = normalized_objectives(result);
     if (!values.empty() && weights_.size() != values.front().size())
         throw std::invalid_argument("weight count must match objective count");
-    return choose(result, [&](const Candidate& lhs, const Candidate& rhs) {
-        const auto left_index = static_cast<std::size_t>(&lhs - result.pareto_front.data());
-        const auto right_index = static_cast<std::size_t>(&rhs - result.pareto_front.data());
+    return choose(result, [&](std::size_t left_index, std::size_t right_index) {
         double left = 0.0, right = 0.0;
         for (std::size_t i = 0; i < weights_.size(); ++i) {
             left += weights_[i] * values[left_index][i];
@@ -170,7 +171,9 @@ std::optional<Candidate> LexicographicObjectives::select(const OptimizationResul
     if (result.pareto_front.empty()) return std::nullopt;
     if (objective_ids_.empty()) throw std::invalid_argument("lexicographic objective list cannot be empty");
     validate_objective_schema(result);
-    return choose(result, [&](const Candidate& lhs, const Candidate& rhs) {
+    return choose(result, [&](std::size_t lhs_index, std::size_t rhs_index) {
+        const auto& lhs = result.pareto_front[lhs_index];
+        const auto& rhs = result.pareto_front[rhs_index];
         for (const auto& id : objective_ids_) {
             const double left = oriented(objective(lhs, id));
             const double right = oriented(objective(rhs, id));

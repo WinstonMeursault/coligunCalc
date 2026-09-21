@@ -16,6 +16,11 @@ using coilgun::simulation::TriggerConfig;
 using coilgun::simulation::TriggerMode;
 
 namespace {
+// Fixed-seed baseline after the post-RNG stream implementation on this branch.
+constexpr double kCurrentFullVelocityBaseline = 0.0096453039804834419;
+constexpr double kFullVelocityRegressionAbsoluteTolerance = 5e-8;
+constexpr double kFullVelocityRegressionRelativeTolerance = 1e-6;
+
 CoilgunOptimizationProblem::Config workflow_config() {
     CoilgunOptimizationProblem::Config config;
     config.coils.emplace_back(0.005, 0.010, 0.010, 12,
@@ -71,11 +76,38 @@ TEST_CASE("optimization workflow is reproducible, constrained, and reference-che
     REQUIRE(best.constraints.front().value >= 0.0095);
     CHECK(best.constraints.front().violation == doctest::Approx(0.0));
     REQUIRE(std::isfinite(best.objectives.front().value));
+    REQUIRE(best.variables.values.size() == 1);
+    const double full_velocity_tolerance = kFullVelocityRegressionAbsoluteTolerance +
+        kFullVelocityRegressionRelativeTolerance * std::abs(kCurrentFullVelocityBaseline);
+    INFO("current Full velocity baseline = ", kCurrentFullVelocityBaseline,
+         ", tolerance = ", full_velocity_tolerance,
+         ", measured = ", best.objectives.front().value);
+    CHECK(std::abs(best.objectives.front().value - kCurrentFullVelocityBaseline) <=
+          full_velocity_tolerance);
     REQUIRE(second.best_by_objective.count("muzzle_velocity") == 1);
     CHECK(best.variables.values == second.best_by_objective.at("muzzle_velocity").variables.values);
     CHECK(best.objectives.front().value ==
-          doctest::Approx(second.best_by_objective.at("muzzle_velocity").objectives.front().value));
+          second.best_by_objective.at("muzzle_velocity").objectives.front().value);
     CHECK(first.statistics.evaluations == second.statistics.evaluations);
+    CHECK(first.statistics.seed == 20260908);
+    CHECK(first.statistics.successful_evaluations == first.statistics.evaluations);
+    CHECK(first.statistics.failed_evaluations == 0);
+    CHECK(first.statistics.cache_hits == 0);
+    CHECK(first.statistics.gpu_fallbacks == 0);
+    CHECK(first.statistics.gpu_requested_evaluations == 0);
+    CHECK(first.statistics.gpu_executed_evaluations == 0);
+    CHECK(first.statistics.gpu_successful_evaluations == 0);
+    CHECK(first.statistics.gpu_failed_evaluations == 0);
+    CHECK(first.statistics.cpu_fallback_evaluations == 0);
+    CHECK(first.statistics.gpu_batches == 0);
+    CHECK(first.statistics.gpu_failed_batches == 0);
+    CHECK(first.statistics.gpu_transfer_seconds == doctest::Approx(0.0));
+    CHECK(first.statistics.gpu_kernel_seconds == doctest::Approx(0.0));
+    CHECK(first.statistics.gpu_elapsed_seconds == doctest::Approx(0.0));
+    CHECK(first.statistics.skipped_due_to_budget == 0);
+    CHECK(first.statistics.generations == 2);
+    CHECK(std::isfinite(first.statistics.elapsed_seconds));
+    CHECK(first.statistics.elapsed_seconds >= 0.0);
 
     auto reference_config = config;
     reference_config.optimization_level = coilgun::simulation::OptimizationLevel::Reference;
@@ -88,7 +120,8 @@ TEST_CASE("optimization workflow is reproducible, constrained, and reference-che
                                             best.objectives.front().value);
     REQUIRE_MESSAGE(reference_error > 1e-12,
                     "validation workload must exercise distinct Full and Reference paths");
-    const double reference_tolerance = 5e-8 + 1e-6 * std::abs(reference.objectives.front().value);
+    const double reference_tolerance = kFullVelocityRegressionAbsoluteTolerance +
+        kFullVelocityRegressionRelativeTolerance * std::abs(reference.objectives.front().value);
     CHECK(reference_error <= reference_tolerance);
 }
 
@@ -96,9 +129,9 @@ TEST_CASE("optimization workflow isolates failed batch candidates and records ad
     const auto schema = workflow_schema();
     auto config = workflow_config();
     config.bindings = {{"voltage", CoilgunParameter::ExcitationVoltage, 0}};
-    CoilgunOptimizationProblem problem(schema, std::move(config));
+    auto problem = std::make_shared<CoilgunOptimizationProblem>(schema, std::move(config));
     std::size_t callback_calls = 0;
-    problem.set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>& candidates,
+    problem->set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>& candidates,
                                                       const EvaluationContext&) {
         ++callback_calls;
         std::vector<EvaluationResult> output;
@@ -108,36 +141,39 @@ TEST_CASE("optimization workflow isolates failed batch candidates and records ad
             if (candidate.values.front() > 500.0) {
                 result = EvaluationResult::success();
                 result.objectives.push_back({"muzzle_velocity", 0.0, true});
+                result.constraints.push_back({"velocity_floor", ConstraintKind::Hard,
+                    ConstraintRelation::GreaterEqual, 0.01, 0.0095, 0.0,
+                    0.0, 0.0, true, 0});
             }
             output.push_back(std::move(result));
         }
         return output;
     });
 
-    auto problem_evaluator = std::shared_ptr<BatchEvaluator>(&problem, [](BatchEvaluator*) {});
+    std::shared_ptr<BatchEvaluator> problem_evaluator = problem;
     StatisticsBatchEvaluator tracked(problem_evaluator);
     const auto batch = tracked.evaluate_batch({CandidateVariables{{490.0}}, CandidateVariables{{510.0}}},
                                               EvaluationContext{77, true});
     REQUIRE(batch.size() == 2);
     CHECK(batch[0].status == EvaluationStatus::Failed);
     CHECK(batch[1].status == EvaluationStatus::Success);
-    CHECK_FALSE(problem.last_batch_used_fallback());
+    CHECK_FALSE(problem->last_batch_used_fallback());
     CHECK(callback_calls >= 1);
     CHECK(tracked.statistics().failed_evaluations == 1);
     CHECK(tracked.statistics().successful_evaluations == 1);
 
-    problem.set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>&,
+    problem->set_gpu_batch_evaluator([&callback_calls](const std::vector<CandidateVariables>&,
                                                       const EvaluationContext&)
                                         -> std::vector<EvaluationResult> {
         ++callback_calls;
         throw std::runtime_error("synthetic GPU unavailable");
     });
-    const auto fallback = problem.evaluate_batch({CandidateVariables{{490.0}}, CandidateVariables{{510.0}}},
+    const auto fallback = problem->evaluate_batch({CandidateVariables{{490.0}}, CandidateVariables{{510.0}}},
                                                  EvaluationContext{77, true});
     REQUIRE(fallback.size() == 2);
     CHECK(fallback[0].status == EvaluationStatus::Success);
     CHECK(fallback[1].status == EvaluationStatus::Success);
-    CHECK(problem.last_batch_used_fallback());
+    CHECK(problem->last_batch_used_fallback());
 
     auto cache = std::make_shared<InMemoryEvaluationCache>();
     CachedBatchEvaluator cached(problem_evaluator, cache);
@@ -146,7 +182,7 @@ TEST_CASE("optimization workflow isolates failed batch candidates and records ad
     REQUIRE(cached_batch.size() == 2);
     CHECK(cached.statistics().evaluations == 1);
     CHECK(cached.statistics().cache_hits == 0);
-    CHECK(problem.last_batch_used_fallback());
+    CHECK(problem->last_batch_used_fallback());
     const auto second = cached.evaluate_batch({CandidateVariables{{510.0}}}, EvaluationContext{77, false});
     REQUIRE(second.size() == 1);
     CHECK(cached.statistics().cache_hits == 1);

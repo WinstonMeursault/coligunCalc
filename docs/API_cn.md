@@ -164,12 +164,46 @@ include/coilgun/
 
 ### 优化
 
-优化 API 可通过 `<coilgun/coilgun.hpp>` 使用，也可按需引入
-`coilgun/optimization/` 下的单个头文件。`OptimizationProblem` 和
+CPU 优化 API 可通过 `<coilgun/coilgun.hpp>` 使用，也可按需引入
+`coilgun/optimization/` 下的单个头文件。CUDA 批量适配器还可通过
+`<coilgun/coilgun_cuda.hpp>` 或 `<coilgun/optimization/cuda_batch_evaluator.hpp>` 使用。
+`OptimizationProblem` 和
 `BatchEvaluator` 定义评估边界；`GeneticOptimizer` 生成包含 Pareto
 front 的 `OptimizationResult`。可使用 `MaxObjective`、
 `MinConstraintViolationMargin`、`IdealPointDistance`、`WeightedScore` 或
 `LexicographicObjectives` 明确选择代表候选解。选择器不会修改结果。
+
+公共契约可以直接由优化头文件组合：
+
+```cpp
+ProblemSpec spec(
+    VariableSchema({VariableSpec::continuous("voltage", 450.0, 550.0)}),
+    {ObjectiveDefinition{"muzzle_velocity", true, 1.0}},
+    [](const CandidateVariables& candidate) { return candidate; });
+const auto result = GeneticOptimizer(spec, evaluator).run();
+const auto& pareto = result.pareto_front;
+```
+
+`ProblemSpec` 是不可变的运行契约，拥有一个 `VariableSchema`、有序的
+`ObjectiveDefinition` 和 `ConstraintDefinition`，以及可调用的 `RepairPolicy`。
+`VariableSpec` 支持连续、整数和枚举变量；修复会截断连续值、舍入并限制整数值、校验
+枚举索引。目标声明 ID、最大化/最小化方向和 scale；约束声明 ID、`Hard` 或 `Soft` 类型、
+`Equal`、`LessEqual`、`GreaterEqual` 或 `InRange` 关系、边界、scale 和 priority。
+自定义修复策略先运行，随后执行 schema 不变量修复；构造时会拒绝重复或格式错误的定义。
+
+`SelectionStrategy::Auto` 按声明的目标数路由：一个目标使用标量遗传算法
+(`SingleObjective`)，两个或更多目标使用 NSGA-II (`NSGA2`)。显式策略与目标数不匹配会报告
+`ConfigurationError`。NSGA-II 不支持 `max_no_improvement_generations`，会在评估前拒绝该
+配置。每次运行会冻结目标 ID/方向和约束 schema；终止原因包括 `MaxGenerations`、
+`TargetReached`、`Converged`、`Cancelled`、`ConfigurationError`、`EvaluationFailure` 和
+`MaxEvaluations`。
+
+多目标运行只返回 Pareto front，不会隐式选择代表解；调用方必须显式调用
+`select_representative(...)`。支持的选择器为 `MaxObjective`、`MinConstraintViolationMargin`、
+`IdealPointDistance`、`WeightedScore`、`LexicographicObjectives` 和
+`CallbackSelector`/`CustomSelector`。选择器会校验目标 ID、按位置排列的目标数量/顺序、方向
+和权重向量；未知 ID、格式错误的向量或不一致的按位置 schema 抛出 `std::invalid_argument`；
+schema/枚举索引超出容器范围使用 `std::out_of_range`。选择结果是副本，不会修改 Pareto front。
 
 `optimize_single_objective(...)` 始终选择 `SingleObjective` 策略；当评估器返回的
 目标数不是一个时，它会报告 `ConfigurationError`。`OptimizationStatistics` 记录配置的
@@ -177,22 +211,88 @@ front 的 `OptimizationResult`。可使用 `MaxObjective`、
 实际 `gpu_fallbacks`、代数和评估耗时。因 `max_evaluations` 耗尽而跳过的候选解保持
 `Unevaluated`，不属于失败。
 
-`BatchEvaluator::statistics_snapshot()` 是可选的累计统计接口。
+`EvaluationCacheIdentity` 构造后不可变，并要求非空的 namespace 和结果 schema 版本字符串，
+通过只读字段 `namespace_id` 与 `version` 访问。`make_cache_key(identity, variables, context)` 将
+不同评估器语义的结果隔离；旧版重载使用 `coilgun.optimization.legacy` namespace、版本 `1`。
+`BatchEvaluator::cache_identity()` 的 identity 由评估器拥有。`CoilgunOptimizationProblem`
+包含完整的无歧义长度编码物理/配置指纹（包括回调 generation），`CudaBatchEvaluator` 在此基础上
+加入 backend 和 fallback policy。优化器每次运行都拥有新的运行期统计快照：`seed` 是配置的随机
+种子；`evaluations` 统计提交且未跳过的候选；`successful_evaluations` 和
+`failed_evaluations` 统计最终状态；`skipped_due_to_budget` 统计保持 `Unevaluated` 的候选；
+`generations` 统计已评估代数；`elapsed_seconds` 是优化器端到端 wall time。
+`cache_hits` 和 CUDA 字段由当前运行的 `EvaluationStatisticsCollector` 提供；
+`statistics_snapshot()` 的生命周期快照仍是累计兼容数据，不会带入后续运行。
+
+`BatchEvaluationSnapshot` 是将一个缓存 identity 与一个批量评估可调用对象
+安全配对的生命周期快照。`BatchEvaluator::evaluation_snapshot()` 是最终的生命周期边界
+（旧版评估器仍可通过默认的受保护 `make_evaluation_snapshot` hook 工作）；返回的快照可以复制、
+保存或异步调用。快照会持有 evaluator 的强 `std::shared_ptr`，直到快照释放，因此活动调用
+不会观察到正在析构的 evaluator。这个最终边界需要共享所有权；在非托管 evaluator 上调用时会以 `std::logic_error`
+拒绝，并抛出稳定消息 `BatchEvaluator::evaluation_snapshot requires shared ownership`；它绝不会
+返回捕获裸 `this` 的可调用对象。有状态的内置评估器在各自的常规互斥锁下捕获
+callback/configuration 状态，然后在执行评估前释放这些锁。快照边界本身不会长期持有评估器锁；
+`CachedBatchEvaluator`、`StatisticsBatchEvaluator`、`CoilgunOptimizationProblem` 以及 CUDA/旧版
+评估器在由 shared owner 管理时继续保持 identity、缓存、异常与统计转发语义。
+`CudaBatchEvaluator` 还会拥有源 problem 的 schema 和 configuration 不可变副本，因此其快照和
+CPU 回退不会借用源 problem。带 no-op deleter 或 aliasing 的 `shared_ptr` 不满足这个所有权契约；
+请使用真正拥有对象的 `std::make_shared` evaluator。
+
+通用评估统计的含义是：未命中缓存的 delegate `evaluations`、成功/失败状态、`cache_hits`、
+`fallbacks`、`seed`，以及经过清理的非负 `elapsed_seconds`。CUDA 字段依次表示：通过本地校验
+并提交的行数、真实 GPU 执行行数、修复前 GPU 成功/失败行数、CPU 修复行数、批次尝试数、失败
+批次尝试数、每个受影响批次一次的 `gpu_fallbacks`、传输秒数、实测 CUDA 流水线秒数和主机
+耗时。具体地，`gpu_kernel_seconds` 是 `ExecutionReport::gpu_time_ms / 1000`，不是纯 kernel
+event 计时器。缓存命中不会增加 GPU 请求或批次计数，包装器不会重复计数 CUDA 字段。
+
+`OptimizationStatistics::gpu_fallbacks` 是兼容性别名，具有明确优先级：当本次运行 collector
+报告非零 `gpu_fallbacks` 时使用该值；否则使用旧版 collector 的 `fallbacks` 值。贡献者同时
+填写两者时不会重复相加。该规则兼容旧评估器实现，同时不把普通评估失败混同为 GPU 后端回退。
+
+`CudaBatchEvaluator` 提供显式的 `CudaFallbackPolicy`：默认的 `Strict` 不进行 CPU 修复，
+`PerCandidateCpu` 和 `WholeBatchCpu` 分别允许修复单个 CUDA 行失败或整批 CUDA 失败。
+本地为 `Invalid` 的候选解不会提交到 CUDA，也不会被修复；结果数量或顺序不匹配属于协议
+错误，绝不进行修复。它通过 `EvaluationStatistics` 和 `OptimizationStatistics` 提供运行期
+GPU 指标：请求、实际执行、成功和失败的 GPU 行数，CPU 回退行数，CUDA 批次及失败批次数，
+回退事件，以及传输、实测 CUDA 流水线和主机耗时。`gpu_kernel_seconds` 是
+`ExecutionReport::gpu_time_ms` 换算为秒，即报告中的 CUDA 物理流水线测量时间，并非纯粹的
+内核事件计时器。缓存命中不会增加 GPU 请求或批次计数；包装器转发这些 CUDA 所有字段时不会
+重复计数。
+
+`BatchEvaluator::statistics_snapshot()` 是可选的累计兼容统计接口。
 `StatisticsBatchEvaluator` 和 `CachedBatchEvaluator` 都实现它，并会在嵌套包装器中
-保留被包装评估器的实际回退计数。优化器在每次运行开始时取得评估器快照并报告差值，
+保留被包装评估器的实际回退计数。优化器每次运行都使用新的运行期
+`EvaluationStatisticsCollector`，不会通过评估器生命周期快照的“运行前/运行后差值”推导本次结果，
 因此重复使用评估器不会把缓存命中、回退或耗时带入下一次结果。对于
 `CoilgunOptimizationProblem`，只有注入的 GPU 批量回调抛出异常或产生格式错误的批量
 输出、随后继续在 CPU 上评估时，`gpu_fallbacks` 才会增加；仅请求 GPU 回调不算回退。
 
-CMake 安装会导出仅支持 CPU 的 `coilgun::coilgun` 目标，并安装受支持的 CPU
-与优化头文件。CUDA、内部 detail 和构建工具头文件仅保留为源码树接口，不会安装。
-使用者可通过 `find_package(coilgun CONFIG REQUIRED)` 查找并链接 `coilgun::coilgun`。
+`CoilgunOptimizationProblem` 的绑定覆盖线圈几何/匝数/位置、激励电压/电容、触发值以及
+电枢位置/速度；`ArmatureMass` 绑定会被拒绝。指标包括末速度/炮口速度、最高温度、峰值
+电流、峰值电压、效率和能量损失。热约束要求 `enable_thermal`，所有目标/指标值都必须有限。
+`CudaBatchEvaluator` 当前只支持一个固定共享几何和电枢，支持激励电压、正电容和触发值绑定，
+并在 `OptimizationLevel::Full` 下调用一次 `SimBatch<EulerStepper>`。几何、电枢质量、任意几何、热、`RK4` 和
+非 `Full` 候选都会被拒绝。默认 `CudaFallbackPolicy::Strict`；`PerCandidateCpu` 逐行修复
+失败，`WholeBatchCpu` 修复整批合格行。本地 `Invalid` 行不会提交或修复；结果数量/顺序不匹配
+是协议错误，永不修复。由于 B-T1 测得 CUDA 峰值电流稳定低 5–8%，`PeakCurrent` 有意不作为
+生产目标或约束，但仍保留为诊断 metadata。
+
+GPU 验证必须证明 `ExecutionReport::gpu_executed == true` 且解析后的后端不是
+`BackendMode::Fallback`；仅请求 GPU 后端不能证明设备执行。
+
+CMake 安装始终导出 `coilgun::coilgun` 并安装 CPU 与优化头文件。启用 CUDA 时，
+还会导出 `coilgun::coilgun_cuda`，并安装 `coilgun_cuda.hpp`、CUDA 头文件以及
+CUDA 批量适配器头文件。构建工具源文件仍仅保留为源码树接口。使用者可通过
+`find_package(coilgun CONFIG REQUIRED)` 查找并链接与启用后端对应的目标。
+
+仅 CPU 安装通过 `coilgun::coilgun` 提供优化 API，不安装 CUDA 批量适配器；启用 CUDA 的安装
+还导出 `coilgun::coilgun_cuda` 并安装 CUDA 适配器及 CUDA 头文件。
 
 `coilgun/coilgun.hpp` 包含上面列出的完整 CPU API。CUDA 总头文件
 `coilgun/coilgun_cuda.hpp` 在此基础上额外包含 `gpu_backend.hpp`、
 `gpu_execution_config.hpp`、`gpu_execution_report.hpp`、`gpu_state_layout.hpp`、
-`gpu_engine.hpp`、`gpu_single_stage_sim.hpp`、`gpu_multi_stage_sim.hpp` 和
-`sim_batch.hpp`。以下是高级 CUDA/设备接口，有意不由 CUDA 总头文件传递包含：
+`gpu_engine.hpp`、`gpu_single_stage_sim.hpp`、`gpu_multi_stage_sim.hpp`、
+`sim_batch.hpp` 和 `optimization/cuda_batch_evaluator.hpp`。以下是高级 CUDA/设备接口，
+有意不由 CUDA 总头文件传递包含：
 `gpu_execution_context.hpp`、`gpu_graph.hpp`、`gpu_solver.hpp`、`gpu_thermal.hpp`、
 `gpu_mutual_pipeline.hpp`、`gpu_state_kernels.hpp`、`gpu_adaptor.hpp` 和
 `persistent_kernel.cuh`。它们要求启用 CUDA 构建，并不属于兼容性稳定的应用层接口。

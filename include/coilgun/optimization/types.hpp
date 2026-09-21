@@ -94,13 +94,25 @@ struct OptimizationStatistics {
     std::uint64_t failed_evaluations = 0;
     std::uint64_t cache_hits = 0;
     std::uint64_t gpu_fallbacks = 0;
+    std::uint64_t gpu_requested_evaluations = 0;
+    std::uint64_t gpu_executed_evaluations = 0;
+    std::uint64_t gpu_successful_evaluations = 0;
+    std::uint64_t gpu_failed_evaluations = 0;
+    std::uint64_t cpu_fallback_evaluations = 0;
+    std::uint64_t gpu_batches = 0;
+    std::uint64_t gpu_failed_batches = 0;
+    // gpu_kernel_seconds is the CUDA execution report's measured physical
+    // pipeline time, not a pure kernel-event timer.
+    double gpu_transfer_seconds = 0.0;
+    double gpu_kernel_seconds = 0.0;
+    double gpu_elapsed_seconds = 0.0;
     std::uint64_t skipped_due_to_budget = 0;
     std::uint64_t generations = 0;
     double elapsed_seconds = 0.0;
 };
 
 enum class TerminationReason { None, MaxGenerations, TargetReached, Converged, Cancelled,
-                               ConfigurationError, EvaluationFailure };
+                               ConfigurationError, EvaluationFailure, MaxEvaluations };
 
 struct OptimizationTermination {
     TerminationReason reason = TerminationReason::None;

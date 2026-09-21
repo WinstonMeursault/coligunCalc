@@ -7,6 +7,7 @@
 #include "coilgun/optimization/termination.hpp"
 
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -26,6 +27,22 @@ public:
                      OptimizationConfig config = OptimizationConfig::defaults(),
                      TerminationConfig termination = {},
                      FeasibilityComparator comparator = FeasibilityComparator{});
+    GeneticOptimizer(OptimizationProblem& problem,
+                     OptimizationConfig config = OptimizationConfig::defaults(),
+                     TerminationConfig termination = {},
+                     FeasibilityComparator comparator = FeasibilityComparator{});
+    GeneticOptimizer(const OptimizationProblem& problem,
+                     OptimizationConfig config = OptimizationConfig::defaults(),
+                     TerminationConfig termination = {},
+                     FeasibilityComparator comparator = FeasibilityComparator{});
+    GeneticOptimizer(ProblemSpec spec, std::shared_ptr<BatchEvaluator> evaluator,
+                     OptimizationConfig config = OptimizationConfig::defaults(),
+                     TerminationConfig termination = {},
+                     FeasibilityComparator comparator = FeasibilityComparator{});
+    GeneticOptimizer(ProblemSpec spec, BatchEvaluator& evaluator,
+                     OptimizationConfig config = OptimizationConfig::defaults(),
+                     TerminationConfig termination = {},
+                     FeasibilityComparator comparator = FeasibilityComparator{});
     template <typename Problem,
               std::enable_if_t<std::is_base_of_v<OptimizationProblem, Problem> &&
                                    std::is_base_of_v<BatchEvaluator, Problem>,
@@ -41,7 +58,8 @@ public:
     [[nodiscard]] OptimizationResult run() { return optimize(); }
 
 private:
-    VariableSchema schema_;
+    std::optional<VariableSchema> schema_;
+    std::optional<ProblemSpec> spec_;
     std::shared_ptr<BatchEvaluator> owned_evaluator_;
     BatchEvaluator* evaluator_ = nullptr;
     OptimizationConfig config_;

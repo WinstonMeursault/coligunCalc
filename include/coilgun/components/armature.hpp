@@ -161,6 +161,12 @@ public:
     double velocity() const;
     /// @brief Total armature mass including payload (kg).
     double mass() const;
+    /// @brief Material resistivity at the reference temperature (ohm·m).
+    double resistivity() const;
+    /// @brief Material density used to construct filament masses (kg/m³).
+    double material_density() const;
+    /// @brief Whether reference-grade filament self-inductance was requested.
+    bool force_exact_self_inductance() const;
 
     /// @brief Armature material (for thermal dispatch).
     physics::ArmatureMaterial material() const;
@@ -180,6 +186,7 @@ public:
 private:
     double ri_, re_, l_;
     double rho_;
+    double material_density_;
     int    m_, n_;
     double x_, v_, ma_;
     physics::ArmatureMaterial material_ = physics::ArmatureMaterial::Aluminum;
@@ -187,6 +194,7 @@ private:
     double dr_;
     double dl_;
     double nc_fil_;
+    bool force_exact_self_inductance_;
 
     std::vector<double> R_;
     std::vector<double> L_;

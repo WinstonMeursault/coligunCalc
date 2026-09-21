@@ -10,11 +10,16 @@
 #include "coilgun/simulation/multi_stage_sim.hpp"
 
 #include <functional>
+#include <cstdint>
+#include <atomic>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace coilgun::optimization {
+
+class CudaBatchEvaluator;
 
 enum class CoilgunParameter {
     CoilInnerRadius, CoilOuterRadius, CoilLength, CoilTurns, CoilPosition,
@@ -92,27 +97,47 @@ public:
     std::vector<EvaluationResult> evaluate_batch(
         const std::vector<CandidateVariables>& variables,
         const EvaluationContext& context = {}) const;
+    std::optional<std::vector<EvaluationResult>> evaluate_batch_const(
+        const std::vector<CandidateVariables>& variables,
+        const EvaluationContext& context = {}) const override;
 
-    void set_gpu_batch_evaluator(GpuBatchEvaluator evaluator) { gpu_evaluator_ = std::move(evaluator); }
-    void clear_gpu_batch_evaluator() { gpu_evaluator_ = {}; }
-    [[nodiscard]] bool has_gpu_batch_evaluator() const noexcept { return static_cast<bool>(gpu_evaluator_); }
-    [[nodiscard]] bool last_batch_used_fallback() const noexcept { return last_batch_used_fallback_; }
-    [[nodiscard]] const VariableSchema& schema() const noexcept { return schema_; }
+    void set_gpu_batch_evaluator(GpuBatchEvaluator evaluator);
+    void clear_gpu_batch_evaluator();
+    [[nodiscard]] bool has_gpu_batch_evaluator() const noexcept;
+    [[nodiscard]] EvaluationCacheIdentity cache_identity() const override;
+    [[nodiscard]] bool last_batch_used_fallback() const noexcept;
+    [[nodiscard]] const VariableSchema& schema() const noexcept { return OptimizationProblem::spec()->schema(); }
+    [[nodiscard]] const ProblemSpec& problem_spec() const noexcept { return *OptimizationProblem::spec(); }
+    [[nodiscard]] const ProblemSpec* spec() const noexcept override { return OptimizationProblem::spec(); }
     [[nodiscard]] const Config& config() const noexcept { return config_; }
     [[nodiscard]] std::optional<EvaluationStatistics> statistics_snapshot() const override;
 
 private:
+    friend class CudaBatchEvaluator;
     EvaluationResult evaluate_cpu(const CandidateVariables&) const;
+    EvaluationResult result_from_simulation(
+        const simulation::MultiStageResult&, const components::Armature&,
+        const std::vector<CoilgunExcitationConfig>&) const;
     std::vector<components::DrivingCoil> make_coils(const std::vector<double>&) const;
     double metric_value(CoilgunMetric, const simulation::MultiStageResult&, const components::Armature&,
                         const std::vector<CoilgunExcitationConfig>&) const;
     EvaluationResult invalid_result(const std::string&, const std::string&) const;
+    [[nodiscard]] std::string canonical_fingerprint() const;
+    [[nodiscard]] std::string canonical_fingerprint(bool has_gpu_evaluator,
+                                                     std::uint64_t callback_identity) const;
+    std::vector<EvaluationResult> evaluate_batch_with_callback(
+        const std::vector<CandidateVariables>&, const EvaluationContext&,
+        GpuBatchEvaluator) const;
+    BatchEvaluationSnapshot make_evaluation_snapshot() override;
 
-    VariableSchema schema_;
     Config config_;
     GpuBatchEvaluator gpu_evaluator_;
+    std::uint64_t gpu_callback_identity_ = 0;
+    mutable std::mutex gpu_callback_mutex_;
+    mutable std::mutex statistics_mutex_;
     mutable bool last_batch_used_fallback_ = false;
     mutable EvaluationStatistics statistics_;
+    static std::atomic<std::uint64_t> next_gpu_callback_identity_;
 };
 
 using CoilgunOptimizationConfig = CoilgunOptimizationProblem::Config;

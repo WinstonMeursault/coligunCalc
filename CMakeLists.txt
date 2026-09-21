@@ -87,6 +87,15 @@ install(TARGETS coilgun
 install(FILES include/coilgun/coilgun.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun
 )
+if(COILGUN_ENABLE_CUDA)
+  install(FILES include/coilgun/coilgun_cuda.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun
+  )
+  install(DIRECTORY include/coilgun/simulation/cuda/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/simulation/cuda
+    FILES_MATCHING PATTERN "*.hpp" PATTERN "*.cuh"
+  )
+endif()
 install(FILES include/coilgun/core/types.hpp
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/core
 )
@@ -124,7 +133,13 @@ install(FILES
 install(DIRECTORY include/coilgun/optimization/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/optimization
   FILES_MATCHING PATTERN "*.hpp"
+  PATTERN "cuda_batch_evaluator.hpp" EXCLUDE
 )
+if(COILGUN_ENABLE_CUDA)
+  install(FILES include/coilgun/optimization/cuda_batch_evaluator.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/coilgun/optimization
+  )
+endif()
 
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/coilgunConfigVersion.cmake"

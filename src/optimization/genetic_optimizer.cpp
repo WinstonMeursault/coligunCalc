@@ -3,6 +3,7 @@
 #include "coilgun/optimization/nsga2.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -13,10 +14,22 @@ namespace {
 
 class ProblemBatchEvaluator final : public BatchEvaluator {
 public:
-    explicit ProblemBatchEvaluator(const OptimizationProblem& problem) : problem_(problem) {}
+    explicit ProblemBatchEvaluator(const OptimizationProblem& problem, bool prefer_batch = false)
+        : problem_(problem), prefer_batch_(prefer_batch) {}
+    explicit ProblemBatchEvaluator(OptimizationProblem& problem, bool prefer_batch = false)
+        : problem_(problem), mutable_problem_(&problem), prefer_batch_(prefer_batch) {}
 
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& variables,
-                                                 const EvaluationContext&) override {
+        const EvaluationContext& context) override {
+        if (prefer_batch_) {
+            if (mutable_problem_ != nullptr) {
+                if (auto* batch = dynamic_cast<BatchEvaluator*>(mutable_problem_))
+                    return batch->evaluate_batch(variables, context);
+            } else if (const auto* batch = dynamic_cast<const BatchEvaluator*>(&problem_)) {
+                if (const auto result = batch->evaluate_batch_const(variables, context))
+                    return *result;
+            }
+        }
         std::vector<EvaluationResult> results;
         results.reserve(variables.size());
         for (const auto& value : variables) {
@@ -33,6 +46,8 @@ public:
 
 private:
     const OptimizationProblem& problem_;
+    OptimizationProblem* mutable_problem_ = nullptr;
+    bool prefer_batch_ = false;
 };
 
 void mark_failure(Candidate& candidate, EvaluationStatus status, std::string code, std::string message) {
@@ -43,13 +58,25 @@ void mark_failure(Candidate& candidate, EvaluationStatus status, std::string cod
     candidate.diagnostics.push_back({std::move(code), std::move(message), DiagnosticSeverity::Error});
 }
 
-bool objective_is_better(const Candidate& lhs, const Candidate& rhs, double tolerance) {
+bool objective_is_better(const Candidate& lhs, const Candidate& rhs,
+                         const std::vector<ObjectiveDefinition>* definitions,
+                         const FeasibilityComparator& comparator,
+                         double tolerance) {
     if (lhs.evaluation_status != EvaluationStatus::Success || rhs.evaluation_status != EvaluationStatus::Success ||
         lhs.objectives.empty() || rhs.objectives.empty()) return false;
     const auto& l = lhs.objectives.front();
     const auto& r = rhs.objectives.front();
-    if (l.maximize != r.maximize) return false;
-    return l.maximize ? l.value > r.value + tolerance : l.value < r.value - tolerance;
+    const auto definition = definitions != nullptr && !definitions->empty()
+        ? (*definitions)[0] : ObjectiveDefinition{l.id, l.maximize, 1.0};
+    const auto score = [&](const Candidate& candidate, const ObjectiveValue& objective) {
+        return definition.oriented(objective.value) +
+            (comparator.strategy() == FeasibilityStrategy::Penalty
+                ? comparator.penalty_weight() * aggregate_normalized_violation(
+                    candidate.constraints, ConstraintKind::Soft) : 0.0);
+    };
+    const double lhs_score = score(lhs, l);
+    const double rhs_score = score(rhs, r);
+    return lhs_score < rhs_score - tolerance;
 }
 
 bool non_objective_is_better(const Candidate& lhs, const Candidate& rhs,
@@ -77,6 +104,7 @@ struct EvaluatedBatch {
 
 EvaluatedBatch assign_results(Population& population, const std::vector<EvaluationResult>& results,
                               std::optional<std::vector<std::pair<std::string, bool>>> objective_schema,
+                              const ProblemSpec* spec,
                               std::size_t evaluated_count) {
     EvaluatedBatch summary;
     auto active_schema = objective_schema;
@@ -106,14 +134,14 @@ EvaluatedBatch assign_results(Population& population, const std::vector<Evaluati
             ++summary.failed;
             continue;
         }
-        if (evaluation->objectives.empty()) {
+        if (evaluation->objectives.empty() && spec == nullptr) {
             mark_failure(candidate, EvaluationStatus::Invalid, "single_objective_required",
                          "optimization requires at least one objective");
             summary.schema_error = true;
             ++summary.failed;
             continue;
         }
-        if (!active_schema) {
+        if (!active_schema && spec == nullptr) {
             std::vector<std::pair<std::string, bool>> discovered;
             discovered.reserve(evaluation->objectives.size());
             for (const auto& objective : evaluation->objectives)
@@ -122,13 +150,18 @@ EvaluatedBatch assign_results(Population& population, const std::vector<Evaluati
             summary.objective_schema_set = true;
             summary.objective_schema = discovered;
         }
-        bool valid_objectives = evaluation->objectives.size() == active_schema->size();
+        bool valid_objectives = spec != nullptr
+            ? evaluation->objectives.size() == spec->objectives().size()
+            : evaluation->objectives.size() == active_schema->size();
         if (valid_objectives) {
             for (std::size_t objective_index = 0; objective_index < evaluation->objectives.size(); ++objective_index) {
                 const auto& objective = evaluation->objectives[objective_index];
+                const auto& definition = spec != nullptr
+                    ? spec->objectives()[objective_index]
+                    : ObjectiveDefinition{(*active_schema)[objective_index].first,
+                                          (*active_schema)[objective_index].second, 1.0};
                 if (objective.id.empty() || !std::isfinite(objective.value) ||
-                    objective.id != (*active_schema)[objective_index].first ||
-                    objective.maximize != (*active_schema)[objective_index].second) {
+                    objective.id != definition.id || objective.maximize != definition.maximize) {
                     valid_objectives = false;
                     break;
                 }
@@ -137,6 +170,25 @@ EvaluatedBatch assign_results(Population& population, const std::vector<Evaluati
         if (!valid_objectives) {
             mark_failure(candidate, EvaluationStatus::Invalid, "objective_schema_mismatch",
                          "objective count, ids, and directions must remain fixed during a run");
+            summary.schema_error = true;
+            ++summary.failed;
+            continue;
+        }
+        bool valid_constraints = spec == nullptr || evaluation->constraints.size() == spec->constraints().size();
+        if (valid_constraints && spec != nullptr) {
+            for (std::size_t constraint_index = 0; constraint_index < evaluation->constraints.size(); ++constraint_index) {
+                const auto& report = evaluation->constraints[constraint_index];
+                const auto& definition = spec->constraints()[constraint_index];
+                if (report.id != definition.id || report.kind != definition.kind ||
+                    report.relation != definition.relation) {
+                    valid_constraints = false;
+                    break;
+                }
+            }
+        }
+        if (!valid_constraints) {
+            mark_failure(candidate, EvaluationStatus::Invalid, "constraint_schema_mismatch",
+                         "constraint count, ids, kinds, and relations must remain fixed during a run");
             summary.schema_error = true;
             ++summary.failed;
             continue;
@@ -182,18 +234,6 @@ void fill_multi_result(OptimizationResult& result, const Population& population,
     if (ranking.fronts.empty()) return;
     result.pareto_front.clear();
     for (const auto index : ranking.fronts.front()) result.pareto_front.push_back(candidates[index]);
-}
-
-EvaluationStatistics subtract_statistics(const EvaluationStatistics& after, const EvaluationStatistics& before) {
-    EvaluationStatistics delta;
-    delta.seed = after.seed;
-    delta.evaluations = after.evaluations - before.evaluations;
-    delta.successful_evaluations = after.successful_evaluations - before.successful_evaluations;
-    delta.failed_evaluations = after.failed_evaluations - before.failed_evaluations;
-    delta.cache_hits = after.cache_hits - before.cache_hits;
-    delta.fallbacks = after.fallbacks - before.fallbacks;
-    delta.elapsed_seconds = after.elapsed_seconds - before.elapsed_seconds;
-    return delta;
 }
 
 std::vector<EvaluationResult> retry_singletons(BatchEvaluator& evaluator,
@@ -250,9 +290,73 @@ GeneticOptimizer::GeneticOptimizer(VariableSchema schema, const OptimizationProb
       evaluator_(owned_evaluator_.get()), config_(config), termination_(std::move(termination)),
       comparator_(std::move(comparator)) {}
 
+GeneticOptimizer::GeneticOptimizer(OptimizationProblem& problem,
+                                   OptimizationConfig config, TerminationConfig termination,
+                                   FeasibilityComparator comparator)
+    : spec_(problem.spec() ? std::optional<ProblemSpec>(*problem.spec()) : std::nullopt),
+      owned_evaluator_(std::make_shared<ProblemBatchEvaluator>(problem, true)),
+      evaluator_(owned_evaluator_.get()), config_(config), termination_(std::move(termination)),
+      comparator_(std::move(comparator)) {
+    if (!spec_) throw std::invalid_argument("optimization problem does not provide a ProblemSpec");
+}
+
+GeneticOptimizer::GeneticOptimizer(const OptimizationProblem& problem,
+                                   OptimizationConfig config, TerminationConfig termination,
+                                   FeasibilityComparator comparator)
+    : spec_(problem.spec() ? std::optional<ProblemSpec>(*problem.spec()) : std::nullopt),
+      owned_evaluator_(std::make_shared<ProblemBatchEvaluator>(problem, true)),
+      evaluator_(owned_evaluator_.get()), config_(config), termination_(std::move(termination)),
+      comparator_(std::move(comparator)) {
+    if (!spec_) throw std::invalid_argument("optimization problem does not provide a ProblemSpec");
+}
+
+GeneticOptimizer::GeneticOptimizer(ProblemSpec spec, std::shared_ptr<BatchEvaluator> evaluator,
+                                   OptimizationConfig config, TerminationConfig termination,
+                                   FeasibilityComparator comparator)
+    : spec_(std::move(spec)), owned_evaluator_(std::move(evaluator)), evaluator_(owned_evaluator_.get()),
+      config_(config), termination_(std::move(termination)), comparator_(std::move(comparator)) {
+    if (!evaluator_) throw std::invalid_argument("evaluator must not be null");
+}
+
+GeneticOptimizer::GeneticOptimizer(ProblemSpec spec, BatchEvaluator& evaluator,
+                                   OptimizationConfig config, TerminationConfig termination,
+                                   FeasibilityComparator comparator)
+    : spec_(std::move(spec)), evaluator_(&evaluator), config_(config),
+      termination_(std::move(termination)), comparator_(std::move(comparator)) {}
+
 OptimizationResult GeneticOptimizer::optimize() {
     OptimizationResult result;
     result.statistics.seed = config_.random_seed;
+    const auto run_started = std::chrono::steady_clock::now();
+    auto run_statistics = std::make_shared<EvaluationStatisticsCollector>();
+    run_statistics->set_seed(config_.random_seed);
+    struct RunStatisticsFinalizer {
+        OptimizationResult& result;
+        const std::shared_ptr<EvaluationStatisticsCollector>& collector;
+        std::chrono::steady_clock::time_point started;
+        ~RunStatisticsFinalizer() {
+            const auto snapshot = collector->snapshot();
+            result.statistics.cache_hits = snapshot.cache_hits;
+            // New CUDA contributors report the explicit field. Preserve the
+            // A-track compatibility aggregate for legacy evaluators that only
+            // expose `fallbacks`, without double-counting contributors that
+            // populate both fields.
+            result.statistics.gpu_fallbacks = snapshot.gpu_fallbacks != 0
+                ? snapshot.gpu_fallbacks : snapshot.fallbacks;
+            result.statistics.gpu_requested_evaluations = snapshot.gpu_requested_evaluations;
+            result.statistics.gpu_executed_evaluations = snapshot.gpu_executed_evaluations;
+            result.statistics.gpu_successful_evaluations = snapshot.gpu_successful_evaluations;
+            result.statistics.gpu_failed_evaluations = snapshot.gpu_failed_evaluations;
+            result.statistics.cpu_fallback_evaluations = snapshot.cpu_fallback_evaluations;
+            result.statistics.gpu_batches = snapshot.gpu_batches;
+            result.statistics.gpu_failed_batches = snapshot.gpu_failed_batches;
+            result.statistics.gpu_transfer_seconds = snapshot.gpu_transfer_seconds;
+            result.statistics.gpu_kernel_seconds = snapshot.gpu_kernel_seconds;
+            result.statistics.gpu_elapsed_seconds = snapshot.gpu_elapsed_seconds;
+            result.statistics.elapsed_seconds = std::max(
+                0.0, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+        }
+    } finalize{result, run_statistics, run_started};
     try {
         config_.validate();
         termination_.validate();
@@ -262,19 +366,65 @@ OptimizationResult GeneticOptimizer::optimize() {
         return result;
     }
 
+    if (config_.strategy == SelectionStrategy::NSGA2 &&
+        termination_.max_no_improvement_generations > 0) {
+        result.termination = {TerminationReason::ConfigurationError,
+                              "max_no_improvement_generations is unsupported for NSGA2", 0};
+        return result;
+    }
+
+    const ProblemSpec* active_spec = spec_ ? &*spec_ : nullptr;
+    const std::vector<ObjectiveDefinition> declared_objectives = active_spec
+        ? active_spec->objectives() : std::vector<ObjectiveDefinition>{};
+    std::optional<std::vector<std::pair<std::string, bool>>> objective_schema;
+    if (active_spec) {
+        std::vector<std::pair<std::string, bool>> fixed;
+        fixed.reserve(declared_objectives.size());
+        for (const auto& objective : declared_objectives)
+            fixed.emplace_back(objective.id, objective.maximize);
+        objective_schema = std::move(fixed);
+    }
+    std::optional<SelectionStrategy> resolved_strategy;
+    if (active_spec) {
+        const std::size_t objective_count = declared_objectives.size();
+        if (config_.strategy == SelectionStrategy::Auto) {
+            resolved_strategy = objective_count == 1 ? SelectionStrategy::SingleObjective
+                                                     : SelectionStrategy::NSGA2;
+        } else if (config_.strategy == SelectionStrategy::SingleObjective && objective_count != 1) {
+            result.termination = {TerminationReason::ConfigurationError,
+                                  "SingleObjective strategy requires exactly one objective", 0};
+            return result;
+        } else if (config_.strategy == SelectionStrategy::NSGA2 && objective_count < 2) {
+            result.termination = {TerminationReason::ConfigurationError,
+                                  "NSGA2 strategy requires at least two objectives", 0};
+            return result;
+        } else {
+            resolved_strategy = config_.strategy;
+        }
+        if (resolved_strategy == SelectionStrategy::NSGA2 &&
+            termination_.max_no_improvement_generations > 0) {
+            result.termination = {TerminationReason::ConfigurationError,
+                                  "max_no_improvement_generations is unsupported for NSGA2", 0};
+            return result;
+        }
+    }
+    const VariableSchema& active_schema = active_spec ? active_spec->schema() : *schema_;
+    const auto repair = [active_spec, &active_schema](const CandidateVariables& candidate) {
+        return active_spec ? active_spec->repair(candidate) : active_schema.repair(candidate);
+    };
     RandomContext rng(config_.random_seed);
-    Population population = Population::initialize(schema_, config_.population_size, rng);
+    Population population = Population::initialize(active_schema, config_.population_size, rng, repair);
     const std::size_t max_generations = termination_.max_generations == 0
         ? config_.max_generations : termination_.max_generations;
-    std::optional<std::vector<std::pair<std::string, bool>>> objective_schema;
-    std::optional<SelectionStrategy> resolved_strategy;
+    std::optional<FeasibilityComparator> spec_scalar_comparator;
+    if (active_spec && resolved_strategy == SelectionStrategy::SingleObjective)
+        spec_scalar_comparator.emplace(comparator_.strategy(), comparator_.penalty_weight(),
+                                        declared_objectives.front());
     std::optional<Population> pending_parents;
     std::optional<Candidate> best;
     std::size_t no_improvement = 0;
     std::size_t evaluations = 0;
     std::uint64_t next_id = static_cast<std::uint64_t>(config_.population_size);
-    const auto evaluator_before = evaluator_->statistics_snapshot();
-
     for (std::size_t generation = 0; generation < max_generations; ++generation) {
         const std::size_t remaining = termination_.max_evaluations == 0
             ? population.size() : (evaluations >= termination_.max_evaluations
@@ -283,14 +433,15 @@ OptimizationResult GeneticOptimizer::optimize() {
         std::size_t evaluated_count = 0;
         if (remaining >= population.size()) {
             evaluated = evaluate_safely(*evaluator_, variables_for(population),
-                                         EvaluationContext{config_.random_seed, false});
+                                         EvaluationContext{config_.random_seed, false, run_statistics});
             evaluations += population.size();
             evaluated_count = population.size();
         } else if (remaining > 0) {
             std::vector<CandidateVariables> prefix;
             prefix.reserve(remaining);
             for (std::size_t i = 0; i < remaining; ++i) prefix.push_back(population[i].variables);
-            evaluated = evaluate_safely(*evaluator_, prefix, EvaluationContext{config_.random_seed, false});
+            evaluated = evaluate_safely(*evaluator_, prefix,
+                                         EvaluationContext{config_.random_seed, false, run_statistics});
             evaluations += remaining;
             evaluated_count = remaining;
             evaluated.resize(population.size());
@@ -301,7 +452,8 @@ OptimizationResult GeneticOptimizer::optimize() {
                 "evaluation_budget", "evaluation budget exhausted"));
         }
 
-        const auto summary = assign_results(population, evaluated, objective_schema, evaluated_count);
+        const auto summary = assign_results(population, evaluated, objective_schema,
+                                             active_spec, evaluated_count);
         if (!objective_schema && summary.objective_schema_set)
             objective_schema = summary.objective_schema;
         result.statistics.evaluations = evaluations;
@@ -309,17 +461,9 @@ OptimizationResult GeneticOptimizer::optimize() {
         result.statistics.failed_evaluations += summary.failed;
         result.statistics.skipped_due_to_budget += population.size() - evaluated_count;
         result.statistics.generations = generation + 1;
-        if (const auto evaluator_after = evaluator_->statistics_snapshot()) {
-            const auto baseline = evaluator_before.value_or(EvaluationStatistics{});
-            const auto delta = subtract_statistics(*evaluator_after, baseline);
-            result.statistics.cache_hits = delta.cache_hits;
-            result.statistics.gpu_fallbacks = delta.fallbacks;
-            result.statistics.elapsed_seconds = delta.elapsed_seconds;
-        }
-
         if (summary.schema_error) {
             result.termination = {TerminationReason::ConfigurationError,
-                                  "objective count, ids, and directions must remain fixed during a run", generation};
+                                  "declared objective or constraint schema mismatch", generation};
             return result;
         }
         if (summary.successful == 0) {
@@ -328,8 +472,9 @@ OptimizationResult GeneticOptimizer::optimize() {
             return result;
         }
 
-        if (!resolved_strategy && objective_schema) {
-            const std::size_t objective_count = objective_schema->size();
+        if (!resolved_strategy && (active_spec != nullptr || objective_schema)) {
+            const std::size_t objective_count = active_spec
+                ? declared_objectives.size() : objective_schema->size();
             if (config_.strategy == SelectionStrategy::Auto) {
                 resolved_strategy = objective_count == 1 ? SelectionStrategy::SingleObjective
                                                          : SelectionStrategy::NSGA2;
@@ -346,23 +491,40 @@ OptimizationResult GeneticOptimizer::optimize() {
             }
         }
 
+        if (resolved_strategy == SelectionStrategy::NSGA2 &&
+            termination_.max_no_improvement_generations > 0) {
+            result.termination = {TerminationReason::ConfigurationError,
+                                  "max_no_improvement_generations is unsupported for NSGA2", generation};
+            return result;
+        }
+
         if (resolved_strategy == SelectionStrategy::NSGA2 && pending_parents) {
             population = nsga2_select(*pending_parents, population, config_.population_size,
-                                      objective_definitions(*objective_schema), comparator_);
+                                      active_spec ? declared_objectives
+                                                   : objective_definitions(*objective_schema), comparator_);
             pending_parents.reset();
         }
 
         if (resolved_strategy == SelectionStrategy::NSGA2) {
-            fill_multi_result(result, population, objective_definitions(*objective_schema), comparator_);
+            fill_multi_result(result, population,
+                              active_spec ? declared_objectives
+                                           : objective_definitions(*objective_schema), comparator_);
         }
 
-        const Candidate current_best = best_candidate(population, comparator_);
+        const FeasibilityComparator& scalar_comparator =
+            spec_scalar_comparator ? *spec_scalar_comparator : comparator_;
+        const Candidate current_best = best_candidate(
+            population, resolved_strategy == SelectionStrategy::SingleObjective
+                ? scalar_comparator : comparator_);
         if (resolved_strategy == SelectionStrategy::SingleObjective &&
             current_best.evaluation_status == EvaluationStatus::Success) {
             const bool improved = !best ||
-                                  non_objective_is_better(current_best, *best, comparator_) ||
-                                  (non_objective_is_tied(current_best, *best, comparator_) &&
-                                   objective_is_better(current_best, *best, termination_.improvement_tolerance));
+                                  non_objective_is_better(current_best, *best, scalar_comparator) ||
+                                  (non_objective_is_tied(current_best, *best, scalar_comparator) &&
+                                   objective_is_better(current_best, *best,
+                                                       active_spec ? &declared_objectives : nullptr,
+                                                       scalar_comparator,
+                                                       termination_.improvement_tolerance));
             if (improved) {
                 best = current_best;
                 no_improvement = 0;
@@ -373,8 +535,10 @@ OptimizationResult GeneticOptimizer::optimize() {
 
             if (termination_.target_value && is_feasible(current_best.constraints)) {
                 const double value = current_best.objectives.front().value;
-                const bool reached = current_best.objectives.front().maximize
-                    ? value >= *termination_.target_value : value <= *termination_.target_value;
+                const bool maximize = active_spec
+                    ? declared_objectives.front().maximize : current_best.objectives.front().maximize;
+                const bool reached = maximize ? value >= *termination_.target_value
+                                              : value <= *termination_.target_value;
                 if (reached) {
                     result.termination = {TerminationReason::TargetReached, "target reached", generation};
                     return result;
@@ -383,9 +547,7 @@ OptimizationResult GeneticOptimizer::optimize() {
         }
 
         if (evaluations >= termination_.max_evaluations && termination_.max_evaluations != 0) {
-            // TerminationReason predates the evaluation-budget criterion; the
-            // message carries the more specific reason without changing T1 API.
-            result.termination = {TerminationReason::MaxGenerations, "evaluation budget exhausted", generation};
+            result.termination = {TerminationReason::MaxEvaluations, "evaluation budget exhausted", generation};
             return result;
         }
         if (termination_.max_no_improvement_generations != 0 &&
@@ -402,25 +564,29 @@ OptimizationResult GeneticOptimizer::optimize() {
         if (resolved_strategy == SelectionStrategy::NSGA2) {
             pending_parents = population;
         } else {
-            const auto elites = population.elites(config_.elite_count, comparator_);
+            const auto elites = population.elites(config_.elite_count, scalar_comparator);
             for (auto elite : elites) next.push_back(std::move(elite));
         }
         std::optional<Nsga2Ranking> mating_ranking;
         if (resolved_strategy == SelectionStrategy::NSGA2) {
             const std::vector<Candidate> candidates(population.begin(), population.end());
-            mating_ranking = nsga2_rank(candidates, objective_definitions(*objective_schema), comparator_);
+            mating_ranking = nsga2_rank(candidates,
+                                        active_spec ? declared_objectives
+                                                     : objective_definitions(*objective_schema), comparator_);
         }
         while (next.size() < config_.population_size) {
             const auto parent_a = resolved_strategy == SelectionStrategy::NSGA2
                 ? nsga2_tournament_select(population, *mating_ranking, rng)
-                : tournament_select(population, comparator_, rng);
+                : tournament_select(population, scalar_comparator, rng);
             const auto parent_b = resolved_strategy == SelectionStrategy::NSGA2
                 ? nsga2_tournament_select(population, *mating_ranking, rng)
-                : tournament_select(population, comparator_, rng);
+                : tournament_select(population, scalar_comparator, rng);
             Candidate child;
             child.id = next_id++;
-            child.variables = sbx_crossover(parent_a.variables, parent_b.variables, schema_, rng, config_.crossover_rate);
-            polynomial_mutation(child.variables, schema_, rng, config_.mutation_rate);
+            child.variables = sbx_crossover(parent_a.variables, parent_b.variables,
+                                             active_schema, rng, config_.crossover_rate);
+            polynomial_mutation(child.variables, active_schema, rng, config_.mutation_rate);
+            child.variables = repair(child.variables);
             next.push_back(std::move(child));
         }
         population = std::move(next);

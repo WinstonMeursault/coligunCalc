@@ -14,21 +14,28 @@ constexpr double inf = std::numeric_limits<double>::infinity();
 struct ObjectiveView {
     std::size_t count = 0;
     const std::vector<ObjectiveDefinition>* definitions = nullptr;
+    const FeasibilityComparator* comparator = nullptr;
 
     double oriented(const Candidate& candidate, std::size_t objective) const {
         if (candidate.evaluation_status != EvaluationStatus::Success ||
             objective >= candidate.objectives.size())
             return inf;
         const auto& value = candidate.objectives[objective];
+        double oriented_value = 0.0;
         if (definitions != nullptr && !definitions->empty()) {
             try {
-                return (*definitions)[objective].oriented(value.value);
+                oriented_value = (*definitions)[objective].oriented(value.value);
             } catch (const std::invalid_argument&) {
                 return inf;
             }
+        } else {
+            if (!std::isfinite(value.value)) return inf;
+            oriented_value = value.maximize ? -value.value : value.value;
         }
-        if (!std::isfinite(value.value)) return inf;
-        return value.maximize ? -value.value : value.value;
+        if (comparator != nullptr && comparator->strategy() == FeasibilityStrategy::Penalty)
+            oriented_value += comparator->penalty_weight() *
+                              aggregate_normalized_violation(candidate.constraints, ConstraintKind::Soft);
+        return oriented_value;
     }
 };
 
@@ -55,6 +62,11 @@ void validate_input(const std::vector<Candidate>& candidates,
     if (count != 0 && count < 2) throw std::invalid_argument("NSGA-II requires at least two objectives");
     if (has_success && count == 0) throw std::invalid_argument("NSGA-II requires at least two objectives");
     for (const auto& candidate : candidates) {
+        for (const auto& constraint : candidate.constraints) {
+            if (!std::isfinite(constraint.normalized_violation) || constraint.normalized_violation < 0.0)
+                throw std::invalid_argument(
+                    "NSGA-II normalized constraint violation must be finite and non-negative");
+        }
         if (candidate.evaluation_status != EvaluationStatus::Success) continue;
         if (candidate.objectives.size() != count)
             throw std::invalid_argument("all candidates must have the fixed objective count");
@@ -68,11 +80,6 @@ void validate_input(const std::vector<Candidate>& candidates,
         for (const auto& objective : candidate.objectives) {
             if (!std::isfinite(objective.value))
                 throw std::invalid_argument("NSGA-II objective value must be finite");
-        }
-        for (const auto& constraint : candidate.constraints) {
-            if (!std::isfinite(constraint.normalized_violation) || constraint.normalized_violation < 0.0)
-                throw std::invalid_argument(
-                    "NSGA-II normalized constraint violation must be finite and non-negative");
         }
     }
 }
@@ -164,7 +171,7 @@ Nsga2Ranking nsga2_rank(const std::vector<Candidate>& candidates,
     if (candidates.empty()) return result;
 
     const ObjectiveView view{objective_count(candidates, definitions),
-                             definitions.empty() ? nullptr : &definitions};
+                             definitions.empty() ? nullptr : &definitions, &comparator};
     std::vector<std::vector<std::size_t>> dominated(candidates.size());
     std::vector<std::size_t> domination_count(candidates.size(), 0);
     std::vector<std::size_t> first;
@@ -211,10 +218,18 @@ std::vector<double> crowding_distances(
     const std::vector<Candidate>& candidates,
     const std::vector<std::size_t>& front,
     const std::vector<ObjectiveDefinition>& definitions) {
+    return crowding_distances(candidates, front, definitions, FeasibilityComparator{});
+}
+
+std::vector<double> crowding_distances(
+    const std::vector<Candidate>& candidates,
+    const std::vector<std::size_t>& front,
+    const std::vector<ObjectiveDefinition>& definitions,
+    const FeasibilityComparator& comparator) {
     validate_input(candidates, definitions);
     if (candidates.empty()) return {};
     const ObjectiveView view{objective_count(candidates, definitions),
-                             definitions.empty() ? nullptr : &definitions};
+                             definitions.empty() ? nullptr : &definitions, &comparator};
     for (const auto index : front) {
         if (index >= candidates.size()) throw std::out_of_range("front index out of range");
     }

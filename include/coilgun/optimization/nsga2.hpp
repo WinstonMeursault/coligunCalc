@@ -32,6 +32,12 @@ std::vector<double> crowding_distances(
     const std::vector<std::size_t>& front,
     const std::vector<ObjectiveDefinition>& definitions = {});
 
+std::vector<double> crowding_distances(
+    const std::vector<Candidate>& candidates,
+    const std::vector<std::size_t>& front,
+    const std::vector<ObjectiveDefinition>& definitions,
+    const FeasibilityComparator& comparator);
+
 // Select one mating parent using NSGA-II rank first and crowding distance as
 // the tie-breaker. Sampling is performed uniformly from the population for
 // each tournament contender, preserving the supplied random stream.

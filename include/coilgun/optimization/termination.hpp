@@ -10,18 +10,8 @@
 
 namespace coilgun::optimization {
 
-// The domain result predates the evaluation-budget criterion.  This local
-// reason preserves that public type while allowing the optimizer to report the
-// complete set of single-objective stop conditions in its own API.
-enum class GeneticTerminationReason {
-    None,
-    MaxGenerations,
-    MaxEvaluations,
-    TargetReached,
-    Converged,
-    ConfigurationError,
-    EvaluationFailure,
-};
+// Compatibility name retained for callers of the original optimizer API.
+using GeneticTerminationReason = TerminationReason;
 
 struct TerminationConfig {
     std::size_t max_generations = 0; // zero uses OptimizationConfig::max_generations
@@ -40,33 +30,22 @@ struct TerminationConfig {
 
 using TerminationPolicy = TerminationConfig;
 
-inline const char* to_string(GeneticTerminationReason reason) {
+inline const char* to_string(TerminationReason reason) {
     switch (reason) {
-    case GeneticTerminationReason::None: return "none";
-    case GeneticTerminationReason::MaxGenerations: return "maximum generations";
-    case GeneticTerminationReason::MaxEvaluations: return "evaluation budget";
-    case GeneticTerminationReason::TargetReached: return "target reached";
-    case GeneticTerminationReason::Converged: return "no improvement";
-    case GeneticTerminationReason::ConfigurationError: return "configuration error";
-    case GeneticTerminationReason::EvaluationFailure: return "evaluation failure";
+    case TerminationReason::None: return "none";
+    case TerminationReason::MaxGenerations: return "maximum generations";
+    case TerminationReason::TargetReached: return "target reached";
+    case TerminationReason::Converged: return "no improvement";
+    case TerminationReason::Cancelled: return "cancelled";
+    case TerminationReason::ConfigurationError: return "configuration error";
+    case TerminationReason::EvaluationFailure: return "evaluation failure";
+    case TerminationReason::MaxEvaluations: return "evaluation budget";
     }
     return "unknown";
 }
 
 inline GeneticTerminationReason genetic_termination_reason(const OptimizationTermination& termination) {
-    if (termination.reason == TerminationReason::MaxGenerations &&
-        termination.message.find("evaluation budget") != std::string::npos)
-        return GeneticTerminationReason::MaxEvaluations;
-    switch (termination.reason) {
-    case TerminationReason::MaxGenerations: return GeneticTerminationReason::MaxGenerations;
-    case TerminationReason::TargetReached: return GeneticTerminationReason::TargetReached;
-    case TerminationReason::Converged: return GeneticTerminationReason::Converged;
-    case TerminationReason::ConfigurationError: return GeneticTerminationReason::ConfigurationError;
-    case TerminationReason::EvaluationFailure: return GeneticTerminationReason::EvaluationFailure;
-    case TerminationReason::Cancelled: return GeneticTerminationReason::None;
-    case TerminationReason::None: return GeneticTerminationReason::None;
-    }
-    return GeneticTerminationReason::None;
+    return termination.reason;
 }
 
 } // namespace coilgun::optimization

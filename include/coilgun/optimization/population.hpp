@@ -4,6 +4,7 @@
 #include "coilgun/optimization/comparator.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -23,7 +24,9 @@ public:
     using container_type = std::vector<Candidate>;
     using iterator = container_type::iterator;
     using const_iterator = container_type::const_iterator;
-    static Population initialize(const VariableSchema& schema, std::size_t size, RandomContext rng);
+    static Population initialize(const VariableSchema& schema, std::size_t size, RandomContext& rng);
+    static Population initialize(const VariableSchema& schema, std::size_t size, RandomContext& rng,
+                                 const std::function<CandidateVariables(const CandidateVariables&)>& repair);
     std::size_t size() const noexcept { return candidates_.size(); }
     bool empty() const noexcept { return candidates_.empty(); }
     Candidate& operator[](std::size_t i) { return candidates_[i]; }

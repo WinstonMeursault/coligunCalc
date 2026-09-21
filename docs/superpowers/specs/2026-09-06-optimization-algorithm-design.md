@@ -1,7 +1,7 @@
 # 优化模块设计：开放式约束遗传算法框架
 
 **日期：** 2026-09-06  
-**状态：** 设计已确认，待实现
+**状态：** 原始设计已确认；基础 GA/NSGA-II 与线圈炮适配器已实现。实现范围附录见第 12 节；该附录不表示 B-T4 benchmark 或整个分支已完成。
 
 ## 1. 目标与范围
 
@@ -182,3 +182,14 @@ select_representative(RepresentativeSelector)
 本阶段不改变现有仿真方程，不强制实现除遗传算法和 NSGA-II 以外的优化器，不自动把多目标压缩为加权单目标，也不在优化器内部决定工程代表解。
 
 后续可在相同 `OptimizationProblem`、`Evaluator`、`ConstraintReport` 和 `OptimizationResult` 接口上增加 DE、CMA-ES、贝叶斯优化、MOEA/D、分布式评估和可视化工具。
+
+## 12. 实现范围附录（2026-09-17）
+
+原始设计中的 GPU 评估模型已落地为 `CudaBatchEvaluator`，当前范围有意收窄：
+
+- 第一版只接受固定共享几何和电枢、`EulerStepper` 以及
+  `OptimizationLevel::Full`；任意几何候选、`RK4`、非 `Full` 路径和 CUDA 热优化指标被拒绝。
+- `PeakCurrent` 因 B-T1 的可重复 5–8% CUDA 短缺不作为生产 objective/constraint，但继续作为诊断 metadata；物理模型和既有数值容差未改变。
+- CUDA 回退策略默认为严格失败，可明确选择逐候选 CPU 修复或整批 CPU 修复；无效行不提交，批量结果数量/顺序协议错误永不修复。
+- 缓存 identity 由 evaluator 声明；`OptimizationStatistics` 的缓存、fallback 和 CUDA 字段属于一次运行的 collector，评估器 snapshot 仍是生命周期累计兼容数据。
+- 当前具体后端和真实 GPU 执行必须由 `ExecutionReport::gpu_executed` 与非 `Fallback` 后端共同证明。B-T4 的吞吐 benchmark 和 DE/CMA-ES/贝叶斯/MOEA-D 等未来算法仍是后续工作。

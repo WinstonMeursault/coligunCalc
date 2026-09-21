@@ -2,11 +2,17 @@
 
 #include "coilgun/optimization/config.hpp"
 #include "coilgun/optimization/problem.hpp"
+#include "coilgun/optimization/termination.hpp"
 #include "coilgun/optimization/types.hpp"
 
 #include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <vector>
 
 using namespace coilgun::optimization;
+
+static_assert(std::is_same_v<GeneticTerminationReason, TerminationReason>);
 
 TEST_CASE("optimization domain types have useful empty defaults") {
     CandidateVariables variables;
@@ -63,4 +69,33 @@ TEST_CASE("optimization config has deterministic defaults and validates required
     invalid = defaults;
     invalid.crossover_rate = 1.5;
     CHECK_THROWS_AS(invalid.validate(), std::invalid_argument);
+}
+
+TEST_CASE("termination reasons have complete structured names") {
+    const std::vector<std::pair<TerminationReason, std::string>> reasons = {
+        {TerminationReason::None, "none"},
+        {TerminationReason::MaxGenerations, "maximum generations"},
+        {TerminationReason::TargetReached, "target reached"},
+        {TerminationReason::Converged, "no improvement"},
+        {TerminationReason::Cancelled, "cancelled"},
+        {TerminationReason::ConfigurationError, "configuration error"},
+        {TerminationReason::EvaluationFailure, "evaluation failure"},
+        {TerminationReason::MaxEvaluations, "evaluation budget"},
+    };
+    for (const auto& [reason, name] : reasons)
+        CHECK(std::string(to_string(reason)) == name);
+}
+
+TEST_CASE("termination compatibility helper ignores diagnostic message text") {
+    const OptimizationTermination misleading{
+        TerminationReason::MaxGenerations, "evaluation budget exhausted", 3};
+    CHECK(genetic_termination_reason(misleading) == TerminationReason::MaxGenerations);
+
+    const OptimizationTermination localized{
+        TerminationReason::MaxEvaluations, "预算已耗尽", 3};
+    CHECK(genetic_termination_reason(localized) == TerminationReason::MaxEvaluations);
+
+    const OptimizationTermination cancelled{
+        TerminationReason::Cancelled, "cancelled by operator", 3};
+    CHECK(genetic_termination_reason(cancelled) == TerminationReason::Cancelled);
 }

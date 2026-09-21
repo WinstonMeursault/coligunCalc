@@ -43,8 +43,33 @@ public:
 
 class TwoObjectiveEvaluator final : public BatchEvaluator {
 public:
+    std::size_t calls = 0;
+
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
                                                  const EvaluationContext&) override {
+        ++calls;
+        std::vector<EvaluationResult> results;
+        results.reserve(values.size());
+        for (const auto& value : values) {
+            const double x = value.values.front();
+            auto result = EvaluationResult::success();
+            result.objectives.push_back({"left", x, true});
+            result.objectives.push_back({"right", 1.0 - x, true});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+};
+
+class CountingTwoObjectiveEvaluator final : public BatchEvaluator {
+public:
+    std::size_t calls = 0;
+    std::size_t candidates = 0;
+
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        ++calls;
+        candidates += values.size();
         std::vector<EvaluationResult> results;
         results.reserve(values.size());
         for (const auto& value : values) {
@@ -147,6 +172,33 @@ TEST_CASE("Explicit strategies reject incompatible objective counts") {
     const auto nsga_result = GeneticOptimizer(
         schema(), single_evaluator, config(SelectionStrategy::NSGA2)).optimize();
     CHECK(nsga_result.termination.reason == TerminationReason::ConfigurationError);
+}
+
+TEST_CASE("explicit NSGA-II stagnation configuration fails before evaluator work") {
+    auto evaluator = std::make_shared<CountingTwoObjectiveEvaluator>();
+    auto termination = TerminationConfig{};
+    termination.max_no_improvement_generations = 2;
+
+    auto explicit_config = config(SelectionStrategy::NSGA2);
+    const auto result = GeneticOptimizer(schema(), evaluator, explicit_config, termination).optimize();
+
+    CHECK(result.termination.reason == TerminationReason::ConfigurationError);
+    CHECK(evaluator->calls == 0);
+    CHECK(evaluator->candidates == 0);
+}
+
+TEST_CASE("Auto NSGA-II stagnation configuration fails after schema discovery") {
+    auto evaluator = std::make_shared<CountingTwoObjectiveEvaluator>();
+    auto termination = TerminationConfig{};
+    termination.max_no_improvement_generations = 2;
+
+    const auto result = GeneticOptimizer(schema(), evaluator, config(), termination).optimize();
+
+    CHECK(result.termination.reason == TerminationReason::ConfigurationError);
+    CHECK(evaluator->calls == 1);
+    CHECK(evaluator->candidates == config().population_size);
+    CHECK(result.statistics.generations == 1);
+    CHECK(result.pareto_front.empty());
 }
 
 TEST_CASE("Auto routing freezes objective count for the whole run") {

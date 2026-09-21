@@ -9,8 +9,10 @@ using namespace coilgun::optimization;
 TEST_CASE("population initialization is reproducible and repaired") {
     VariableSchema schema({VariableSpec::continuous("x", 0, 1), VariableSpec::integer("n", 1, 3),
                            VariableSpec::enumeration("mode", {"a", "b", "c"})});
-    auto a = Population::initialize(schema, 12, RandomContext(42));
-    auto b = Population::initialize(schema, 12, RandomContext(42));
+    RandomContext rng_a(42);
+    RandomContext rng_b(42);
+    auto a = Population::initialize(schema, 12, rng_a);
+    auto b = Population::initialize(schema, 12, rng_b);
     REQUIRE(a.size() == 12);
     REQUIRE(a.size() == b.size());
     for (std::size_t i = 0; i < a.size(); ++i) {
@@ -19,6 +21,22 @@ TEST_CASE("population initialization is reproducible and repaired") {
         CHECK(a[i].variables.values[0] <= 1);
         CHECK(a[i].variables.values[1] == doctest::Approx(std::round(a[i].variables.values[1])));
     }
+    CHECK(rng_a.uniform() == rng_b.uniform());
+}
+
+TEST_CASE("population initialization advances the caller random stream") {
+    VariableSchema schema({VariableSpec::continuous("x", 0, 1)});
+    constexpr std::size_t population_size = 7;
+    RandomContext rng(4242);
+    RandomContext reference(4242);
+    RandomContext fresh(4242);
+
+    Population::initialize(schema, population_size, rng);
+    for (std::size_t i = 0; i < population_size; ++i) reference.uniform(0, 1);
+
+    const double next_draw = rng.uniform();
+    CHECK(next_draw == reference.uniform());
+    CHECK(next_draw != fresh.uniform());
 }
 
 TEST_CASE("mixed variable crossover and mutation preserve schema types") {

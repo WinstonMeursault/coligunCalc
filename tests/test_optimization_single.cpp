@@ -21,6 +21,7 @@ public:
 
     std::size_t calls = 0;
     std::size_t candidates = 0;
+    std::vector<double> evaluated_values;
 
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
                                                  const EvaluationContext&) override {
@@ -31,6 +32,7 @@ public:
         for (const auto& value : values) {
             auto result = EvaluationResult::success();
             const double x = value.values.front();
+            evaluated_values.push_back(x);
             result.objectives.push_back({"score", constant_ ? 1.0 : x, maximize_});
             results.push_back(std::move(result));
         }
@@ -161,10 +163,14 @@ public:
 
 class UnknownExceptionEvaluator final : public BatchEvaluator {
 public:
+    std::size_t singleton_calls = 0;
+    std::vector<double> successful_values;
+
     std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
                                                  const EvaluationContext&) override {
         if (values.size() > 1) throw 42;
-        if (values.front().values.front() < 0.0) throw 42;
+        if (++singleton_calls == 1) throw 42;
+        successful_values.push_back(values.front().values.front());
         auto result = EvaluationResult::success();
         result.objectives.push_back({"score", values.front().values.front(), true});
         return {std::move(result)};
@@ -193,6 +199,26 @@ public:
     std::size_t calls = 0;
 };
 
+class SoftPenaltyWinnerEvaluator final : public BatchEvaluator {
+public:
+    std::vector<EvaluationResult> evaluate_batch(const std::vector<CandidateVariables>& values,
+                                                 const EvaluationContext&) override {
+        std::vector<EvaluationResult> results;
+        results.reserve(values.size());
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            auto result = EvaluationResult::success();
+            // Candidate zero has a larger raw objective but a soft violation.
+            result.objectives.push_back({"score", index == 0 ? 100.0 : 90.0, true});
+            result.constraints.push_back({"soft", ConstraintKind::Soft,
+                                          ConstraintRelation::LessEqual, 0.0, 0.0,
+                                          1.0, index == 0 ? 0.5 : 0.0,
+                                          index == 0 ? 0.5 : 0.0, index != 0, 0});
+            results.push_back(std::move(result));
+        }
+        return results;
+    }
+};
+
 OptimizationConfig test_config() {
     OptimizationConfig config;
     config.population_size = 12;
@@ -208,7 +234,7 @@ OptimizationConfig test_config() {
 TEST_CASE("single objective optimizer honors maximize and minimize directions") {
     auto max_evaluator = std::make_shared<ScoreEvaluator>(true);
     auto max_config = test_config();
-    max_config.max_generations = 2;
+    max_config.max_generations = 1;
     const auto maximum = GeneticOptimizer(one_variable_schema(), max_evaluator, max_config).optimize();
     REQUIRE(maximum.termination.reason == TerminationReason::MaxGenerations);
     REQUIRE(maximum.pareto_front.size() == 1);
@@ -220,9 +246,12 @@ TEST_CASE("single objective optimizer honors maximize and minimize directions") 
     REQUIRE(minimum.pareto_front.size() == 1);
     REQUIRE(minimum.best_by_objective.count("score") == 1);
     const auto min_value = minimum.best_by_objective.at("score").objectives.front().value;
-    CHECK(max_value >= min_value);
-    CHECK(maximum.best_by_objective.at("score").objectives.front().maximize);
-    CHECK_FALSE(minimum.best_by_objective.at("score").objectives.front().maximize);
+    REQUIRE(max_evaluator->evaluated_values == min_evaluator->evaluated_values);
+    CHECK(max_value == *std::max_element(max_evaluator->evaluated_values.begin(),
+                                         max_evaluator->evaluated_values.end()));
+    CHECK(min_value == *std::min_element(min_evaluator->evaluated_values.begin(),
+                                         min_evaluator->evaluated_values.end()));
+    CHECK(max_value > min_value);
 }
 
 TEST_CASE("single objective optimizer is deterministic and preserves elites") {
@@ -255,7 +284,7 @@ TEST_CASE("single objective optimizer supports target, evaluation, and no-improv
     TerminationConfig budget;
     budget.max_evaluations = config.population_size - 1;
     const auto budget_result = GeneticOptimizer(one_variable_schema(), budget_evaluator, config, budget).optimize();
-    CHECK(budget_result.termination.reason == TerminationReason::MaxGenerations);
+    CHECK(budget_result.termination.reason == TerminationReason::MaxEvaluations);
     CHECK(genetic_termination_reason(budget_result.termination) == GeneticTerminationReason::MaxEvaluations);
     CHECK(budget_result.statistics.evaluations <= budget.max_evaluations);
     CHECK(budget_result.statistics.failed_evaluations == 0);
@@ -267,6 +296,18 @@ TEST_CASE("single objective optimizer supports target, evaluation, and no-improv
     const auto converged = GeneticOptimizer(one_variable_schema(), stagnant_evaluator, config, stagnant).optimize();
     CHECK(converged.termination.reason == TerminationReason::Converged);
     CHECK(converged.statistics.generations == 2);
+}
+
+TEST_CASE("evaluation budget uses a structured termination reason") {
+    auto evaluator = std::make_shared<ScoreEvaluator>();
+    auto config = test_config();
+    TerminationConfig termination;
+    termination.max_evaluations = config.population_size - 1;
+
+    const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config, termination).optimize();
+
+    CHECK(result.termination.reason == TerminationReason::MaxEvaluations);
+    CHECK(result.termination.message == "evaluation budget exhausted");
 }
 
 TEST_CASE("optimizer isolates direct batch exceptions by retrying candidates in order") {
@@ -284,14 +325,22 @@ TEST_CASE("optimizer isolates direct batch exceptions by retrying candidates in 
 
 TEST_CASE("optimizer isolates unknown batch exceptions and preserves successful siblings") {
     auto config = test_config();
+    config.population_size = 4;
     config.max_generations = 1;
     UnknownExceptionEvaluator evaluator;
 
     const auto result = GeneticOptimizer(one_variable_schema(), evaluator, config).optimize();
 
+    CHECK(result.termination.reason == TerminationReason::MaxGenerations);
     CHECK(result.statistics.evaluations == config.population_size);
-    CHECK(result.statistics.successful_evaluations == config.population_size);
-    CHECK(result.statistics.failed_evaluations == 0);
+    CHECK(result.statistics.successful_evaluations == config.population_size - 1);
+    CHECK(result.statistics.failed_evaluations == 1);
+    CHECK(evaluator.singleton_calls == config.population_size);
+    REQUIRE(evaluator.successful_values.size() == config.population_size - 1);
+    REQUIRE(result.pareto_front.size() == 1);
+    REQUIRE(result.best_by_objective.count("score") == 1);
+    CHECK(result.best_by_objective.at("score").objectives.front().value ==
+          *std::max_element(evaluator.successful_values.begin(), evaluator.successful_values.end()));
 }
 
 TEST_CASE("single objective convenience API forces single objective routing") {
@@ -392,4 +441,28 @@ TEST_CASE("single objective optimizer keeps feasible incumbent ahead of infeasib
     const auto& best = result.best_by_objective.at("score");
     CHECK(best.objectives.front().value == doctest::Approx(1.0));
     CHECK(is_feasible(best.constraints));
+}
+
+TEST_CASE("spec objective scale participates in scalar penalty comparisons") {
+    auto config = test_config();
+    config.population_size = 2;
+    config.max_generations = 1;
+    config.elite_count = 0;
+    config.crossover_rate = 0.0;
+    config.mutation_rate = 0.0;
+    FeasibilityComparator penalty(FeasibilityStrategy::Penalty, 1.0);
+
+    auto implicit = std::make_shared<SoftPenaltyWinnerEvaluator>();
+    const auto legacy = GeneticOptimizer(one_variable_schema(), implicit, config, {}, penalty).optimize();
+
+    auto scaled = std::make_shared<SoftPenaltyWinnerEvaluator>();
+    ProblemSpec spec(one_variable_schema(), {{"score", true, 100.0}},
+                     {{"soft", ConstraintKind::Soft, ConstraintRelation::LessEqual,
+                       0.0, 0.0, 1.0, 0}});
+    const auto declared = GeneticOptimizer(spec, scaled, config, {}, penalty).optimize();
+
+    REQUIRE(legacy.best_by_objective.count("score") == 1);
+    REQUIRE(declared.best_by_objective.count("score") == 1);
+    CHECK(legacy.best_by_objective.at("score").objectives.front().value == doctest::Approx(100.0));
+    CHECK(declared.best_by_objective.at("score").objectives.front().value == doctest::Approx(90.0));
 }

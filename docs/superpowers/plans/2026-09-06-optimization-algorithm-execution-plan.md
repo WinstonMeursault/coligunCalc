@@ -182,18 +182,30 @@
 - **目标：** 完成端到端验证、性能基线和效果报告。
 - **写集：** `tests/test_optimization_integration.cpp`、`tests/bench_optimization.cpp`、`docs/benchmarks/optimization-*.md`。
 - **依赖：** OPT-T11。
-- **验证命令：** `cmake --preset ninja-debug`、`cmake --build --preset ninja-debug`、`ctest --preset debug`；另行运行优化 benchmark。
+- **验证命令：** `cmake --preset cpu-debug`、`cmake --build --preset cpu-debug`、`ctest --preset cpu-debug`；CUDA 验证使用匹配的 `cuda-debug` configure/build/CTest preset；另行运行优化 benchmark。
 - **验证内容：** 固定线圈炮 workload；记录 setup、first-step、warm-up、steady-state；比较 CPU/GPU batch；记录 seed、评估次数、缓存命中、失败、fallback、末速度和 Reference 复核误差。
 - **退出条件：** 全量相关测试通过；结果可复现；数值差异在既有容差内；性能回退有明确接受、延期或回滚决定。
 - **Commit：** `Validate optimization workflow`
 
-### Block E Gate
+### Block E Gate（历史 OPT-T11/OPT-T12 gate；不是当前 B-T4/分支最终 gate）
 
-- [ ] 构建、lint/typecheck（若项目提供）和相关测试通过。
-- [ ] 双语 API 文档同步。
-- [ ] benchmark 原始数据和环境信息已保存。
-- [ ] 至少一个可行优化结果通过 Reference 复核。
-- [ ] 没有未经记录的 Critical/Important 风险。
+- [x] 构建、lint/typecheck（若项目提供）和相关测试通过。
+- [x] 双语 API 文档同步。
+- [x] benchmark 原始数据和环境信息已保存。
+- [x] 至少一个可行优化结果通过 Reference 复核。
+- [x] 没有未经记录的 Critical/Important 风险。
+
+以上勾选只表示原始 OPT-T1…OPT-T12 写集的证据已保存；A/B next-phase 的
+B-T4 benchmark 和 whole-branch review 仍须单独完成。
+
+### 7.1 实现范围附录（2026-09-17）
+
+本计划最初只描述了通用 GA/NSGA-II 及可注入 GPU 回调。后续质量与 CUDA
+批量任务已实现生产 `CudaBatchEvaluator`：第一版限定固定几何、Euler、
+`OptimizationLevel::Full`，禁用 CUDA 热优化指标，并有意排除 `PeakCurrent`
+作为生产 fitness（B-T1 的 5–8% 短缺仍保留为历史风险）。统计中的缓存和 CUDA
+字段由运行期 collector 拥有，评估器自身的 snapshot 仍是生命周期累计值。
+这些是已实现范围扩展，不代表 B-T4 benchmark 或整个分支已完成。
 
 ## 8. 集成顺序与回滚
 
@@ -270,7 +282,7 @@ TDD 测试写集属于对应 Task，不单独拆成“事后补测试” commit�
 - [ ] 用户已确认设计文档和本执行计划。
 - [ ] 当前 branch 与设计适用 branch 一致。
 - [ ] `.git/index` 可写且可创建 lock 文件；不能提交时不得启动实现 wave。
-- [ ] `cmake --preset ninja-debug`、构建和基础 `ctest` 能运行，依赖状态已记录。
+- [x] `cmake --preset cpu-debug`、构建和基础 `ctest` 能运行，依赖状态已记录；CUDA 使用 `cuda-debug`。
 - [ ] CUDA 是否可用已记录；GPU workload 的资源锁策略已启用。
 - [ ] Controller 已为每个 Task 准备 brief、report 和 review package 路径。
 - [ ] 每个 Task 的英文 commit message 已固定，不在实现过程中临时改名。
