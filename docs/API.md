@@ -26,6 +26,34 @@ Link against the static library:
 target_link_libraries(your_target PRIVATE coilgun)
 ```
 
+The umbrella header also exposes the optimization API. A minimal custom
+problem can be evaluated and its result selected without including any
+optimization subheader:
+
+```cpp
+#include <coilgun/coilgun.hpp>
+
+class ScoreProblem final : public coilgun::optimization::OptimizationProblem {
+public:
+    coilgun::optimization::EvaluationResult evaluate(
+        const coilgun::optimization::CandidateVariables&) const override {
+        auto result = coilgun::optimization::EvaluationResult::success();
+        result.objectives.push_back({"score", 1.0, true});
+        return result;
+    }
+};
+
+ScoreProblem problem;
+auto schema = coilgun::optimization::VariableSchema({
+    coilgun::optimization::VariableSpec::continuous("x", 0.0, 1.0)});
+auto config = coilgun::optimization::OptimizationConfig::defaults();
+config.population_size = 20;
+config.max_generations = 10;
+const auto result = coilgun::optimization::GeneticOptimizer(schema, problem, config).run();
+const auto representative =
+    result.select_representative(coilgun::optimization::MaxObjective{"score"});
+```
+
 For one-off scripts you can also compile directly against the static lib:
 
 ```sh
@@ -39,6 +67,7 @@ g++ -std=c++20 -fopenmp -Iinclude your_file.cpp build/src/libcoilgun.a -o your_b
 | `coilgun::physics` | Physical constants, elliptic integrals, Struve functions, quadrature, self/mutual inductance, LRU cache, lookup tables |
 | `coilgun::components` | DrivingCoil and Armature classes |
 | `coilgun::simulation` | Simulation engine: time steppers, excitation models, termination, trigger config, SimState/MultiStageState, SingleStageSim, MultiStageSim |
+| `coilgun::optimization` | Variable schemas, objective/constraint definitions, evaluators, genetic and NSGA-II optimizers, optimization results, and representative selectors |
 | `coilgun::physics::detail` | Internal helpers (lookup table data) — do not rely on these |
 
 ### API Contract, Ownership, and Errors
@@ -136,14 +165,188 @@ include/coilgun/
 │   ├── trigger_config.hpp      — TriggerMode, TriggerConfig
 │   ├── multi_stage_result.hpp  — StepSnapshot, MultiStageStep, PerStageSummary, MultiStageSummary, MultiStageResult
 │   └── multi_stage_sim.hpp     — OptimizationLevel, MultiStageState, MultiStageSim<StepperPolicy>
+├── optimization/               — public optimization framework and coilgun adapter
 └── coilgun.hpp                 — convenience umbrella header
 ```
+
+### Optimization
+
+The CPU optimization API is available through `<coilgun/coilgun.hpp>` or
+through the individual headers under `coilgun/optimization/`. The CUDA batch
+adapter is additionally available through `<coilgun/coilgun_cuda.hpp>` or
+`coilgun/optimization/cuda_batch_evaluator.hpp`. `OptimizationProblem`
+and `BatchEvaluator` define evaluation boundaries; `GeneticOptimizer` produces
+`OptimizationResult` values containing the Pareto
+front. Use `MaxObjective`, `MinConstraintViolationMargin`, `IdealPointDistance`,
+`WeightedScore`, or `LexicographicObjectives` to explicitly select a
+representative candidate. Selectors do not mutate the result.
+
+The public contract can be composed directly from the optimization headers:
+
+```cpp
+ProblemSpec spec(
+    VariableSchema({VariableSpec::continuous("voltage", 450.0, 550.0)}),
+    {ObjectiveDefinition{"muzzle_velocity", true, 1.0}},
+    [](const CandidateVariables& candidate) { return candidate; });
+const auto result = GeneticOptimizer(spec, evaluator).run();
+const auto& pareto = result.pareto_front;
+```
+
+`ProblemSpec` is the immutable run contract. It owns a `VariableSchema`,
+ordered `ObjectiveDefinition` and `ConstraintDefinition` values, and a
+callable `RepairPolicy`. `VariableSpec` supports continuous, integer, and enum
+variables; repair clamps continuous values, rounds and bounds integer values,
+and validates enum indices. Objectives declare an ID, maximize/minimize
+direction, and scale. Constraints declare an ID, `Hard` or `Soft` kind,
+`Equal`, `LessEqual`, `GreaterEqual`, or `InRange` relation, bounds, scale,
+and priority. The custom repair policy runs before schema invariant repair;
+duplicate or malformed definitions are rejected at construction.
+
+`SelectionStrategy::Auto` routes one declared objective to the scalar genetic
+algorithm (`SingleObjective`) and two or more objectives to NSGA-II (`NSGA2`).
+Explicit strategy/objective-count mismatches are `ConfigurationError`. NSGA-II
+does not support `max_no_improvement_generations` and rejects that configuration
+before evaluation. Objective IDs/directions and the constraint schema are
+frozen for each run. Termination reasons are `MaxGenerations`, `TargetReached`,
+`Converged`, `Cancelled`, `ConfigurationError`, `EvaluationFailure`, or
+`MaxEvaluations`.
+
+Multi-objective runs return the Pareto front only; representative selection is
+an explicit caller action through `select_representative(...)`. Supported
+selectors are `MaxObjective`, `MinConstraintViolationMargin`,
+`IdealPointDistance`, `WeightedScore`, `LexicographicObjectives`, and
+`CallbackSelector`/`CustomSelector`. Selectors validate objective IDs,
+positional objective count/order, directions, and weight vectors; unknown IDs,
+malformed vectors, or inconsistent positional schemas throw `std::invalid_argument`;
+schema/enum index access outside a container uses `std::out_of_range`. Selection
+returns a copy and never mutates the Pareto front.
+
+`optimize_single_objective(...)` always selects the `SingleObjective` strategy
+and reports `ConfigurationError` when the evaluator returns anything other
+than one objective. `OptimizationStatistics` records the configured run
+`seed`, attempted `evaluations`, successful and failed evaluations,
+`skipped_due_to_budget`, cache hits, actual `gpu_fallbacks`, generation count,
+and elapsed evaluation time. Candidates skipped because `max_evaluations` was
+exhausted are left `Unevaluated`; they are not failures.
+
+`EvaluationCacheIdentity` is immutable after construction and requires non-empty
+namespace and result-schema version fields, exposed read-only as `namespace_id`
+and `version`. `make_cache_key(identity, variables, context)` keeps results from
+different evaluator semantics separate; the legacy overload uses
+`coilgun.optimization.legacy` version `1`. `BatchEvaluator::cache_identity()`
+is evaluator-owned. `CoilgunOptimizationProblem` includes a complete
+length-delimited physical/configuration fingerprint (including callback
+generation), and `CudaBatchEvaluator` extends it with backend and fallback
+policy. The optimizer owns a fresh run-local statistics snapshot:
+`seed` is the configured random seed; `evaluations` counts submitted,
+non-skipped candidates; `successful_evaluations` and `failed_evaluations` count
+final statuses; `skipped_due_to_budget` counts `Unevaluated` candidates;
+`generations` counts evaluated generations; and `elapsed_seconds` is end-to-end
+optimizer wall time. `cache_hits` and CUDA fields are contributed by the active
+run's `EvaluationStatisticsCollector`; lifetime `statistics_snapshot()` values
+remain cumulative compatibility data and are not carried into later runs.
+
+`BatchEvaluationSnapshot` is the lifetime-safe pairing of one cache identity
+and one batch-evaluation callable. `BatchEvaluator::evaluation_snapshot()` is
+the final lifecycle boundary (legacy evaluators still work through its default
+protected `make_evaluation_snapshot` hook); the returned snapshot may be
+copied, saved, or called asynchronously. A snapshot retains a strong
+`std::shared_ptr` owner until the snapshot is released, so active calls cannot
+observe a partially destroyed evaluator. Calling the final boundary on an
+unmanaged evaluator is rejected with `std::logic_error` and the stable message
+`BatchEvaluator::evaluation_snapshot requires shared ownership`; it never
+returns a callable that captures a raw `this`. Stateful built-ins capture
+callback/configuration state under their normal mutexes and release those
+mutexes before evaluation. The snapshot boundary itself adds no long-held
+evaluator lock; `CachedBatchEvaluator`, `StatisticsBatchEvaluator`,
+`CoilgunOptimizationProblem`, and CUDA/legacy evaluators retain their identity,
+`CudaBatchEvaluator` also owns an immutable copy of the source problem's schema
+and configuration, so its snapshot and CPU fallback do not borrow the source
+problem. A no-op-deleter or aliasing `shared_ptr` does not provide this contract;
+use a real owning `std::make_shared` evaluator.
+
+Generic evaluator statistics mean uncached delegate `evaluations`, successful
+and failed statuses, `cache_hits`, `fallbacks`, `seed`, and sanitized
+non-negative `elapsed_seconds`. CUDA fields mean locally valid rows requested,
+real GPU-executed rows, GPU successes/failures before repair, CPU repair rows,
+batch attempts, failed batch attempts, one `gpu_fallbacks` event per affected
+batch, transfer seconds, measured CUDA pipeline seconds, and host elapsed
+seconds respectively. Specifically, `gpu_kernel_seconds` is
+`ExecutionReport::gpu_time_ms / 1000`, not a pure kernel-event timer. Cache
+hits add no GPU request or batch count, and wrappers do not duplicate CUDA
+fields.
+
+`OptimizationStatistics::gpu_fallbacks` is a compatibility alias with explicit
+precedence: when the run-local collector reports a non-zero
+`gpu_fallbacks`, that value wins; otherwise the optimizer uses the legacy
+collector `fallbacks` value. A contributor that reports both is not added twice.
+This fallback preserves older evaluator implementations without conflating
+ordinary evaluation failures with actual GPU backend fallback events.
+
+`CudaBatchEvaluator` exposes an explicit `CudaFallbackPolicy`: `Strict` is the
+default, while `PerCandidateCpu` and `WholeBatchCpu` opt into CPU repair of
+CUDA row or batch failures. Locally `Invalid` candidates are never submitted
+or repaired, and result-count/order mismatches are protocol errors that are
+never repaired. Its run-local metrics are available through
+`EvaluationStatistics` and `OptimizationStatistics`: requested, executed,
+successful, and failed GPU rows; CPU fallback rows; CUDA batch and failed-batch
+counts; fallback events; transfer, measured CUDA pipeline, and host elapsed
+seconds. `gpu_kernel_seconds` is `ExecutionReport::gpu_time_ms` converted to
+seconds—the report's measured CUDA physical-pipeline time, not a pure kernel
+event timer. Cache hits add no GPU request or batch counts, and wrappers
+forward these CUDA-owned fields without duplication.
+
+`BatchEvaluator::statistics_snapshot()` is an optional cumulative compatibility
+interface. `StatisticsBatchEvaluator` and `CachedBatchEvaluator` implement it
+and preserve a wrapped evaluator's actual fallback count through nested
+wrappers. The optimizer uses a fresh run-local
+`EvaluationStatisticsCollector` for each run; it does not derive run results
+from a before/after delta of the evaluator's lifetime snapshot. Reusing an
+evaluator therefore does not carry cache hits, fallbacks, or elapsed time into
+a later result. In
+`CoilgunOptimizationProblem`, `gpu_fallbacks` increases only when its injected
+GPU batch callback throws or produces malformed batch output and evaluation
+continues on the CPU; merely requesting a GPU callback does not count as a
+fallback.
+
+`CoilgunOptimizationProblem` bindings cover coil geometry/turns/position,
+excitation voltage/capacitance, trigger values, and armature position/velocity;
+`ArmatureMass` bindings are rejected. Its metrics are terminal/muzzle velocity,
+maximum temperature, peak current, peak voltage, efficiency, and energy loss.
+Thermal constraints require `enable_thermal`, and all objective/metric values
+must be finite. `CudaBatchEvaluator` currently supports one fixed shared
+geometry and armature, excitation voltage, positive capacitance, and trigger
+bindings, with one `SimBatch<EulerStepper>` invocation at
+`OptimizationLevel::Full`. Geometry,
+armature-mass, arbitrary-geometry, thermal, `RK4`, and non-`Full` candidates
+are rejected. `CudaFallbackPolicy::Strict` is the default; `PerCandidateCpu`
+repairs failed rows individually and `WholeBatchCpu` repairs the whole eligible
+batch. Local `Invalid` rows are never submitted or repaired; result count/order
+mismatches are protocol errors and never repaired. `PeakCurrent` is intentionally
+excluded as a production objective/constraint because B-T1 measured a
+reproducible 5–8% CUDA shortfall, though it remains diagnostic metadata.
+
+GPU validation must prove `ExecutionReport::gpu_executed == true` and a
+resolved backend other than `BackendMode::Fallback`; a requested backend alone
+does not prove device execution.
+
+The CMake install always exports `coilgun::coilgun` and installs the CPU and
+optimization headers. When CUDA is enabled, it also exports
+`coilgun::coilgun_cuda` and installs `coilgun_cuda.hpp`, the CUDA headers, and
+the CUDA batch adapter header. Build-tool sources remain source-tree
+interfaces. Consumers can use `find_package(coilgun CONFIG REQUIRED)` and
+link the target matching the enabled backend.
+
+CPU-only installations expose optimization through `coilgun::coilgun` and do
+not install the CUDA batch adapter. CUDA installations additionally export
+`coilgun::coilgun_cuda` and install the CUDA adapter and CUDA headers.
 
 `coilgun/coilgun.hpp` includes the complete CPU API listed above. The CUDA
 umbrella `coilgun/coilgun_cuda.hpp` includes that CPU umbrella plus
 `gpu_backend.hpp`, `gpu_execution_config.hpp`, `gpu_execution_report.hpp`,
 `gpu_state_layout.hpp`, `gpu_engine.hpp`, `gpu_single_stage_sim.hpp`,
-`gpu_multi_stage_sim.hpp`, and `sim_batch.hpp`. The following headers are
+`gpu_multi_stage_sim.hpp`, `sim_batch.hpp`, and
+`optimization/cuda_batch_evaluator.hpp`. The following headers are
 advanced CUDA/device interfaces and are intentionally not transitively
 included by the CUDA umbrella: `gpu_execution_context.hpp`, `gpu_graph.hpp`,
 `gpu_solver.hpp`, `gpu_thermal.hpp`, `gpu_mutual_pipeline.hpp`,

@@ -7,6 +7,7 @@ if(NOT doctest_FOUND)
     URL https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz
     URL_HASH SHA256=174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331
   )
+  set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(doctest)
 endif()
 
@@ -42,6 +43,49 @@ add_coilgun_test(test_gpu_thermal_cpu)
 add_coilgun_test(test_simulation_contracts)
 add_coilgun_test(test_input_validation)
 add_coilgun_test(test_cpu_phase_timing)
+add_coilgun_test(test_optimization_types)
+add_coilgun_test(test_optimization_constraints)
+add_coilgun_test(test_optimization_variables)
+add_coilgun_test(test_optimization_operators)
+add_coilgun_test(test_optimization_evaluator)
+add_coilgun_test(test_optimization_statistics)
+add_coilgun_test(test_optimization_single)
+add_coilgun_test(test_optimization_nsga2)
+add_coilgun_test(test_optimization_routing)
+add_coilgun_test(test_coilgun_optimization)
+add_coilgun_test(test_optimization_selectors)
+add_coilgun_test(test_optimization_public_api)
+add_coilgun_test(test_optimization_integration)
+add_coilgun_test(test_optimization_problem_spec)
+set_tests_properties(test_optimization_integration PROPERTIES
+    LABELS "validation;quick;integration" TIMEOUT 300)
+
+add_executable(bench_optimization EXCLUDE_FROM_ALL bench_optimization.cpp)
+target_link_libraries(bench_optimization PRIVATE coilgun)
+target_include_directories(bench_optimization PRIVATE ${CMAKE_SOURCE_DIR}/include)
+execute_process(COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE OPTIMIZATION_BENCH_BASE_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND git status --porcelain --untracked-files=normal
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE OPTIMIZATION_BENCH_STATUS
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(OPTIMIZATION_BENCH_STATUS STREQUAL "")
+    set(OPTIMIZATION_BENCH_WORKTREE_STATE "clean")
+else()
+    set(OPTIMIZATION_BENCH_WORKTREE_STATE "dirty")
+endif()
+string(TOLOWER "${CMAKE_BUILD_TYPE}" OPTIMIZATION_BENCH_BUILD_TYPE)
+if(COILGUN_ENABLE_CUDA)
+    set(OPTIMIZATION_BENCH_BACKEND "cuda")
+else()
+    set(OPTIMIZATION_BENCH_BACKEND "cpu")
+endif()
+target_compile_definitions(bench_optimization PRIVATE
+    OPTIMIZATION_BENCH_SOURCE_REVISION="${OPTIMIZATION_BENCH_BASE_COMMIT}"
+    OPTIMIZATION_BENCH_WORKTREE_STATE="${OPTIMIZATION_BENCH_WORKTREE_STATE}"
+    OPTIMIZATION_BENCH_PRESET="${OPTIMIZATION_BENCH_BACKEND}-${OPTIMIZATION_BENCH_BUILD_TYPE}")
 add_validation_test(test_coupled_integrator)
 
 if(COILGUN_BUILD_GENERATOR_TESTS)
@@ -80,6 +124,31 @@ if(COILGUN_ENABLE_CUDA)
     add_gpu_test(test_gpu_vs_cpu_multi)
     add_gpu_test(test_gpu_batch)
     add_gpu_test(test_gpu_sim_batch)
+    add_gpu_test(test_gpu_optimization_baseline)
+    add_gpu_test(test_cuda_batch_evaluator)
+    add_executable(bench_gpu_optimization_workflow bench_gpu_optimization_workflow.cpp)
+    target_link_libraries(bench_gpu_optimization_workflow PRIVATE coilgun_cuda coilgun CUDA::cudart)
+    target_compile_definitions(bench_gpu_optimization_workflow PRIVATE EIGEN_MAX_ALIGN_BYTES=32)
+    target_include_directories(bench_gpu_optimization_workflow PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    execute_process(COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GPU_WORKFLOW_BENCH_SOURCE_REVISION
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND git status --porcelain --untracked-files=normal
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GPU_WORKFLOW_BENCH_WORKTREE_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(GPU_WORKFLOW_BENCH_WORKTREE_STATUS STREQUAL "")
+        set(GPU_WORKFLOW_BENCH_WORKTREE_STATE "clean")
+    else()
+        set(GPU_WORKFLOW_BENCH_WORKTREE_STATE "dirty")
+    endif()
+    target_compile_definitions(bench_gpu_optimization_workflow PRIVATE
+        OPTIMIZATION_BENCH_SOURCE_REVISION="${GPU_WORKFLOW_BENCH_SOURCE_REVISION}"
+        OPTIMIZATION_BENCH_WORKTREE_STATE="${GPU_WORKFLOW_BENCH_WORKTREE_STATE}"
+        OPTIMIZATION_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
+        OPTIMIZATION_BENCH_CMAKE_VERSION="${CMAKE_VERSION}"
+        OPTIMIZATION_BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
     add_gpu_test(test_gpu_solver)
     add_gpu_test(test_gpu_paths)
     add_gpu_test(test_gpu_graph)
@@ -105,6 +174,8 @@ set_tests_properties(test_single_stage_sim test_multi_stage_sim
 if(COILGUN_ENABLE_CUDA)
     set_tests_properties(test_gpu_vs_cpu_single test_gpu_vs_cpu_multi
         test_gpu_batch test_gpu_sim_batch test_gpu_precision
+        PROPERTIES LABELS "gpu;slow;integration" TIMEOUT 300)
+    set_tests_properties(test_gpu_optimization_baseline
         PROPERTIES LABELS "gpu;slow;integration" TIMEOUT 300)
 endif()
 

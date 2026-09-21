@@ -16,6 +16,7 @@
  *   - physics/mutual_inductance — filament-level & coil-level mutual inductance
  *   - components/driving_coil — multi-turn helical driving coil
  *   - components/armature — solid cylindrical armature (m x n filaments)
+ *   - optimization — variable schemas, evaluators, optimizers, results, and selectors
  */
 
 #pragma once
@@ -43,3 +44,22 @@
 #include "coilgun/simulation/trigger_config.hpp"
 #include "coilgun/simulation/multi_stage_result.hpp"
 #include "coilgun/simulation/multi_stage_sim.hpp"
+
+#include "coilgun/optimization/cache.hpp"
+#include "coilgun/optimization/coilgun_problem.hpp"
+#include "coilgun/optimization/comparator.hpp"
+#include "coilgun/optimization/config.hpp"
+#include "coilgun/optimization/constraint.hpp"
+#include "coilgun/optimization/evaluator.hpp"
+#include "coilgun/optimization/genetic_operators.hpp"
+#include "coilgun/optimization/genetic_optimizer.hpp"
+#include "coilgun/optimization/nsga2.hpp"
+#include "coilgun/optimization/objective.hpp"
+#include "coilgun/optimization/population.hpp"
+#include "coilgun/optimization/problem.hpp"
+#include "coilgun/optimization/result.hpp"
+#include "coilgun/optimization/selectors.hpp"
+#include "coilgun/optimization/statistics.hpp"
+#include "coilgun/optimization/termination.hpp"
+#include "coilgun/optimization/types.hpp"
+#include "coilgun/optimization/variables.hpp"

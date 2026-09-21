@@ -25,6 +25,7 @@ Armature::Armature(double inner_radius, double outer_radius, double length,
     , re_(outer_radius)
     , l_(length)
     , rho_(resistivity)
+    , material_density_(material_density)
     , m_(m_axial)
     , n_(n_radial)
     , x_(position)
@@ -34,6 +35,7 @@ Armature::Armature(double inner_radius, double outer_radius, double length,
     , dr_(0.0)
     , dl_(0.0)
     , nc_fil_(0.0)
+    , force_exact_self_inductance_(force_exact_self_inductance)
 {
     if (!std::isfinite(ri_) || ri_ < 0.0)
         throw std::invalid_argument("Armature inner_radius must be finite and non-negative");
@@ -155,6 +157,9 @@ const std::vector<double>& Armature::masses() const { return mass_; }
 double Armature::position() const { return x_; }
 double Armature::velocity() const { return v_; }
 double Armature::mass() const { return ma_; }
+double Armature::resistivity() const { return rho_; }
+double Armature::material_density() const { return material_density_; }
+bool Armature::force_exact_self_inductance() const { return force_exact_self_inductance_; }
 physics::ArmatureMaterial Armature::material() const { return material_; }
 
 void Armature::update_position(double dx) {

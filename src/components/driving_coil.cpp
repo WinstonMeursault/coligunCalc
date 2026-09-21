@@ -30,6 +30,7 @@ DrivingCoil::DrivingCoil(double inner_radius, double outer_radius, double length
     , nc_(0.0)
     , R_(0.0)
     , L_(0.0)
+    , force_exact_self_inductance_(force_exact_self_inductance)
 {
     if (!std::isfinite(ri_) || ri_ < 0.0)
         throw std::invalid_argument("DrivingCoil inner_radius must be finite and non-negative");
@@ -67,6 +68,10 @@ int    DrivingCoil::turns() const { return n_; }
 double DrivingCoil::turns_density() const { return nc_; }
 double DrivingCoil::resistance() const { return R_; }
 double DrivingCoil::self_inductance() const { return L_; }
+double DrivingCoil::resistivity() const { return rho_; }
+double DrivingCoil::wire_area() const { return wire_area_; }
+double DrivingCoil::fill_factor() const { return k_fill_; }
+bool DrivingCoil::force_exact_self_inductance() const { return force_exact_self_inductance_; }
 
 double DrivingCoil::position() const { return x_; }
 void DrivingCoil::set_position(double x) {

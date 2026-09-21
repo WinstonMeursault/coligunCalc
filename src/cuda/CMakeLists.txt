@@ -13,6 +13,7 @@ add_library(coilgun_cuda STATIC
     gpu_thermal.cu
     gpu_engine.cu
     gpu_graph.cu
+    cuda_batch_evaluator.cu
 )
 
 target_include_directories(coilgun_cuda
@@ -39,6 +40,12 @@ target_compile_definitions(coilgun_cuda
 
 target_compile_options(coilgun_cuda
     PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xcompiler=-march=native>
+)
+
+install(TARGETS coilgun_cuda
+    EXPORT coilgunTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 # Compile/link smoke for the context itself without adding a test-suite file.

@@ -55,6 +55,14 @@ public:
     double resistance() const;
     /// @brief Self-inductance (H), precomputed at construction.
     double self_inductance() const;
+    /// @brief Wire resistivity (ohm·m).
+    double resistivity() const;
+    /// @brief Wire cross-sectional area (m²).
+    double wire_area() const;
+    /// @brief Winding fill factor.
+    double fill_factor() const;
+    /// @brief Whether reference-grade self-inductance was requested.
+    bool force_exact_self_inductance() const;
 
     /// @brief Current axial position of the coil centre (m).
     double position() const;
@@ -70,6 +78,7 @@ private:
     double nc_;
     double R_;
     double L_;
+    bool force_exact_self_inductance_;
 };
 
 } // namespace coilgun::components
